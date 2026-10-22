@@ -1,0 +1,40 @@
+diff --git a/docs/modules/capport.md b/docs/modules/capport.md
+index 7173e5e..feb9155 100644
+--- a/docs/modules/capport.md
++++ b/docs/modules/capport.md
+@@ -23,6 +23,14 @@ Guest source IP, configured site, CAPPORT API/login request.
+ 
+ application/captive+json state, redirect/login response или controlled error.
+ 
++Если `/capport/login` временно не может определить client, endpoint
++возвращает HTTP 200 с режимом `CAPPORT_DISCOVERY`, не создавая AuthSession и
++не запуская AuthWorker. Страница повторяет lookup полной навигацией через
++`window.location.replace()` каждые две секунды в пределах server-bounded
++deadline до 60 секунд; после истечения доступен ручной retry. После обнаружения
++client запрос входит в штатный `PortalClientContext → AuthSessionManager →
++AuthWorker` flow.
++
+ ## 6. Основные модели
+ 
+ CapportConfig, CapportClient, CapportState, CapportService.
+@@ -55,6 +63,9 @@ capport.api_request, client_resolved/not_found, lookup_failed, state_response, p
+ 
+ Service/blueprint создаются в create_app() с общим controller.
+ 
++Бесшовный discovery на одной открытой странице через `fetch()` не входит в
++текущий контракт и отложен до оценки production-эффекта текущей реализации.
++
+ ## 14. Тесты
+ 
+ tests/test_capport_routes.py, test_capport_service.py, test_capport_telemetry.py, test_proxy_headers.py.
+diff --git a/docs/project-inventory.md b/docs/project-inventory.md
+index 74095cb..7c8d9cd 100644
+--- a/docs/project-inventory.md
++++ b/docs/project-inventory.md
+@@ -137,5 +137,6 @@ Shutdown:
+ 3. `outputs/omada-webhook-normalized.alloy` — infrastructure artifact; ownership подтверждается отдельным TASK.
+ 4. GitHub commit `227ebe9` не имеет attached Actions workflow runs/status checks; test evidence хранится вне GitHub CI и требует повторяемого Linux gate.
+ 5. В Cleaner token-expiry recovery после compare-and-invalidate выполняется дополнительная no-argument invalidation; concurrent refresh window и запрет очистки свежего AuthWorker token отдельным test не покрыты.
++6. CAPPORT client discovery каждые две секунды выполняет полную навигацию через `window.location.replace()`; бесшовный переход на одной открытой странице через `fetch()` требует отдельного TASK. До следующего сбора долгов сохраняется текущая реализация и наблюдается её влияние на число неавторизованных пользователей.
+ 
+ Эти пункты не исправляются documentation TASK без отдельного разрешения.

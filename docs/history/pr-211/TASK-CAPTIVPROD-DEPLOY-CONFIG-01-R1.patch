@@ -1,0 +1,906 @@
+diff --git a/.env.example b/.env.example
+index 139d7f2bef3f85673c37b47120572fc0330c0f94..ff26448c4e738d5ad4be1ed5f2d7ceedcc0f65ff 100644
+--- a/.env.example
++++ b/.env.example
+@@ -7,6 +7,19 @@ OMADA_CLIENT_ID=
+ OMADA_CLIENT_SECRET=
+ OMADA_WEBHOOK_SITE_ID_MAP_JSON={}
+ 
++# Optional Core/CAPPORT deployment-owned startup overrides (not Admin Settings).
++# This example is NOT automatically loaded. Leave absent to keep repository defaults.
++# HOST=127.0.0.1
++# PORT=8088
++# CAPPORT_SITE_ID=<operator-verified-24-lowercase-hex>  # placeholder, not a valid value
++# CAPPORT_PUBLIC_BASE_URL=https://captivportal-navi.duckdns.org
++# CAPPORT_ALLOWED_CLIENT_NETWORKS=192.168.1.0/24,192.168.8.0/22
++# HOST permits exact loopback or canonical RFC1918 IPv4 only; no wildcard.
++# PORT is canonical decimal 1024..65535. Site defaults are documented in configuration.md.
++# CAPPORT origin: HTTPS DNS only, optional canonical port and final slash.
++# Guest CIDRs: 1..16 strict canonical IPv4/IPv6 networks, no spaces/duplicates or /0.
++# Changes require separately authorized restart and ingress/network readiness proof.
++
+ # Authorized Client Snapshot Collector.
+ # CaptivePortal does not load this file automatically; production values
+ # are supplied by the process environment or systemd.
+diff --git a/app/capport/models.py b/app/capport/models.py
+index f8dc37296de15a1300de63def26a200259b65ede..c3f6e55c25f248e236775f4eb489aabf41689bea 100644
+--- a/app/capport/models.py
++++ b/app/capport/models.py
+@@ -3,7 +3,8 @@
+ import ipaddress
+ from dataclasses import dataclass
+ from typing import Any
+-from urllib.parse import urlsplit
++from app.config import (_validate_capport_site_id, _normalize_capport_public_base_url,
++                        _validate_capport_allowed_network_values)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -48,10 +49,8 @@ class CapportConfig:
+ 
+     @classmethod
+     def from_settings(cls, settings: dict[str, Any]) -> "CapportConfig":
+-        site_id = str(settings.get("capport_site_id", "")).strip()
+-        base_url = str(
+-            settings.get("capport_public_base_url", "")
+-        ).rstrip("/")
++        site_id = _validate_capport_site_id(settings.get("capport_site_id", ""))
++        base_url = _normalize_capport_public_base_url(settings.get("capport_public_base_url", ""))
+         api_path = str(settings.get("capport_api_path", ""))
+         login_path = str(settings.get("capport_login_path", ""))
+         raw_networks = settings.get(
+@@ -81,17 +80,6 @@ class CapportConfig:
+                 "CAPPORT failure cache TTL must be a number"
+             ) from exc
+ 
+-        if not site_id:
+-            raise ValueError("CAPPORT_SITE_ID must not be empty")
+-
+-        parsed_url = urlsplit(base_url)
+-        if (
+-            parsed_url.scheme.lower() != "https"
+-            or not parsed_url.netloc
+-        ):
+-            raise ValueError(
+-                "CAPPORT_PUBLIC_BASE_URL must use https://"
+-            )
+         if not api_path.startswith("/"):
+             raise ValueError("CAPPORT_API_PATH must start with /")
+         if not login_path.startswith("/"):
+@@ -104,26 +92,10 @@ class CapportConfig:
+             raise ValueError(
+                 "CAPPORT_FAILURE_CACHE_TTL_SECONDS must be positive"
+             )
+-        if settings.get("host") != "127.0.0.1":
+-            raise ValueError(
+-                "CAPPORT requires HOST == 127.0.0.1"
+-            )
+-
+         if isinstance(raw_networks, str):
+             raw_networks = (raw_networks,)
+-        try:
+-            networks = tuple(
+-                ipaddress.ip_network(str(value), strict=False)
+-                for value in raw_networks
+-            )
+-        except (TypeError, ValueError) as exc:
+-            raise ValueError(
+-                "Invalid CAPPORT allowed client network"
+-            ) from exc
+-        if not networks:
+-            raise ValueError(
+-                "CAPPORT_ALLOWED_CLIENT_NETWORKS must not be empty"
+-            )
++        raw_networks = _validate_capport_allowed_network_values(raw_networks)
++        networks = tuple(ipaddress.ip_network(value, strict=True) for value in raw_networks)
+ 
+         return cls(
+             site_id=site_id,
+diff --git a/app/config.py b/app/config.py
+index fd96403e2a1e42794379095c87cd95ba92e52049..ba066ce624f64dd51edd4a841ef3691a6db4df7d 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -5,8 +5,109 @@ This module stores default values for the application.
+ """
+ 
+ import os
++import re
++import ipaddress
++from urllib.parse import urlsplit
+ from app.portal_presentation import PORTAL_SETTING_DEFAULTS
+ 
++
++def _parse_bind_host(value: str) -> str:
++    try:
++        if not isinstance(value, str):
++            raise ValueError
++        address = ipaddress.IPv4Address(value)
++        if str(address) != value or (value != "127.0.0.1" and not any(
++            address in ipaddress.IPv4Network(cidr)
++            for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
++        )):
++            raise ValueError
++        return value
++    except ValueError:
++        raise ValueError("HOST must be canonical loopback or RFC1918 IPv4") from None
++
++
++def _parse_bind_port(value: str) -> int:
++    if (not isinstance(value, str) or not 1 <= len(value) <= 5
++            or re.fullmatch(r"[1-9][0-9]*", value) is None
++            or not 1024 <= int(value) <= 65535):
++        raise ValueError("PORT must be canonical decimal in 1024..65535")
++    return int(value)
++
++
++def _validate_capport_site_id(value: str) -> str:
++    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{24}", value) is None:
++        raise ValueError("CAPPORT_SITE_ID must be canonical lowercase hex")
++    return value
++
++
++def _normalize_capport_public_base_url(value: str) -> str:
++    message = "CAPPORT_PUBLIC_BASE_URL must be a canonical HTTPS DNS origin"
++    if (not isinstance(value, str) or not value.isascii() or not value.startswith("https://")
++            or any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
++            or any(char in value for char in "%\\@?#[]")):
++        raise ValueError(message)
++    try:
++        parsed = urlsplit(value)
++        if (parsed.scheme != "https" or not parsed.netloc or parsed.username is not None
++                or parsed.password is not None or parsed.query or parsed.fragment
++                or parsed.path not in ("", "/")):
++            raise ValueError
++        authority = parsed.netloc.split(":")
++        if len(authority) not in (1, 2):
++            raise ValueError
++        host = authority[0]
++        if not 1 <= len(host) <= 253 or any(
++            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) is None
++            for label in host.split(".")
++        ):
++            raise ValueError
++        last_label = host.rsplit(".", 1)[-1]
++        if re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)", last_label) is not None:
++            raise ValueError
++        if re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", host) is not None:
++            raise ValueError
++        try:
++            ipaddress.IPv4Address(host)
++        except ValueError:
++            pass
++        else:
++            raise ValueError
++        port = ""
++        if len(authority) == 2:
++            raw_port = authority[1]
++            if (not 1 <= len(raw_port) <= 5 or re.fullmatch(r"[1-9][0-9]*", raw_port) is None
++                    or not 1 <= int(raw_port) <= 65535):
++                raise ValueError
++            port = ":" + raw_port
++        return "https://" + host.lower() + port
++    except ValueError:
++        raise ValueError(message) from None
++
++
++def _validate_capport_allowed_network_values(values: tuple[str, ...]) -> tuple[str, ...]:
++    message = "CAPPORT_ALLOWED_CLIENT_NETWORKS must contain 1..16 unique canonical CIDRs"
++    if not isinstance(values, tuple) or not 1 <= len(values) <= 16:
++        raise ValueError(message)
++    seen = set()
++    for value in values:
++        try:
++            if (not isinstance(value, str) or "/" not in value
++                    or any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)):
++                raise ValueError
++            network = ipaddress.ip_network(value, strict=True)
++            if str(network) != value or network.prefixlen == 0 or network in seen:
++                raise ValueError
++            seen.add(network)
++        except ValueError:
++            raise ValueError(message) from None
++    return values
++
++
++def _parse_capport_allowed_networks_csv(value: str) -> tuple[str, ...]:
++    if not isinstance(value, str):
++        raise ValueError("CAPPORT_ALLOWED_CLIENT_NETWORKS must be canonical CIDR CSV")
++    return _validate_capport_allowed_network_values(tuple(value.split(",")))
++
+ # GLOBAL guest-facing presentation; explicit environment bytes are validated later.
+ PORTAL_UI_TITLE_AZ = os.getenv("PORTAL_UI_TITLE_AZ", PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_AZ"])
+ PORTAL_UI_TITLE_RU = os.getenv("PORTAL_UI_TITLE_RU", PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_RU"])
+@@ -26,6 +127,10 @@ PORTAL_SUPPORT_FACEBOOK_URL = os.getenv("PORTAL_SUPPORT_FACEBOOK_URL", PORTAL_SE
+ # Server settings
+ HOST = "127.0.0.1"
+ PORT = 8088
++if "HOST" in os.environ:
++    HOST = _parse_bind_host(os.environ["HOST"])
++if "PORT" in os.environ:
++    PORT = _parse_bind_port(os.environ["PORT"])
+ 
+ # Debug mode
+ DEBUG = False
+@@ -745,6 +850,12 @@ CAPPORT_ALLOWED_CLIENT_NETWORKS = (
+     "192.168.1.0/24",
+     "192.168.8.0/22",
+ )
++if "CAPPORT_SITE_ID" in os.environ:
++    CAPPORT_SITE_ID = _validate_capport_site_id(os.environ["CAPPORT_SITE_ID"])
++if "CAPPORT_PUBLIC_BASE_URL" in os.environ:
++    CAPPORT_PUBLIC_BASE_URL = _normalize_capport_public_base_url(os.environ["CAPPORT_PUBLIC_BASE_URL"])
++if "CAPPORT_ALLOWED_CLIENT_NETWORKS" in os.environ:
++    CAPPORT_ALLOWED_CLIENT_NETWORKS = _parse_capport_allowed_networks_csv(os.environ["CAPPORT_ALLOWED_CLIENT_NETWORKS"])
+ CAPPORT_CLIENT_CACHE_TTL_SECONDS = 2
+ CAPPORT_FAILURE_CACHE_TTL_SECONDS = 2
+ 
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 726fc5ccd34e80aa90e574eb7777fb5933bc35ee..440483e4abab7e89587fe54edc8c427b97a5a254 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -34,6 +34,41 @@ Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
+ 
+ The application does not automatically load `.env.example`. Production values come from process environment/approved secret handling.
+ 
++## Core/CAPPORT deployment-owned startup configuration
++
++These five optional keys remain outside writable Admin Settings and SettingsStore.
++Absent keys preserve the old typed defaults. Explicit empty/invalid values fail
++startup with a key-specific generic error, never a fallback, even if CAPPORT is
++disabled. Parsing performs no interface, socket, Omada or network I/O.
++
++| Key | Default when absent | Explicit grammar / runtime type |
++| --- | --- | --- |
++| `HOST` | `127.0.0.1` | Exact `127.0.0.1` or canonical dotted RFC1918 IPv4; string. No wildcard, DNS, IPv6, public/link-local or loopback alias. |
++| `PORT` | `8088` | Canonical ASCII decimal `1024..65535`, no padding/sign/whitespace; integer. |
++| `CAPPORT_SITE_ID` | `6a64f17630da7c70d232187a` | Exactly 24 lowercase hex characters; unchanged string, verified by operator against the selected Omada Site. |
++| `CAPPORT_PUBLIC_BASE_URL` | `https://captivportal-navi.duckdns.org` | HTTPS ASCII DNS origin, optional canonical port `1..65535` and one final `/`; hostname lowercased and final slash removed. No IP literal/userinfo/path/query/fragment/escapes/control bytes. |
++| `CAPPORT_ALLOWED_CLIENT_NETWORKS` | `("192.168.1.0/24", "192.168.8.0/22")` | CSV of 1..16 unique exact canonical IPv4/IPv6 CIDRs without spaces, host bits or `/0`; tuple of strings. CAPPORT derives strict typed networks for its unchanged source-IP check. |
++
++`https://PORTAL.example:8443/` canonicalizes to `https://portal.example:8443`.
++Site IDs and CIDRs are not trimmed, casefolded, repaired or widened. The typed
++CAPPORT entrypoint also accepts a single CIDR string (not a CSV string) for
++historical direct-call compatibility. Only process environment supplies overrides;
++no dotenv loader, hot reload, new flag or Admin mutation is introduced. Activation
++requires a separately authorized restart.
++
++Independent Captiv-Prod examples `172.18.0.1:18089` and
++`https://captivprod-navi.duckdns.org` are not defaults or deployability proof.
++The existing VM/stores are untouched; this task introduces no data migration.
++SysAdmin must separately verify D01 interface/port/TLS/guest routing, D02 NPM-only
++default-deny isolation and forwarded-header sanitization, D03 actual Omada Site
++and OpenAPI permissions. One-hop ProxyFix is unchanged; unit tests cannot prove
++firewall/proxy isolation. `/.well-known/captive-portal` is not a new Flask route.
++
++Portal Fingerprint's independently pinned old Site/scope/evidence endpoint remains
++a separate compatibility HOLD for a new deployment. Sensor core-readiness defaults
++also remain independently configured; this task does not make Fingerprint/NI ready.
++See [CAPPORT](modules/capport.md) and [deployment](deployment.md).
++
+ ## Device Fingerprint Evidence (default disabled)
+ 
+ `DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false` is the repository default. The
+diff --git a/docs/deployment.md b/docs/deployment.md
+index 19b4c11b7289019c8f0031cf2266fc2b7bb2fc6a..37e4bc5e8b59ca5d990af755948be97f0dc7d2e1 100644
+--- a/docs/deployment.md
++++ b/docs/deployment.md
+@@ -1,5 +1,11 @@
+ # Deployment
+ 
++Core/CAPPORT optional deployment-owned bind/Site/origin/guest-scope inputs are
++documented in [configuration](configuration.md#corecapport-deployment-owned-startup-configuration).
++Code acceptance is separate from Captiv-Prod SysAdmin D01 interface/TLS/routing,
++D02 NPM-only isolation/header sanitization and D03 actual Omada permissions.
++These target gates are not claimed passed; no old-VM reconfiguration or data migration.
++
+ Status: current contract; production details remain host-verified
+ Updated: 2026-10-14
+ 
+diff --git a/docs/modules/capport.md b/docs/modules/capport.md
+index f0d491593df427c23b57193acdca859852dee91f..0a8cba503f14fba4004412979ef49ebeb55f53bd 100644
+--- a/docs/modules/capport.md
++++ b/docs/modules/capport.md
+@@ -54,3 +54,28 @@ separate AuthWorker, separate provider/token cache, bypass of common AuthSession
+ CAPPORT uses bounded process-local caches only. Service/blueprint are composed inside `create_app()` using the shared controller.
+ 
+ A CAPPORT failure must not break the ordinary Omada External Portal path.
++
++## Deployment-owned inputs
++
++`CAPPORT_SITE_ID`, `CAPPORT_PUBLIC_BASE_URL` and
++`CAPPORT_ALLOWED_CLIENT_NETWORKS` may be provided in the process environment at
++startup; absent inputs retain the existing Site, public origin and both guest
++networks. See the exact defaults and grammar in [configuration](../configuration.md).
++Invalid explicit inputs fail startup without fallback. Site is canonical lowercase
++24-hex; origin is HTTPS ASCII DNS only, optionally port and one final slash;
++guest scope is 1..16 canonical strict CIDRs in a no-whitespace CSV. Hostnames are
++lowercased and a permitted single final slash removed; Site/CIDRs are never repaired.
++
++The typed CAPPORT config uses the same validators, converts valid CIDR strings to
++strict IPv4/IPv6 network objects, and preserves actual source-IP membership before
++the shared Site-bound Omada lookup. Private RFC1918 Flask binds are permitted by
++Core config; CAPPORT no longer imposes a loopback-only DTO constraint.
++`user-portal-url` remains configured origin + existing `/capport/login`; public API,
++discovery, retries, media type, no-store and shared authorization flow are unchanged.
++No `/.well-known/captive-portal` route is introduced or claimed operational.
++
++All five Core/CAPPORT deployment keys are startup-owned, outside writable Admin
++Settings, with restart-only adoption. Code acceptance does not prove NPM reachability,
++header sanitization or firewall safety. Target SysAdmin D01–D03 and Owner deployment
++approval are separate. No old VM change or migration; Portal Fingerprint pins and
++sensor readiness remain separate HOLD items for independently configured hosts.
+diff --git a/tests/test_capport_routes.py b/tests/test_capport_routes.py
+index 2bcd3d98631a320c0fe267fd9780efbe74b88419..55857807dc0a6c8a6ecad2449994f6b90151f77c 100644
+--- a/tests/test_capport_routes.py
++++ b/tests/test_capport_routes.py
+@@ -46,7 +46,7 @@ def config():
+     return CapportConfig.from_settings(
+         {
+             "host": "127.0.0.1",
+-            "capport_site_id": "site-1",
++            "capport_site_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+             "capport_public_base_url": "https://portal.example",
+             "capport_api_path": "/capport/api",
+             "capport_login_path": "/capport/login",
+@@ -60,6 +60,35 @@ def config():
+     )
+ 
+ 
++def test_custom_origin_and_canonical_site_use_existing_capport_api():
++    custom = CapportConfig.from_settings(dict(
++        host="172.18.0.1", capport_site_id="b" * 24,
++        capport_public_base_url="https://captivprod-navi.duckdns.org:8443/",
++        capport_api_path="/capport/api", capport_login_path="/capport/login",
++        capport_allowed_client_networks=("10.20.0.0/24",),
++        capport_client_cache_ttl_seconds=2, capport_failure_cache_ttl_seconds=2,
++    ))
++    controller = Mock()
++    controller.get_clients.return_value = Result.ok(data={"clients": [{
++        "client_ip": "10.20.0.7", "client_mac": "AA:BB:CC:DD:EE:FF",
++    }]})
++    controller.get_client.return_value = Result.ok(data={"authStatus": 0, "active": True})
++    service = CapportService(controller, custom, NoopTelemetry())
++    app = Flask(__name__)
++    app.register_blueprint(create_capport_blueprint(
++        service=service, portal_entry_handler=Mock(), config=custom, telemetry=NoopTelemetry(),
++        portal_template_presentation=PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({})),
++    ))
++    response = app.test_client().get("/capport/api", environ_base={"REMOTE_ADDR": "10.20.0.7"})
++    assert response.status_code == 200
++    assert response.content_type == CAPPORT_MEDIA_TYPE
++    assert response.headers["Cache-Control"] == "private, no-store"
++    assert response.get_json()["user-portal-url"] == "https://captivprod-navi.duckdns.org:8443/capport/login"
++    assert b"captivportal-navi.duckdns.org" not in response.data
++    controller.get_clients.assert_called_once_with("b" * 24)
++    controller.get_client.assert_called_once_with("b" * 24, "AA:BB:CC:DD:EE:FF")
++
++
+ def state(
+     *,
+     captive=True,
+@@ -72,7 +101,7 @@ def state(
+     client = None
+     if found:
+         client = CapportClient(
+-            site_id="site-1",
++            site_id="aaaaaaaaaaaaaaaaaaaaaaaa",
+             client_ip="192.168.1.10",
+             client_mac="AA:BB:CC:DD:EE:FF",
+             auth_status=auth_status,
+@@ -178,7 +207,7 @@ def test_capport_real_session_submission_and_reuse_are_probe_invariant(tmp_path)
+         client = app.test_client()
+         first = client.get("/capport/login", **kwargs)
+         second = client.get("/capport/login", headers={"Sec-CH-UA-Model": '"Pixel 8"'}, **kwargs)
+-        session = manager.get_by_client("site-1", "AA:BB:CC:DD:EE:FF")
++        session = manager.get_by_client("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:FF")
+         assert session is not None
+         assert len(executor.submissions) == 1
+         assert service.resolve_for_login.call_count == 2
+@@ -224,7 +253,7 @@ def test_capport_fingerprint_extraction_requires_resolved_client_and_is_containe
+     assert client.get("/capport/login", headers={"User-Agent": "Firefox/120"}, environ_base={"REMOTE_ADDR": "192.168.1.10"}).status_code == 200
+     extractor.assert_called_once()
+     handler.open_portal.assert_called_once_with(
+-        PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"),
++        PortalClientContext(site_id="aaaaaaaaaaaaaaaaaaaaaaaa", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"),
+         portal_evidence_candidate=candidate,
+     )
+ 
+@@ -235,7 +264,7 @@ def test_capport_extractor_exception_preserves_existing_login():
+     app, _ = app_for(service, handler, extractor=Mock(side_effect=RuntimeError("secret")), portal_telemetry=Mock())
+     response = app.test_client().get("/capport/login", environ_base={"REMOTE_ADDR": "192.168.1.10"})
+     assert response.status_code == 200
+-    handler.open_portal.assert_called_once_with(PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"))
++    handler.open_portal.assert_called_once_with(PortalClientContext(site_id="aaaaaaaaaaaaaaaaaaaaaaaa", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"))
+ 
+ 
+ def javascript_constant(page, name):
+@@ -470,7 +499,7 @@ def test_login_found_client_calls_shared_entry_handler():
+     assert response.status_code == 200
+     handler.open_portal.assert_called_once_with(
+         PortalClientContext(
+-            site_id="site-1",
++            site_id="aaaaaaaaaaaaaaaaaaaaaaaa",
+             client_mac="AA:BB:CC:DD:EE:FF",
+             client_ip="192.168.1.10",
+             ssid="Zefer_Parki",
+@@ -577,7 +606,7 @@ def test_login_uses_new_mac_after_identity_snapshot_expires():
+     assert login_response.status_code == 200
+     handler.open_portal.assert_called_once_with(
+         PortalClientContext(
+-            site_id="site-1",
++            site_id="aaaaaaaaaaaaaaaaaaaaaaaa",
+             client_mac="AA:BB:CC:DD:EE:02",
+             client_ip="192.168.1.10",
+         )
+@@ -916,7 +945,7 @@ def test_json_found_client_returns_authoritative_entry_result_once():
+     }
+     handler.prepare_portal.assert_called_once_with(
+         PortalClientContext(
+-            site_id="site-1",
++            site_id="aaaaaaaaaaaaaaaaaaaaaaaa",
+             client_mac="AA:BB:CC:DD:EE:FF",
+             client_ip="192.168.1.10",
+         )
+diff --git a/tests/test_capport_service.py b/tests/test_capport_service.py
+index c2441562a3f4c656307765f5f4442dcb7ad0766f..5e60022f5fefd88a01e423bb75fbe766d8485a2a 100644
+--- a/tests/test_capport_service.py
++++ b/tests/test_capport_service.py
+@@ -46,7 +46,7 @@ class FakeClock:
+ def settings(**overrides):
+     values = {
+         "host": "127.0.0.1",
+-        "capport_site_id": "site-1",
++        "capport_site_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+         "capport_public_base_url": "https://portal.example",
+         "capport_api_path": "/capport/api",
+         "capport_login_path": "/capport/login",
+@@ -149,7 +149,7 @@ def test_unauthorized_client_is_captive():
+     assert state.client_found
+     assert state.captive
+     controller.get_client.assert_called_once_with(
+-        "site-1",
++        "aaaaaaaaaaaaaaaaaaaaaaaa",
+         "AA:BB:CC:DD:EE:FF",
+     )
+ 
+@@ -170,9 +170,9 @@ def test_list_ssid_survives_resolution_without_extra_controller_call():
+     state = service_for(controller).resolve("192.168.1.10")
+ 
+     assert state.client.ssid == "Zefer_Parki"
+-    controller.get_clients.assert_called_once_with("site-1")
++    controller.get_clients.assert_called_once_with("aaaaaaaaaaaaaaaaaaaaaaaa")
+     controller.get_client.assert_called_once_with(
+-        "site-1",
++        "aaaaaaaaaaaaaaaaaaaaaaaa",
+         "AA:BB:CC:DD:EE:FF",
+     )
+ 
+@@ -305,7 +305,7 @@ def test_detail_minus_41011_uses_exact_authorized_list_fallback():
+         (
+             "warning",
+             {
+-                "site_id": "site-1",
++                "site_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+                 "detail_error_code": -41011,
+                 "auth_status": 2,
+                 "active": True,
+@@ -361,7 +361,7 @@ def test_detail_minus_41011_rejects_mismatched_list_identity():
+         identity.fallback_by_ip["192.168.1.10"],
+         client_mac="AA:BB:CC:DD:EE:00",
+     )
+-    service._identity_cache["site-1"] = identity
++    service._identity_cache["aaaaaaaaaaaaaaaaaaaaaaaa"] = identity
+ 
+     state = service.resolve("192.168.1.10")
+ 
+@@ -399,7 +399,7 @@ def test_detail_minus_41011_rejects_duplicate_ip_fallback():
+     assert state.captive
+     assert state.reason == "DETAIL_LOOKUP_FALLBACK_REJECTED"
+     controller.get_client.assert_called_once_with(
+-        "site-1",
++        "aaaaaaaaaaaaaaaaaaaaaaaa",
+         "AA:BB:CC:DD:EE:01",
+     )
+ 
+@@ -548,8 +548,8 @@ def test_force_refresh_rebinds_cached_ip_to_current_mac():
+     assert new_state.captive
+     assert controller.get_clients.call_count == 2
+     assert controller.get_client.call_args_list == [
+-        call("site-1", "AA:BB:CC:DD:EE:01"),
+-        call("site-1", "AA:BB:CC:DD:EE:02"),
++        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:01"),
++        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:02"),
+     ]
+ 
+ 
+@@ -621,10 +621,10 @@ def test_slow_old_mac_detail_is_discarded_after_identity_refresh():
+     assert refreshed_result.captive
+     assert next_result.captive
+     assert controller.get_client.call_args_list.count(
+-        call("site-1", "AA:BB:CC:DD:EE:01")
++        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:01")
+     ) == 1
+     assert controller.get_client.call_args_list.count(
+-        call("site-1", "AA:BB:CC:DD:EE:02")
++        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:02")
+     ) == 1
+ 
+ 
+@@ -701,10 +701,10 @@ def test_slow_old_mac_fallback_is_not_saved_after_identity_change():
+     assert refreshed_result.captive
+     assert cached_result.captive
+     assert controller.get_client.call_args_list.count(
+-        call("site-1", "AA:BB:CC:DD:EE:01")
++        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:01")
+     ) == 1
+     assert controller.get_client.call_args_list.count(
+-        call("site-1", "AA:BB:CC:DD:EE:02")
++        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:02")
+     ) == 1
+ 
+     fallback_events = [
+@@ -864,7 +864,7 @@ def test_sequential_different_ips_share_identity_snapshot():
+ 
+     assert first.client_found
+     assert second.client_found
+-    controller.get_clients.assert_called_once_with("site-1")
++    controller.get_clients.assert_called_once_with("aaaaaaaaaaaaaaaaaaaaaaaa")
+     assert controller.get_client.call_count == 2
+ 
+ 
+@@ -904,7 +904,7 @@ def test_parallel_different_ips_share_list_and_detail_in_parallel():
+             )
+         )
+ 
+-    controller.get_clients.assert_called_once_with("site-1")
++    controller.get_clients.assert_called_once_with("aaaaaaaaaaaaaaaaaaaaaaaa")
+     assert controller.get_client.call_count == 3
+     assert all(state.client_found for state in states)
+     assert all(state.captive is False for state in states)
+@@ -954,9 +954,30 @@ def test_parallel_successful_requests_use_single_refresh():
+         {"capport_allowed_client_networks": ("bad-network",)},
+         {"capport_client_cache_ttl_seconds": 0},
+         {"capport_failure_cache_ttl_seconds": 0},
+-        {"host": "0.0.0.0"},
++        {"capport_site_id": "A" * 24},
+     ],
+ )
+ def test_invalid_configuration_fails_at_startup(override):
+     with pytest.raises(ValueError):
+         CapportConfig.from_settings(settings(**override))
++
++
++def test_private_bind_custom_scope_and_site_lookup():
++    custom = CapportConfig.from_settings(settings(
++        host="172.18.0.1", capport_site_id="b" * 24,
++        capport_public_base_url="https://captivprod-navi.duckdns.org/",
++        capport_allowed_client_networks=("10.20.0.0/24", "2001:db8::/64"),
++    ))
++    controller = controller_with()
++    controller.get_clients.return_value.data["clients"][0]["client_ip"] = "10.20.0.7"
++    service = CapportService(controller, custom, CapturingTelemetry())
++    denied = service.resolve("192.168.1.10")
++    assert denied.allowed is False
++    controller.get_clients.assert_not_called()
++    accepted = service.resolve("10.20.0.7")
++    assert accepted.allowed and accepted.client_found
++    controller.get_clients.assert_called_once_with("b" * 24)
++    controller.get_client.assert_called_once_with("b" * 24, "AA:BB:CC:DD:EE:FF")
++    assert service.is_client_allowed("2001:db8::1")
++    assert not service.is_client_allowed("2001:db9::1")
++    assert custom.login_url == "https://captivprod-navi.duckdns.org/capport/login"
+diff --git a/tests/test_deployment_bind_config.py b/tests/test_deployment_bind_config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d693ad8bcb919cc0ac06ce2d641e148bf9cb110
+--- /dev/null
++++ b/tests/test_deployment_bind_config.py
+@@ -0,0 +1,286 @@
++"""Pure deployment validation and fresh-process startup; no sockets or real providers."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++import pytest
++
++from app.config import (_parse_bind_host, _parse_bind_port, _validate_capport_site_id,
++    _normalize_capport_public_base_url, _validate_capport_allowed_network_values,
++    _parse_capport_allowed_networks_csv)
++from app.capport.models import CapportConfig
++
++
++KEYS = ("HOST", "PORT", "CAPPORT_SITE_ID", "CAPPORT_PUBLIC_BASE_URL", "CAPPORT_ALLOWED_CLIENT_NETWORKS")
++READ = '''
++import json, sys
++try:
++    import app.config as config
++    from app.settings import get_settings
++    from app.capport.models import CapportConfig
++except ValueError as error:
++    print(str(error), file=sys.stderr)
++    raise SystemExit(3)
++settings = get_settings()
++capport = CapportConfig.from_settings(settings)
++names = ("host", "port", "capport_site_id", "capport_public_base_url", "capport_allowed_client_networks")
++print(json.dumps(dict(config={key:getattr(config,key) for key in %r}, settings={key:settings[key] for key in names},
++    types=[type(settings[key]).__name__ for key in names], login_url=capport.login_url,
++    networks=[str(net) for net in capport.allowed_networks])))
++''' % (KEYS,)
++
++
++def _startup(variables=None, snippet=READ):
++    env = os.environ.copy()
++    for key in KEYS:
++        env.pop(key, None)
++    env.update(variables or {})
++    env["PYTHONDONTWRITEBYTECODE"] = "1"
++    return subprocess.run([sys.executable, "-c", snippet], cwd=Path(__file__).parents[1],
++        env=env, capture_output=True, text=True, timeout=30)
++
++
++def _typed(**changes):
++    settings = dict(host="172.18.0.1", capport_site_id="a" * 24,
++        capport_public_base_url="https://portal.example", capport_api_path="/capport/api",
++        capport_login_path="/capport/login", capport_allowed_client_networks=("192.168.8.0/22",),
++        capport_client_cache_ttl_seconds=2, capport_failure_cache_ttl_seconds=2)
++    settings.update(changes)
++    return CapportConfig.from_settings(settings)
++
++
++def test_T01_absent_keys_exact_defaults_and_typed_mapping():
++    result = _startup()
++    assert result.returncode == 0, result.stderr
++    data = json.loads(result.stdout)
++    defaults = dict(HOST="127.0.0.1", PORT=8088, CAPPORT_SITE_ID="6a64f17630da7c70d232187a",
++        CAPPORT_PUBLIC_BASE_URL="https://captivportal-navi.duckdns.org",
++        CAPPORT_ALLOWED_CLIENT_NETWORKS=["192.168.1.0/24", "192.168.8.0/22"])
++    assert data["config"] == defaults
++    assert list(data["settings"].values()) == list(defaults.values())
++    assert data["types"] == ["str", "int", "str", "str", "tuple"]
++    assert data["login_url"] == "https://captivportal-navi.duckdns.org/capport/login"
++    assert data["networks"] == defaults["CAPPORT_ALLOWED_CLIENT_NETWORKS"]
++
++
++CAPTURE = '''
++import json
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
++import run
++captured = {}
++class NoListenApp:
++    extensions = {}
++    def run(self, **kwargs):
++        captured.update(kwargs)
++def bootstrap(**kwargs):
++    return SimpleNamespace(runtime_settings=kwargs["base_settings"], controller_secret_resolution=None,
++        activation_service=None, resolved_snapshot=None, feature_plan=object(), admin_context=None)
++def create_app(controller, visitor_snapshot_collector, settings):
++    return NoListenApp()
++identity = Mock(return_value=SimpleNamespace(json_line=lambda:"synthetic-identity"))
++with patch.multiple(run, capture_loaded_artifact_identity=identity, logger=Mock(),
++    bootstrap_settings_control=bootstrap, build_omada_runtime_config=Mock(return_value=object()),
++    create_controller=Mock(return_value=object()), public_omada_snapshot=Mock(return_value=None),
++    create_visitor_snapshot_collector=Mock(return_value=Mock()),
++    create_visit_lifecycle=Mock(return_value=Mock()), create_app=create_app,
++    create_observation_foundation=Mock(return_value=Mock()),
++    create_pending_session_cleaner=Mock(return_value=Mock()),
++    create_visitor_registry=Mock(return_value=SimpleNamespace(available=False, start=Mock())),
++    _configure_current_state=Mock(), _configure_analytics=Mock(), _configure_admin_web=Mock(),
++    _start_public_traffic_worker=Mock(), shutdown_handler=Mock()), \
++    patch.object(run.signal,"signal"), patch.object(run.atexit,"register"):
++    run.main()
++identity.assert_called_once_with("captive-portal.service")
++print(json.dumps(captured))
++'''
++
++
++@pytest.mark.parametrize("variables,host,port", [({}, "127.0.0.1", 8088),
++    ({"HOST": "172.18.0.1", "PORT": "18089"}, "172.18.0.1", 18089)])
++def test_T02_actual_unchanged_run_main_capture_no_listen(variables, host, port):
++    result = _startup(variables, CAPTURE)
++    assert result.returncode == 0, result.stderr
++    assert json.loads(result.stdout) == dict(host=host, port=port, debug=False, use_reloader=False)
++
++
++def test_T02_artifact_identity_failure_still_precedes_bootstrap_and_listen():
++    code = '''
++from unittest.mock import Mock, patch
++import run
++with patch.object(run,"logger",Mock()), patch.object(run,"capture_loaded_artifact_identity",side_effect=run.ArtifactIdentityError()), \
++    patch.object(run,"bootstrap_settings_control") as bootstrap, patch.object(run,"create_app") as app:
++    try:
++        run.main()
++    except SystemExit as error:
++        assert error.code == 1
++    else:
++        raise AssertionError("identity guard bypassed")
++    bootstrap.assert_not_called()
++    app.assert_not_called()
++'''
++    result = _startup(snippet=code)
++    assert result.returncode == 0, result.stderr
++
++
++HOST_INVALID = ["", " ", " 172.18.0.1", "172.18.0.1 ", "0.0.0.0", "127.0.0.2", "127.1.2.3",
++    "::", "::1", "localhost", "eth0", "8.8.8.8", "169.254.1.1", "224.1.1.1", "172.32.0.1",
++    "172.18.00.1", "127.1", "172.18.0.1,127.0.0.1", "172.18.0.999"]
++PORT_INVALID = ["", "0", "80", "1023", "65536", "+18089", "-1", " 18089", "18089 ",
++    "018089", "18089.0", "١٨٠٨٩", "１８０８９", "12345678901234567890"]
++SITE_INVALID = ["", " ", "a" * 23, "a" * 25, "A" * 24, "g" * 24, "a" * 24 + " ", "site-1", "<site>"]
++URL_INVALID = ["", "http://portal.example", "HTTPS://portal.example", "https://user:pass@portal.example",
++    "https://portal.example/a", "https://portal.example?", "https://portal.example#", "https://portal.example//",
++    "https://portal.example:0", "https://portal.example:65536", "https://portal.example:abc", "https://portal.example:",
++    "https://portal.example:0443", "https://portal_example", "https://[::1]", "https://192.168.0.1",
++    "https://%65xample.com", "https://portal.example\\evil", "https://portal.example\n", "https://por\ttal.example",
++    " https://portal.example", "https://éxample.com", "https://portal.example.", "https://.portal.example",
++    "https://portal..example", "https://-portal.example", "https://portal-.example", "https://999.1.2.3",
++    "https://" + "a" * 64 + ".example", "https://" + ".".join(["a" * 63] * 4), "https://portal.example\x7f",
++    "https://2130706433", "https://0x7f000001", "https://0X7F000001", "https://0x7f.0.0.1",
++    "https://0x7f.0.0.0x1", "https://0x", "https://0X", "https://012345", "https://192.168.1", "https://portal.123"]
++NETWORK_INVALID = ["", "192.168.8.2/22", "192.168.8.0/22,", ",192.168.8.0/22",
++    "192.168.8.0/22, 192.168.1.0/24", "192.168.8.0/22,192.168.8.0/22", "0.0.0.0/0", "::/0",
++    "192.168.8.1", "192.168.008.0/22", "2001:0db8::/64", "2001:DB8::/64", "2001:db8::1/64",
++    "192.168.8.0/255.255.252.0", ",".join(f"10.0.{i}.0/24" for i in range(17))]
++
++
++@pytest.mark.parametrize("key,values", [("HOST", HOST_INVALID), ("PORT", PORT_INVALID),
++    ("CAPPORT_SITE_ID", SITE_INVALID), ("CAPPORT_PUBLIC_BASE_URL", URL_INVALID),
++    ("CAPPORT_ALLOWED_CLIENT_NETWORKS", NETWORK_INVALID)])
++def test_T03_T07_invalid_explicit_startup_no_fallback(key, values):
++    for value in values:
++        result = _startup({key: value})
++        assert result.returncode != 0
++        assert result.stdout == ""
++        assert result.stderr.startswith(key + " ")
++        assert "Traceback" not in result.stderr
++
++
++@pytest.mark.parametrize("key,value", [("HOST", "0.0.0.0"), ("HOST", ""), ("PORT", "80"), ("PORT", ""),
++    ("CAPPORT_SITE_ID", ""), ("CAPPORT_PUBLIC_BASE_URL", "http://portal.example"),
++    ("CAPPORT_ALLOWED_CLIENT_NETWORKS", "0.0.0.0/0")])
++def test_invalid_bind_eager_even_disabled_capport_test_fixture(key, value):
++    # Isolated synthetic config module: only CAPPORT_ENABLED literal is False.
++    # Clear inputs before package import, then execute the real parser/startup AST.
++    snippet = '''
++import ast, os, sys
++from pathlib import Path
++keys = %r
++explicit = {key:os.environ.pop(key) for key in keys if key in os.environ}
++import app.config
++os.environ.update(explicit)
++tree = ast.parse(Path("app/config.py").read_text())
++for node in tree.body:
++    if isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=="CAPPORT_ENABLED" for target in node.targets):
++        node.value = ast.Constant(False)
++ast.fix_missing_locations(tree)
++try:
++    exec(compile(tree,"app/config.py","exec"), {"__name__":"app.config","__package__":"app"})
++except ValueError as error:
++    print(str(error),file=sys.stderr)
++    raise SystemExit(3)
++raise AssertionError("invalid bind survived")
++''' % (KEYS,)
++    result = _startup({key: value}, snippet)
++    assert result.returncode == 3
++    assert result.stderr.startswith(key + " ") and result.stdout == ""
++
++
++@pytest.mark.parametrize("host", ["127.0.0.1", "10.0.0.0", "10.255.255.255", "172.16.0.0", "172.31.255.255", "192.168.0.0", "192.168.255.255"])
++def test_T03_exact_rfc1918_not_interface_existence(host):
++    assert _parse_bind_host(host) == host
++
++
++@pytest.mark.parametrize("port", ["1024", "8088", "18089", "65535"])
++def test_T04_valid_ports(port):
++    assert _parse_bind_port(port) == int(port)
++
++
++@pytest.mark.parametrize("origin,expected", [("https://portal.example", "https://portal.example"),
++    ("https://PORTAL.Example/", "https://portal.example"), ("https://portal.example:8443/", "https://portal.example:8443"),
++    ("https://portal.example:1", "https://portal.example:1"), ("https://portal.example:65535", "https://portal.example:65535"),
++    ("https://xn--example.test/", "https://xn--example.test"), ("https://portal", "https://portal"),
++    ("https://abc123", "https://abc123"), ("https://PORTAL.abc123:8443/", "https://portal.abc123:8443")])
++def test_T06_exact_origin_canonicalization(origin, expected):
++    assert _normalize_capport_public_base_url(origin) == expected
++    assert _typed(capport_public_base_url=origin).login_url == expected + "/capport/login"
++
++
++@pytest.mark.parametrize("origin", [
++    "https://2130706433", "https://0x7f000001", "https://0X7F000001", "https://0x7f.0.0.1",
++    "https://0x7f.0.0.0x1", "https://0x", "https://0X", "https://012345", "https://192.168.1", "https://portal.123",
++])
++def test_R1_numeric_ip_alias_pure_and_typed_generic_rejection(origin):
++    message = "CAPPORT_PUBLIC_BASE_URL must be a canonical HTTPS DNS origin"
++    for validate in (
++        lambda: _normalize_capport_public_base_url(origin),
++        lambda: _typed(capport_public_base_url=origin),
++    ):
++        with pytest.raises(ValueError) as caught:
++            validate()
++        assert str(caught.value) == message
++        assert origin not in str(caught.value)
++        assert caught.value.__cause__ is None
++    # Every vector also goes through the fresh-process URL_INVALID startup matrix.
++    assert origin in URL_INVALID
++
++
++@pytest.mark.parametrize("key,values", [("capport_site_id", SITE_INVALID), ("capport_public_base_url", URL_INVALID),
++    ("capport_allowed_client_networks", NETWORK_INVALID)])
++def test_T05_T07_typed_inputs_same_closed_policy(key, values):
++    for value in values:
++        with pytest.raises(ValueError):
++            _typed(**{key: value})
++
++
++@pytest.mark.parametrize("value", [None, True, 123, [], {}])
++def test_non_string_and_untyped_values_rejected_without_coercion(value):
++    for validator in (_parse_bind_host, _parse_bind_port, _validate_capport_site_id,
++                      _normalize_capport_public_base_url, _parse_capport_allowed_networks_csv):
++        with pytest.raises(ValueError):
++            validator(value)
++    for key in ("capport_site_id", "capport_public_base_url", "capport_allowed_client_networks"):
++        with pytest.raises(ValueError):
++            _typed(**{key: value})
++
++
++@pytest.mark.parametrize("networks", [("192.168.8.0/22",), ("192.168.1.0/24", "192.168.8.0/22"),
++    ("192.168.8.0/22", "2001:db8::/64"), tuple(f"10.0.{i}.0/24" for i in range(16))])
++def test_T07_valid_csv_and_typed_networks_preserve_order(networks):
++    assert _validate_capport_allowed_network_values(networks) == networks
++    assert _parse_capport_allowed_networks_csv(",".join(networks)) == networks
++    assert tuple(str(net) for net in _typed(capport_allowed_client_networks=networks).allowed_networks) == networks
++    result = _startup({"CAPPORT_ALLOWED_CLIENT_NETWORKS": ",".join(networks)})
++    assert result.returncode == 0, result.stderr
++    data = json.loads(result.stdout)
++    assert data["types"][-1] == "tuple"
++    assert data["networks"] == list(networks)
++
++
++def test_T05_T07_custom_environment_mapping_and_single_cidr_typed_compatibility():
++    result = _startup({"HOST": "172.18.0.1", "PORT": "18089", "CAPPORT_SITE_ID": "b" * 24,
++        "CAPPORT_PUBLIC_BASE_URL": "https://CAPTIVPROD-navi.duckdns.org:8443/",
++        "CAPPORT_ALLOWED_CLIENT_NETWORKS": "10.20.0.0/24,2001:db8::/64"})
++    assert result.returncode == 0, result.stderr
++    data = json.loads(result.stdout)
++    assert data["settings"] == dict(host="172.18.0.1", port=18089, capport_site_id="b" * 24,
++        capport_public_base_url="https://captivprod-navi.duckdns.org:8443",
++        capport_allowed_client_networks=["10.20.0.0/24", "2001:db8::/64"])
++    assert data["login_url"] == "https://captivprod-navi.duckdns.org:8443/capport/login"
++    assert tuple(str(net) for net in _typed(capport_allowed_client_networks="192.168.8.0/22").allowed_networks) == ("192.168.8.0/22",)
++    with pytest.raises(ValueError):
++        _typed(capport_allowed_client_networks=["192.168.8.0/22"])
++
++
++def test_invalid_values_error_messages_do_not_echo_submitted_bytes():
++    for validator, value, key in [(_parse_bind_host, "HOST_CANARY.invalid", "HOST"),
++        (_parse_bind_port, "PORT_CANARY.invalid", "PORT"), (_validate_capport_site_id, "SITE_CANARY.invalid", "CAPPORT_SITE_ID"),
++        (_normalize_capport_public_base_url, "https://SECRET_CANARY:credential@portal.example", "CAPPORT_PUBLIC_BASE_URL"),
++        (_parse_capport_allowed_networks_csv, "NETWORK_CANARY.invalid", "CAPPORT_ALLOWED_CLIENT_NETWORKS")]:
++        with pytest.raises(ValueError) as caught:
++            validator(value)
++        assert str(caught.value).startswith(key + " ")
++        assert value not in str(caught.value) and caught.value.__cause__ is None
+diff --git a/tests/test_proxy_headers.py b/tests/test_proxy_headers.py
+index fedafa1437f5d63f2d758c599e41b1aa4a20180e..0d197baa5124b7bee736c872978a1f3593c72ff1 100644
+--- a/tests/test_proxy_headers.py
++++ b/tests/test_proxy_headers.py
+@@ -320,3 +320,18 @@ def test_forwarded_scheme_host_and_port_are_applied():
+ 
+     assert payload["scheme"] == "https"
+     assert payload["host"] == "captivportal-navi.duckdns.org"
++
++
++def test_one_hop_uses_rightmost_forwarded_values_not_spoofed_left_prefix():
++    app = create_test_app()
++    response = app.test_client().get("/_proxy_state", headers={
++        "X-Forwarded-For": "203.0.113.99, 192.168.8.10",
++        "X-Forwarded-Proto": "http, https",
++        "X-Forwarded-Host": "spoof.example, portal.example",
++        "X-Forwarded-Port": "80, 8443",
++    }, environ_base={"REMOTE_ADDR": "127.0.0.1"})
++    assert response.get_json() == {
++        "remote_addr": "192.168.8.10", "scheme": "https", "host": "portal.example:8443",
++    }
++    assert app.wsgi_app.x_for == app.wsgi_app.x_proto == app.wsgi_app.x_host == app.wsgi_app.x_port == 1
++    # A Flask trust-model test, not proof of ingress sanitization or firewall isolation.

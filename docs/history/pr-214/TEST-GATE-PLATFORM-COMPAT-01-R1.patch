@@ -1,0 +1,1246 @@
+diff --git a/docs/testing-environments.md b/docs/testing-environments.md
+index 9a9f4204750a7848992a5f796407ea6ad461beef..910f61ca404dba40673e9510d7c36ff3bbd1b0fd 100644
+--- a/docs/testing-environments.md
++++ b/docs/testing-environments.md
+@@ -162,6 +162,30 @@ be rediscovered or recreated from scratch by every new specialist.
+ 
+ ## 4. Linux Lab purpose
+ 
++### Windows/POSIX coverage pairing
++
++Native NI-01 `os.pread` / `os.O_NONBLOCK`, POSIX writer locking and open-file
++replacement tests are individually routed by the built-in skipif contract
++`requires_posix_io` in `tests/network_metadata/__init__.py`. Windows still
++collects these exact test IDs and reports the reason
++`Linux/POSIX Network Metadata I/O contract`; their assertions must execute and
++PASS under native Linux. No fake Windows syscall implementations, broad module
++skip, fixture skip or deselection may substitute for that coverage. Portable
++configuration/validation/disabled/error-path cases remain Windows tests.
++
++For `TASK-TEST-GATE-PLATFORM-COMPAT-01`, the independent gate report must pair
++every Windows-routed ID with Linux execution, preserve all six strict V7
++historical cases, and record Python/SQLite/pytest versions and exact tree.
++The Current State scheduling check uses bounded event coordination rather than
++a wall-clock callback-count guess. The Registry AF_UNIX check creates a real
++socket under a private short `/tmp` directory even with a long pytest basetemp.
++Analytics checks retain non-duplication/index/semantic protection without
++requiring one version's cheap-CTE materialization text.
++
++These test-only changes do not authorize production changes or official runner
++edits. Clean Windows/Linux full runs and any new versioned runner admission
++remain Owner/Tech Lead responsibilities; Coder performs focused checks only.
++
+ The dedicated WSL/Linux Lab is the default environment for:
+ 
+ - Linux pre-production acceptance;
+diff --git a/docs/testing.md b/docs/testing.md
+index 4f389e0682500d935579fb89c4ee6d1333ea5d44..d6781f67e0c4bf5ecb3ff9d2d7410d3ed2806407 100644
+--- a/docs/testing.md
++++ b/docs/testing.md
+@@ -113,6 +113,52 @@ A successful full gate on an unchanged exact artifact must not be duplicated mer
+ 
+ ## Official Windows Central Lab
+ 
++### Explicit Windows / POSIX test routing
++
++`TASK-TEST-GATE-PLATFORM-COMPAT-01` introduces individually declared
++`requires_posix_io` test/parameter marks from `tests/network_metadata/__init__.py`.
++This is the built-in `pytest.mark.skipif(os.name != "posix", ...)`, with the
++exact reason `Linux/POSIX Network Metadata I/O contract`; it is not a collection
++filter or a production compatibility shim. The shared `store` fixture does not
++skip tests. No module/directory-wide skip or global deselection is used.
++
++Only tests actually requiring native NI-01 positional/nonblocking reads,
++POSIX writer locks or open-file replacement semantics carry this mark.
++Pure parsing, configuration, normalization, disabled mode and portable error
++paths remain active on Windows. Mixed parametrizations retain their portable
++members (zero-record batches, source-open/stat failures). The explicitly
++approved projection source/reset I/O cases use the same individual contract;
++the untrusted-scope fixture instead uses distinct native temporary DB paths
++and runs on both platforms.
++
++Every Windows platform skip must appear by exact collected node ID and reason
++in acceptance evidence and have a corresponding **executed Linux PASS**.
++Collection alone is not Linux execution evidence. Owner/Tech Lead compare the
++complete per-platform inventories, outcomes and source identity on the exact
++candidate; no full acceptance is inferred from a focused sample. The six
++historical strict V7 cases below are not part of this POSIX routing.
++
++The Linux stability checks use coordinated fixed-delay scheduling, a real
++AF_UNIX socket in a private short disposable `/tmp` directory, and a query-plan
++oracle for one indexed/materialized expensive AP validation producer. SQLite
++may inline cheap `validated_cycles`/`ranged` projections; tests also inspect
++the actual production query's VDBE raw-table/index opens and once-only guard,
++with deliberate negative oracle cases. No SQL or runtime dependency is changed
++to force an EXPLAIN string. Semantic equivalence, source integrity and index
++assertions remain strict.
++
++This test-contract candidate still requires independent full Windows and Linux
++acceptance. Full gates require zero failures/errors, individually justified
++platform skips, preserved Linux coverage and the unchanged strict historical
++cases. Historical baseline exceptions elsewhere in this document are evidence
++of their named past runs, not automatic allowances for a new candidate.
++
++The machine-local V7 worktree/path allowlist is a separate Owner/Tech Lead
++action. Coder must not edit `lab-test-v7-strict.cmd`, weaken its four stages,
++or call a modified runner by its previous version/checksum. Owner/Tech Lead
++must review/version/hash any runner change and verify clean exact-artifact
++admission before executing the official gate.
++
+ ### Canonical directories
+ 
+ ```text
+diff --git a/tests/analytics/test_historical_traffic_peak.py b/tests/analytics/test_historical_traffic_peak.py
+index 22692eed5a62d6a364780d7979706c022dd33c62..2b3bede700a465194374fe814bc12ef9566abac3 100644
+--- a/tests/analytics/test_historical_traffic_peak.py
++++ b/tests/analytics/test_historical_traffic_peak.py
+@@ -445,6 +445,7 @@ def test_rolling_hour_rejects_any_nonaccepted_interval_inside_window(break_resul
+ 
+ 
+ def test_peak_projection_reuses_one_materialized_requested_range_validation(analytics_stack):
++    from .test_historical_traffic_statistics import _assert_single_expensive_validation, _validation_program
+     plan = analytics_stack.gateway.explain_historical_traffic_combined(
+         site_id=SITE,
+         from_utc="2026-01-01T11:55:00.000Z",
+@@ -459,13 +460,14 @@ def test_peak_projection_reuses_one_materialized_requested_range_validation(anal
+     text = "\n".join(plan)
+     assert text.count("MATERIALIZE candidate_cycles") == 1
+     assert text.count("MATERIALIZE cycle_aggregates") == 1
+-    assert text.count("MATERIALIZE validated_cycles") == 1
+-    assert text.count("MATERIALIZE ranged") == 1
++    _assert_single_expensive_validation(plan, *_validation_program(analytics_stack, include_peak_load=True))
+     assert text.count("MATERIALIZE bucket_selection") == 1
+     assert "idx_cycles_site_kind_started" in text
+     assert "sqlite_autoindex_ap_observations_1" in text
+-    assert "MATERIALIZE statistics_classified" in text
+-    assert text.count("SCAN statistics_ordered") == 1
++    # The peak UNION may re-read materialized ordered rows; only one producer
++    # of their window/order computation is allowed, not one scan per query.
++    assert sum(text.count(kind + " statistics_ordered")
++               for kind in ("MATERIALIZE", "CO-ROUTINE")) == 1
+ 
+ 
+ def test_peak_projection_returns_ordered_typed_rows_without_text_payload(
+diff --git a/tests/analytics/test_historical_traffic_statistics.py b/tests/analytics/test_historical_traffic_statistics.py
+index e7abe9ffd2fcc417b14a7ac149a569d1983d60d6..93b6ce36f822b387c4cb9956e2122819f23e0e74 100644
+--- a/tests/analytics/test_historical_traffic_statistics.py
++++ b/tests/analytics/test_historical_traffic_statistics.py
+@@ -10,7 +10,9 @@ from app.analytics.historical_traffic import (
+     HistoricalTrafficReadService,
+     HistoricalTrafficSourceUnavailable,
+ )
+-from app.analytics.source_gateway import QueryDeadline
++from app.analytics.source_gateway import (
++    QueryDeadline, _HISTORICAL_COMBINED_SQL, _HISTORICAL_PEAK_COMBINED_SQL,
++)
+ 
+ 
+ UTC = timezone.utc
+@@ -19,6 +21,48 @@ START = "2026-01-01T11:55:00.000Z"
+ END = "2026-01-01T12:00:00.000Z"
+ 
+ 
++def _validation_program(stack, *, include_peak_load=False):
++    """Compile the unchanged production query, not a test-owned SQL rewrite."""
++    parameters = (SITE, START, END, START, END, SITE, START, START, END, SITE,
++                  60000, 60000, START, END, START, END, START, START, 300, START, END, 180, 180)
++    sql = _HISTORICAL_PEAK_COMBINED_SQL if include_peak_load else _HISTORICAL_COMBINED_SQL
++    with stack.gateway._connection("observations", QueryDeadline.after(10)) as connection:
++        program = tuple(tuple(row) for row in connection.execute("EXPLAIN " + sql, parameters))
++        roots = dict(connection.execute("SELECT name,rootpage FROM sqlite_master WHERE rootpage>0"))
++    return program, roots
++
++
++def _assert_single_expensive_validation(plan, program, roots):
++    """One physical requested-range validation producer, regardless of CTE inlining.
++
++    validated_cycles/ranged only project the already aggregated rows. SQLite
++    may inline those projections, but must not duplicate the expensive raw AP
++    join/aggregate or abandon its indexes. Materialized consumers may scan the
++    shared temporary rows more than once (e.g. both peak UNION output arms).
++    """
++    text = "\n".join(plan)
++    assert text.count("MATERIALIZE candidate_cycles") == 1
++    assert text.count("MATERIALIZE cycle_aggregates") == 1
++    assert text.count("idx_cycles_site_kind_started") == 2  # Two disjoint range arms.
++    assert text.count("sqlite_autoindex_ap_observations_1") == 1
++    reads = []
++    for name in ("ap_observations", "sqlite_autoindex_ap_observations_1"):
++        opened = [op for op in program if op[1] == "OpenRead" and op[3] == roots[name] and op[4] == 0]
++        assert len(opened) == 1, f"duplicated/missing raw AP validation source: {name}"
++        reads.extend(opened)
++    first, last = min(op[0] for op in reads), max(op[0] for op in reads)
++    guards = [op for op in program if op[1] == "Once" and op[0] < first and op[3] > last]
++    assert guards, "raw AP validation is not guarded by a once-only producer"
++    guard = max(guards, key=lambda op: op[0])
++    body = [op for op in program if guard[0] < op[0] < guard[3]]
++    assert any(op[1] == "AggStep" for op in body)
++    assert any(op[1] == "AggFinal" for op in body)
++    # An outer Once alone is insufficient if another consumer can enter its
++    # aggregate subroutine after the guard. All external calls must hit it.
++    assert not any(op[1] == "Gosub" and not guard[0] <= op[0] <= guard[3]
++                   and guard[0] < op[3] < guard[3] for op in program)
++
++
+ def _row(cycle_id, observed, *, wired=(1.0, 2.0), lan=(3.0, 4.0), site=SITE):
+     def values(pair):
+         return (
+@@ -365,12 +409,48 @@ def test_combined_projection_materializes_one_expensive_validation_path(
+     assert "sqlite_autoindex_ap_observations_1" in text
+     assert text.count("MATERIALIZE candidate_cycles") == 1
+     assert text.count("MATERIALIZE cycle_aggregates") == 1
+-    assert text.count("MATERIALIZE validated_cycles") == 1
+-    assert text.count("MATERIALIZE ranged") == 1
++    _assert_single_expensive_validation(plan, *_validation_program(analytics_stack))
+     assert text.count("MATERIALIZE bucket_selection") == 1
+     assert text.count(
+         "SEARCH a USING INDEX sqlite_autoindex_ap_observations_1"
+     ) == 1
++    # Compare actual compiled source work with two separate projections, not
++    # timing or the spelling of a cheap intermediate CTE.
++    separate_source_reads = 0
++    for explain in (analytics_stack.gateway.explain_historical_traffic,
++                    analytics_stack.gateway.explain_historical_traffic_statistics):
++        separate = explain(site_id=SITE, from_utc=START, to_utc=END, evaluated_at_utc=END,
++            bucket_seconds=300, gap_threshold_seconds=180, max_site_sample_source_skew_seconds=60,
++            deadline=QueryDeadline.after(10))
++        separate_source_reads += "\n".join(separate).count("sqlite_autoindex_ap_observations_1")
++    assert separate_source_reads >= 2
++    assert text.count("sqlite_autoindex_ap_observations_1") < separate_source_reads
++
++
++@pytest.mark.parametrize("damage", ["duplicate_aggregate", "duplicate_raw_table",
++                                   "duplicate_raw_index", "missing_once", "bypass_once", "missing_index"])
++def test_expensive_validation_oracle_rejects_regressed_plan(analytics_stack, damage):
++    plan = list(analytics_stack.gateway.explain_historical_traffic_combined(
++        site_id=SITE, from_utc=START, to_utc=END, evaluated_at_utc=END,
++        bucket_seconds=300, gap_threshold_seconds=180, max_site_sample_source_skew_seconds=60,
++        deadline=QueryDeadline.after(10)))
++    program, roots = _validation_program(analytics_stack)
++    _assert_single_expensive_validation(plan, program, roots)
++    if damage == "duplicate_aggregate":
++        plan.append("MATERIALIZE cycle_aggregates")
++    elif damage in {"duplicate_raw_table", "duplicate_raw_index"}:
++        name = "ap_observations" if damage == "duplicate_raw_table" else "sqlite_autoindex_ap_observations_1"
++        extra = next(op for op in program if op[1] == "OpenRead" and op[3] == roots[name] and op[4] == 0)
++        program += (extra,)
++    elif damage == "missing_once":
++        program = tuple(op for op in program if op[1] != "Once")
++    elif damage == "bypass_once":
++        first = next(op[0] for op in program if op[1] == "OpenRead" and op[3] == roots["ap_observations"])
++        program += ((max(op[0] for op in program) + 1, "Gosub", 1, first, 0, None, 0, None),)
++    else:
++        plan = [line for line in plan if "sqlite_autoindex_ap_observations_1" not in line]
++    with pytest.raises(AssertionError):
++        _assert_single_expensive_validation(plan, program, roots)
+ 
+ 
+ def test_statistics_share_query_only_snapshot_without_source_mutation(analytics_stack):
+diff --git a/tests/current_state/test_workers.py b/tests/current_state/test_workers.py
+index b05907a6baed10c816457d6cea2749bc30465bf0..53b6439a63dd08f992a97e5bbb88ba27324e0683 100644
+--- a/tests/current_state/test_workers.py
++++ b/tests/current_state/test_workers.py
+@@ -1,7 +1,6 @@
+ from __future__ import annotations
+ 
+ import threading
+-import time
+ from dataclasses import replace
+ 
+ import pytest
+@@ -246,14 +245,30 @@ def test_non_overlapping_run_once(config, repo):
+         worker._cycle_lock.release()
+ 
+ 
+-def test_background_schedule_is_fixed_delay_not_overlap(config, repo):
+-    call_finished = []
++def test_background_schedule_is_fixed_delay_not_overlap(config, repo, monkeypatch):
++    entered = [threading.Event(), threading.Event()]
++    release = [threading.Event(), threading.Event()]
++    delayed = [threading.Event(), threading.Event()]
++    advance_delay = threading.Event()
++    call_started, call_finished, waits = [], [], []
++    clock = [0.0]
++    active = [0]
+ 
+     class TimedProvider(Provider):
+         def list_observation_clients(self, *args):
+-            time.sleep(0.03)
+-            call_finished.append(time.monotonic())
+-            return page("clients", [], 0)
++            index = len(call_started)
++            assert index < 2, "unexpected late/duplicate provider call"
++            assert active[0] == 0, "overlapping provider calls"
++            active[0] += 1
++            call_started.append(clock[0])
++            entered[index].set()
++            try:
++                assert release[index].wait(5), "provider coordination timeout"
++                clock[0] += 0.03
++                call_finished.append(clock[0])
++                return page("clients", [], 0)
++            finally:
++                active[0] -= 1
+ 
+     _, telemetry = worker_telemetry()
+     worker = CurrentClientWorker(
+@@ -265,9 +280,48 @@ def test_background_schedule_is_fixed_delay_not_overlap(config, repo):
+             client_interval_seconds=0.04,
+         ),
+         telemetry=telemetry,
++        monotonic=lambda: clock[0],
+     )
+-    assert worker.start()
+-    time.sleep(0.13)
+-    assert worker.stop(1.0)
+-    assert len(call_finished) == 2
+-    assert call_finished[1] - call_finished[0] >= 0.04
++    real_wait = worker.stop_event.wait
++
++    def controlled_wait(seconds):
++        if seconds == 0:  # The unchanged configured initial delay.
++            return real_wait(0)
++        index = len(waits)
++        assert index < 2
++        assert seconds == 0.04 and seconds > 0
++        assert active[0] == 0 and len(call_finished) == index + 1
++        waits.append(seconds)
++        delayed[index].set()
++        if index == 0:
++            assert advance_delay.wait(5), "delay coordination timeout"
++            clock[0] += seconds
++            return real_wait(0)
++        return real_wait(5)  # stop() must interrupt the second completed-cycle delay.
++
++    monkeypatch.setattr(worker.stop_event, "wait", controlled_wait)
++    try:
++        assert worker.start()
++        assert entered[0].wait(5)
++        assert worker.run_once() == ()  # Actual cycle lock prevents re-entry.
++        assert call_finished == []
++        release[0].set()
++        assert delayed[0].wait(5)
++        assert len(call_started) == len(call_finished) == 1
++        assert not entered[1].is_set()  # No next cycle before positive delay.
++        advance_delay.set()
++        assert entered[1].wait(5)
++        assert call_started[1] - call_finished[0] == pytest.approx(0.04)
++        assert worker.run_once() == ()
++        release[1].set()
++        assert delayed[1].wait(5)
++        assert worker.stop(5)
++    finally:
++        for gate in release:
++            gate.set()
++        advance_delay.set()
++        assert worker.stop(5)
++    assert len(call_started) == len(call_finished) == 2
++    assert waits == [0.04, 0.04] and active[0] == 0
++    assert worker._thread is None and not worker.running
++    assert worker.last_error is None
+diff --git a/tests/network_metadata/__init__.py b/tests/network_metadata/__init__.py
+index ffa79f7fabe4bd70e7ed4c1ba8e83aa56b40a99d..8da411d3db6d5c98d4e94a865d3edf4e5f0905bf 100644
+--- a/tests/network_metadata/__init__.py
++++ b/tests/network_metadata/__init__.py
+@@ -4,6 +4,7 @@ import os
+ from contextlib import contextmanager
+ from datetime import datetime, timedelta, timezone
+ from types import SimpleNamespace
++import pytest
+ from app.network_metadata.config import network_metadata_config_from_env
+ from app.network_metadata.health import HealthController
+ from app.network_metadata.normalizer import normalize_record
+@@ -16,6 +17,11 @@ GENERATION = "9412aebe-6e13-463b-9a93-d2e5c8475766"
+ IDENTITY = SimpleNamespace(artifact_sha="a" * 40, artifact_tree="b" * 40,
+                           process_started_at="2026-10-07T12:00:00.000Z")
+ 
++# Applied explicitly to individual tests/parameters, never to the shared store.
++requires_posix_io = pytest.mark.skipif(
++    os.name != "posix", reason="Linux/POSIX Network Metadata I/O contract",
++)
++
+ 
+ class Clock:
+     def __init__(self):
+diff --git a/tests/network_metadata/test_capacity.py b/tests/network_metadata/test_capacity.py
+index 3818e30dac66f250c8d379e34171cdf6eb272b2d..ed9756cc12f3c16baa09f99aa55c9c6c76303a91 100644
+--- a/tests/network_metadata/test_capacity.py
++++ b/tests/network_metadata/test_capacity.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import json
+ import time
+ from app.network_metadata.retention import RetentionPolicy
+@@ -24,6 +25,7 @@ def test_io_hotpath_capacity_guard_precedes_transactional_probe(tmp_path, monkey
+         assert not state.repo.connection.in_transaction
+ 
+ 
++@requires_posix_io
+ def test_3000_temporary_observation_capacity(tmp_path):
+     data = [record(source_event(family)) for family in ("dns", "tls", "quic") for _ in range(1000)]
+     source = b"\n".join(data) + b"\n"
+diff --git a/tests/network_metadata/test_checkpoint_crash.py b/tests/network_metadata/test_checkpoint_crash.py
+index 56aeea673588e19f989dc65c43ed855294954067..2c872501786b273bcde5747434293a1fc24b1590 100644
+--- a/tests/network_metadata/test_checkpoint_crash.py
++++ b/tests/network_metadata/test_checkpoint_crash.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import pytest
+ from datetime import timedelta
+ from app.network_metadata.models import NetworkMetadataStorageUnavailable
+@@ -8,6 +9,7 @@ from .test_repository import _a_store, _a_outcomes, _a_rows
+ @pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",
+     "before_fault_flush", "after_fault_flush", "before_checkpoint_update",
+     "after_checkpoint_update_before_commit", "after_commit"])
++@requires_posix_io
+ def test_io_hotpath_fault_flush_observation_health_checkpoint_atomicity(tmp_path, monkeypatch, point):
+     from . import record
+     from .test_service import service_for
+@@ -56,6 +58,7 @@ def test_io_hotpath_fault_flush_observation_health_checkpoint_atomicity(tmp_path
+ 
+ @pytest.mark.parametrize("category", ["source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
+ @pytest.mark.parametrize("has_prefix", [False, True])
++@requires_posix_io
+ def test_final_conflict_health_owns_new_prefix_and_stops_evaluation(tmp_path, monkeypatch, category, has_prefix):
+     from . import record, source_event
+     from app.network_metadata.validation import ni_format_utc
+@@ -120,6 +123,7 @@ def test_final_conflict_health_owns_new_prefix_and_stops_evaluation(tmp_path, mo
+ 
+ @pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",
+     "before_checkpoint_update", "after_checkpoint_update_before_commit", "after_commit"])
++@requires_posix_io
+ def test_all_five_crash_boundaries(tmp_path, point):
+     with store(tmp_path) as state:
+         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
+@@ -141,6 +145,7 @@ def test_all_five_crash_boundaries(tmp_path, point):
+ 
+ @pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",
+     "before_checkpoint_update", "after_checkpoint_update_before_commit", "after_commit"])
++@requires_posix_io
+ def test_final_partial_health_rolls_back_or_commits_with_entire_batch(tmp_path, point):
+     from . import record
+     with store(tmp_path, source=record() + b"\n{\n") as state:
+@@ -187,6 +192,7 @@ def test_final_partial_health_rolls_back_or_commits_with_entire_batch(tmp_path,
+         assert state.repo.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+ 
+ 
++@requires_posix_io
+ def test_block_establishment_rollback_has_no_successful_claim(tmp_path):
+     with store(tmp_path) as state:
+         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
+@@ -208,6 +214,7 @@ def test_block_establishment_rollback_has_no_successful_claim(tmp_path):
+         assert "source_record_identity_conflict" not in state.health.local_reasons
+ 
+ 
++@requires_posix_io
+ def test_expired_event_aggregate_checkpoint_and_health_commit_atomically(tmp_path):
+     from datetime import timedelta
+     from app.network_metadata.validation import ni_format_utc
+diff --git a/tests/network_metadata/test_cli.py b/tests/network_metadata/test_cli.py
+index b354b3ff82de25cb3ecf08f9fd1eba17647c416d..674ba8432009b96e1bfb1e158506727a473a5644 100644
+--- a/tests/network_metadata/test_cli.py
++++ b/tests/network_metadata/test_cli.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import pytest
+ from app.network_metadata import cli
+ from . import configuration, IDENTITY
+@@ -26,6 +27,7 @@ def test_identity_failure_safe(tmp_path, monkeypatch, capsys):
+     assert "secret-payload" not in capsys.readouterr().err
+ 
+ 
++@requires_posix_io
+ def test_enabled_clean_stop_and_signal_binding(tmp_path, monkeypatch):
+     monkeypatch.setattr(cli, "network_metadata_config_from_env", lambda: configuration(tmp_path))
+     monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_: IDENTITY)
+@@ -48,6 +50,7 @@ def test_enabled_clean_stop_and_signal_binding(tmp_path, monkeypatch):
+     assert calls == ["stop", "stop"]
+ 
+ 
++@requires_posix_io
+ def test_writer_lock_failure_safe(tmp_path, monkeypatch, capsys):
+     from app.network_metadata.repository import WriterLock
+     cfg = configuration(tmp_path)
+diff --git a/tests/network_metadata/test_health.py b/tests/network_metadata/test_health.py
+index b2bc14ca4f5e1a03c1cc7ccb871b9ae80c811d95..47abbad7c2d7d16c2d5119799d82d5798c558796 100644
+--- a/tests/network_metadata/test_health.py
++++ b/tests/network_metadata/test_health.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ from datetime import timedelta
+ from types import SimpleNamespace
+ import pytest
+@@ -55,6 +56,7 @@ def test_capture_constructor_failure_is_unknown(tmp_path, monkeypatch):
+     assert adapter.evaluate(configuration(tmp_path).capture_scope_binding, Clock()()) == ("unknown", ("capture_health_read_unavailable",))
+ 
+ 
++@requires_posix_io
+ def test_health_not_per_observation_and_heartbeat(tmp_path):
+     data = record()
+     with store(tmp_path, source=(data + b"\n") * 2) as state:
+@@ -70,6 +72,7 @@ def test_health_not_per_observation_and_heartbeat(tmp_path):
+         assert row["committed_byte_offset"] == second.end
+ 
+ 
++@requires_posix_io
+ def test_fault_transition_source_order_and_clean_interval_recovery(tmp_path):
+     with store(tmp_path, source=b"x\n" + record() + b"\n") as state:
+         from app.network_metadata.models import RecordOutcome
+@@ -85,6 +88,7 @@ def test_fault_transition_source_order_and_clean_interval_recovery(tmp_path):
+         assert state.health.ingest == "usable"
+ 
+ 
++@requires_posix_io
+ def test_newer_then_older_commits_never_regress_health_after_reload(tmp_path):
+     with store(tmp_path) as state:
+         newer = ni_format_utc(state.clock() + timedelta(seconds=1))
+@@ -111,6 +115,7 @@ def test_newer_then_older_commits_never_regress_health_after_reload(tmp_path):
+ 
+ @pytest.mark.parametrize("disposition", ["duplicate_noop", "source_record_identity_conflict",
+     "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
++@requires_posix_io
+ def test_replay_output_and_ingest_separation_after_reload(tmp_path, disposition):
+     with store(tmp_path) as state:
+         original_data = record(source_event(timestamp=ni_format_utc(state.clock() - timedelta(days=1))))
+@@ -174,6 +179,7 @@ def test_untrustworthy_timestamp_does_not_update_health(tmp_path, data):
+     assert health.last_output is health.last_ingested is None
+ 
+ 
++@requires_posix_io
+ def test_expired_filter_advances_output_without_ingested_time(tmp_path):
+     with store(tmp_path) as state:
+         def item_at(age, start):
+@@ -242,6 +248,7 @@ def test_source_recovery_clears_only_source_availability_reasons(reason, prior_f
+ 
+ @pytest.mark.parametrize("category", ["invalid_json", "schema_invalid"])
+ @pytest.mark.parametrize("fault_first", [False, True])
++@requires_posix_io
+ def test_all_new_observations_reference_final_partial_batch_health(tmp_path, monkeypatch, category, fault_first):
+     with store(tmp_path) as state:
+         valid_at = ni_format_utc(state.clock() + timedelta(seconds=1))
+@@ -295,6 +302,7 @@ def test_all_new_observations_reference_final_partial_batch_health(tmp_path, mon
+ 
+ 
+ @pytest.mark.parametrize("size", [2, 100])
++@requires_posix_io
+ def test_clean_batch_reuses_health_ref_but_advances_in_memory_watermarks(tmp_path, monkeypatch, size):
+     with store(tmp_path) as state:
+         items, parts, offset = [], [], 0
+@@ -330,6 +338,7 @@ def test_clean_batch_reuses_health_ref_but_advances_in_memory_watermarks(tmp_pat
+         assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_source_health").fetchone()[0] == count + 1
+ 
+ 
++@requires_posix_io
+ def test_replayed_observation_keeps_original_health_and_all_first_ingest_provenance(tmp_path):
+     with store(tmp_path, source=record() + b"\n{\n") as state:
+         first = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
+@@ -356,6 +365,7 @@ def test_replayed_observation_keeps_original_health_and_all_first_ingest_provena
+ 
+ 
+ @pytest.mark.parametrize("category", ["invalid_json", "schema_invalid", "record_too_large"])
++@requires_posix_io
+ def test_fault_only_batch_persists_one_final_transition_snapshot(tmp_path, category):
+     from app.network_metadata.canonical import sha256
+     with store(tmp_path, source=b"x\n") as state:
+diff --git a/tests/network_metadata/test_privacy.py b/tests/network_metadata/test_privacy.py
+index fa44eb51ca0d22160e6705ef9480a948d7190a28..12aba5d4fbdf06fdd295eadba426a43686e96338 100644
+--- a/tests/network_metadata/test_privacy.py
++++ b/tests/network_metadata/test_privacy.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import io
+ import json
+ import logging
+@@ -30,6 +31,7 @@ def test_source_unavailable_is_health_reason_not_record_fault():
+     assert json.loads(output.getvalue()) == {"event": "health_transition", "reason_code": "source_unavailable"}
+ 
+ 
++@requires_posix_io
+ def test_transient_fault_digest_never_retained_or_logged(tmp_path):
+     with store(tmp_path, source=b"{\n") as state:
+         output = io.StringIO()
+@@ -45,6 +47,7 @@ def test_transient_fault_digest_never_retained_or_logged(tmp_path):
+         assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_source_records").fetchone()[0] == 0
+ 
+ 
++@requires_posix_io
+ def test_diagnostic_tables_and_fault_errors_exclude_sensitive_values(tmp_path):
+     with store(tmp_path) as state:
+         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
+diff --git a/tests/network_metadata/test_read_service.py b/tests/network_metadata/test_read_service.py
+index d0867546a49076d03dc73bc5e451e200a2ec999d..7f8ffd44d83da2c3efe284e1eb076315bcc1819c 100644
+--- a/tests/network_metadata/test_read_service.py
++++ b/tests/network_metadata/test_read_service.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import pytest
+ from app.network_metadata.read_service import NetworkMetadataReadService
+ from app.network_metadata.models import NetworkMetadataValidationError
+@@ -7,6 +8,7 @@ from . import store, outcome, record, source_event, SITE
+ START, END = "2026-10-07T00:00:00.000000Z", "2026-10-08T00:00:00.000000Z"
+ 
+ 
++@requires_posix_io
+ def test_keyset_order_site_isolation_and_privacy(tmp_path):
+     data = record()
+     with store(tmp_path, source=(data + b"\n") * 3) as state:
+@@ -43,6 +45,7 @@ def test_read_window(tmp_path, start, end):
+ 
+ 
+ @pytest.mark.parametrize("family", ["tls", "quic"])
++@requires_posix_io
+ def test_family_projection_no_sni(tmp_path, family):
+     data = record(source_event(family))
+     with store(tmp_path, source=data + b"\n") as state:
+diff --git a/tests/network_metadata/test_repository.py b/tests/network_metadata/test_repository.py
+index 75ca44da58c437d860ce3837326dadbe2d750192..33d497c0af04278f6c9af6ddae3fca5dcf44f59d 100644
+--- a/tests/network_metadata/test_repository.py
++++ b/tests/network_metadata/test_repository.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import os
+ import sqlite3
+ from dataclasses import replace
+@@ -86,6 +87,7 @@ def _a_sql(sql):
+ @pytest.mark.parametrize("category", ["duplicate_noop", "source_record_identity_conflict",
+     "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
+ @pytest.mark.parametrize("index", [0, 1, 2])
++@requires_posix_io
+ def test_io_hotpath_overlap_first_conflict_matches_off(tmp_path, monkeypatch, category, index):
+     import uuid
+     snapshots = []
+@@ -130,6 +132,7 @@ def test_io_hotpath_overlap_first_conflict_matches_off(tmp_path, monkeypatch, ca
+     assert snapshots[0] == snapshots[1]
+ 
+ 
++@requires_posix_io
+ def test_io_hotpath_range_gap_and_generation_isolation(tmp_path, monkeypatch):
+     with _a_store(tmp_path, True, source=(record() + b"\n") * 2) as state:
+         items = _a_outcomes(state, [record()] * 2)
+@@ -248,7 +251,8 @@ def test_io_hotpath_failed_initialize_never_adopts_cache(tmp_path, monkeypatch,
+     assert repo.connection is repo._insert_columns is repo._insert_columns_connection is None
+ 
+ 
+-@pytest.mark.parametrize("count", [0, 1, 10, 256])
++@pytest.mark.parametrize("count", [0, pytest.param(1, marks=requires_posix_io),
++    pytest.param(10, marks=requires_posix_io), pytest.param(256, marks=requires_posix_io)])
+ @pytest.mark.parametrize("many", [False, True])
+ def test_io_hotpath_fault_sql_grouping_and_complete_equivalence(tmp_path, monkeypatch, count, many):
+     import uuid
+@@ -350,6 +354,7 @@ def test_io_hotpath_external_ddl_sql_failure_is_not_schema_bypass(tmp_path):
+ 
+ 
+ @pytest.mark.parametrize("enabled", [False, True])
++@requires_posix_io
+ def test_io_hotpath_mixed_fault_duplicate_conflict_freezes_only_reached_prefix(tmp_path, enabled):
+     from . import source_event
+     data = [record(), b"{", b"{", record(source_event("tls")), record(source_event("quic")), record()]
+@@ -384,6 +389,7 @@ def test_io_hotpath_mixed_fault_duplicate_conflict_freezes_only_reached_prefix(t
+ 
+ @pytest.mark.parametrize("enabled", [False, True])
+ @pytest.mark.parametrize("age", [15, 31])
++@requires_posix_io
+ def test_io_hotpath_retention_expiry_semantics_are_preserved(tmp_path, enabled, age):
+     from datetime import timedelta
+     from app.network_metadata.validation import ni_format_utc
+@@ -409,6 +415,7 @@ def test_io_hotpath_retention_expiry_semantics_are_preserved(tmp_path, enabled,
+ @pytest.mark.parametrize("category", ["invalid_utf8", "invalid_json", "duplicate_json_member", "non_object_json",
+     "schema_invalid", "unexpected_family", "pre_binding_event", "outside_intended_scope",
+     "unsupported_address_family_for_scope", "record_too_large", "same_raw_non_normalized", "expired_non_normalized"])
++@requires_posix_io
+ def test_all_complete_replay_outcomes_obey_source_identity_precedence(tmp_path, category):
+     from . import source_event
+     from app.network_metadata.models import RecordOutcome
+@@ -505,6 +512,7 @@ def test_binding_same_digest_mismatch_rejected_without_repair(tmp_path, column,
+         assert not state.repo.connection.in_transaction
+ 
+ 
++@requires_posix_io
+ def test_exact_schema_pragmas_spine_and_provenance(tmp_path):
+     with store(tmp_path) as state:
+         conn = state.repo.connection
+@@ -522,6 +530,7 @@ def test_exact_schema_pragmas_spine_and_provenance(tmp_path):
+         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+ 
+ 
++@requires_posix_io
+ def test_second_posix_writer_rejected(tmp_path):
+     path = str(tmp_path / "db.writer.lock")
+     with WriterLock(path):
+@@ -541,6 +550,7 @@ def test_schema_drift_fails_without_recreate(tmp_path, damage):
+             state.repo.initialize()
+ 
+ 
++@requires_posix_io
+ def test_duplicate_noop_preserves_all_fields(tmp_path):
+     with store(tmp_path) as state:
+         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
+@@ -557,6 +567,7 @@ def test_duplicate_noop_preserves_all_fields(tmp_path):
+ 
+ 
+ @pytest.mark.parametrize("category", ["source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
++@requires_posix_io
+ def test_conflicts_are_durable_and_atomic(tmp_path, category):
+     with store(tmp_path) as state:
+         generation, checkpoint = seed_blocked(state, category)
+@@ -582,6 +593,7 @@ def test_generation_schema_rejects_invalid_block_state(tmp_path, update):
+             state.repo.connection.execute("UPDATE network_metadata_source_generations SET " + update)
+ 
+ 
++@requires_posix_io
+ def test_blocked_cannot_be_closed_in_schema_or_model(tmp_path):
+     with store(tmp_path) as state:
+         generation, _ = seed_blocked(state)
+@@ -597,6 +609,7 @@ def test_blocked_cannot_be_closed_in_schema_or_model(tmp_path):
+     "UPDATE network_metadata_checkpoint SET committed_byte_offset=1,continuity_anchor_length=1,continuity_anchor_sha256='" + "0" * 64 + "'",
+     "UPDATE network_metadata_checkpoint SET source_generation_id='aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'",
+     "DELETE FROM network_metadata_checkpoint"])
++@requires_posix_io
+ def test_blocked_startup_consistency_corruption(tmp_path, damage):
+     with store(tmp_path) as state:
+         seed_blocked(state)
+@@ -614,6 +627,7 @@ def test_batch_order_rejected(tmp_path):
+             state.repo.ingest_batch([item], state.run, state.health, state.anchor)
+ 
+ 
++@requires_posix_io
+ def test_fault_aggregation_processing_clock_bucket(tmp_path):
+     from app.network_metadata.models import RecordOutcome
+     from app.network_metadata.canonical import sha256
+@@ -657,6 +671,7 @@ def test_schema_rejects_noncanonical_block_timestamp(tmp_path, timestamp):
+             state.repo.connection.execute("UPDATE network_metadata_source_generations SET processing_state='blocked',blocked_reason_code='source_record_identity_conflict',blocked_at_utc=?,blocked_record_start_byte_offset=0", (timestamp,))
+ 
+ 
++@requires_posix_io
+ def test_bounded_wal_maintenance_with_held_reader(tmp_path, monkeypatch):
+     with store(tmp_path) as state:
+         reader = sqlite3.connect(state.config.db_path, isolation_level=None)
+diff --git a/tests/network_metadata/test_retention.py b/tests/network_metadata/test_retention.py
+index 67ac0b0929e35cc8ee6f6386b9944056d12aecc8..a8a5893cbd36bc5313e4a522b7aafeaa74989390 100644
+--- a/tests/network_metadata/test_retention.py
++++ b/tests/network_metadata/test_retention.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import pytest
+ from dataclasses import replace
+ from datetime import timedelta
+@@ -11,6 +12,7 @@ from . import store, record, source_event, outcome, seed_blocked, SITE
+ @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
+ @pytest.mark.parametrize("age", [timedelta(days=14) - timedelta(microseconds=1), timedelta(days=14),
+     timedelta(days=14, microseconds=1), timedelta(days=30), timedelta(days=30, microseconds=1)])
++@requires_posix_io
+ def test_late_first_ingest_exact_retention_boundaries(tmp_path, family, age):
+     with store(tmp_path) as state:
+         event = source_event(family, timestamp=ni_format_utc(state.clock() - age))
+@@ -62,6 +64,7 @@ def test_late_first_ingest_exact_retention_boundaries(tmp_path, family, age):
+ 
+ 
+ @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
++@requires_posix_io
+ def test_late_never_observed_sensitive_stays_not_observed(tmp_path, family):
+     with store(tmp_path) as state:
+         event = source_event(family, timestamp=ni_format_utc(state.clock() - timedelta(days=15)))
+@@ -82,6 +85,7 @@ def test_late_never_observed_sensitive_stays_not_observed(tmp_path, family):
+ @pytest.mark.parametrize("age", [15, 31])
+ @pytest.mark.parametrize("disposition", ["duplicate_noop", "source_record_identity_conflict",
+     "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
++@requires_posix_io
+ def test_touched_identity_retention_preserves_proven_disposition(tmp_path, age, disposition):
+     with store(tmp_path) as state:
+         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
+@@ -119,6 +123,7 @@ def test_touched_identity_retention_preserves_proven_disposition(tmp_path, age,
+ 
+ 
+ @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
++@requires_posix_io
+ def test_sensitive_then_core_retention(tmp_path, family):
+     data = record(source_event(family))
+     with store(tmp_path, source=data + b"\n") as state:
+@@ -141,6 +146,7 @@ def test_sensitive_then_core_retention(tmp_path, family):
+         assert state.repo.load_active()[1].committed_byte_offset == item.end
+ 
+ 
++@requires_posix_io
+ def test_not_observed_does_not_turn_expired(tmp_path):
+     event = source_event("tls")
+     event["tls"]["sni"] = None
+@@ -153,6 +159,7 @@ def test_not_observed_does_not_turn_expired(tmp_path):
+         assert state.repo.connection.execute("SELECT sni_presence_state FROM network_metadata_tls").fetchone()[0] == "not_observed"
+ 
+ 
++@requires_posix_io
+ def test_block_survives_46_day_diagnostic_expiry_and_restart(tmp_path):
+     with store(tmp_path) as state:
+         generation, checkpoint = seed_blocked(state)
+diff --git a/tests/network_metadata/test_service.py b/tests/network_metadata/test_service.py
+index 9da18229c4427aa903ecdc97133aa779a3af8ac6..e827387add312f264b69a649e10f46ea7c90f937 100644
+--- a/tests/network_metadata/test_service.py
++++ b/tests/network_metadata/test_service.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import os
+ import json
+ import io
+@@ -16,6 +17,7 @@ from .test_repository import _a_store, _a_outcomes, _a_rows, _a_sql
+ 
+ 
+ @pytest.mark.parametrize("count", [1, 2, 256])
++@requires_posix_io
+ def test_io_hotpath_exact_two_probes_and_all_family_equivalence(tmp_path, monkeypatch, count):
+     import uuid
+     from app.network_metadata import service as module
+@@ -58,6 +60,7 @@ def test_io_hotpath_exact_two_probes_and_all_family_equivalence(tmp_path, monkey
+ 
+ @pytest.mark.parametrize("category", ["duplicate_noop", "source_record_identity_conflict",
+     "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
++@requires_posix_io
+ def test_io_hotpath_transaction_reprobe_does_not_trust_preflight(tmp_path, monkeypatch, category):
+     with _a_store(tmp_path, True, source=(record() + b"\n") * 2) as state:
+         service = service_for(state)
+@@ -100,6 +103,7 @@ def test_io_hotpath_transaction_reprobe_does_not_trust_preflight(tmp_path, monke
+             service.close()
+ 
+ 
++@requires_posix_io
+ def test_io_hotpath_preflight_sql_failure_pauses_storage_without_cursor_gap(tmp_path):
+     import sqlite3
+     with _a_store(tmp_path, True) as state:
+@@ -120,6 +124,7 @@ def test_io_hotpath_preflight_sql_failure_pauses_storage_without_cursor_gap(tmp_
+             service.close()
+ 
+ 
++@requires_posix_io
+ def test_io_hotpath_partial_then_oversized_record_preserves_source_guards(tmp_path):
+     with _a_store(tmp_path, True, source=b"{") as state:
+         service = service_for(state)
+@@ -147,6 +152,7 @@ def test_io_hotpath_partial_then_oversized_record_preserves_source_guards(tmp_pa
+ 
+ @pytest.mark.parametrize("change,reason", [("truncate", "observed_truncation"),
+     ("rewrite", "continuity_anchor_mismatch"), ("rotate", "source_rotated_live")])
++@requires_posix_io
+ def test_io_hotpath_generation_guards_precede_range_optimization(tmp_path, change, reason):
+     with _a_store(tmp_path, True) as state:
+         service = service_for(state)
+@@ -181,6 +187,7 @@ def service_for(state, **kwargs):
+ 
+ 
+ @pytest.mark.parametrize("change", ["restart", "replacement", "boot", "binding", "missing", "retention"])
++@requires_posix_io
+ def test_blocked_restart_never_opens_source_or_resolves(tmp_path, change):
+     with store(tmp_path) as state:
+         generation, checkpoint = seed_blocked(state)
+@@ -213,6 +220,7 @@ def test_blocked_restart_never_opens_source_or_resolves(tmp_path, change):
+         service.close()
+ 
+ 
++@requires_posix_io
+ def test_source_absent_alive_then_append(tmp_path):
+     clock, cfg = Clock(), configuration(tmp_path)
+     repo = NetworkMetadataRepository(cfg, clock=clock)
+@@ -234,6 +242,7 @@ def test_source_absent_alive_then_append(tmp_path):
+         repo.close()
+ 
+ 
++@requires_posix_io
+ def test_live_rotation_drains_tail_without_raw_persistence(tmp_path):
+     with store(tmp_path, source=record() + b"\nunterminated-secret") as state:
+         service = service_for(state)
+@@ -252,6 +261,7 @@ def test_live_rotation_drains_tail_without_raw_persistence(tmp_path):
+         service.close()
+ 
+ 
++@requires_posix_io
+ def test_binding_cutover_has_no_rewind(tmp_path):
+     with store(tmp_path) as state:
+         service = service_for(state)
+@@ -273,6 +283,7 @@ def test_binding_cutover_has_no_rewind(tmp_path):
+ 
+ 
+ @pytest.mark.parametrize("source_state", ["valid", "absent", "nonregular", "stat", "open"])
++@requires_posix_io
+ def test_reboot_closes_old_generation_before_source_inspection(tmp_path, monkeypatch, source_state):
+     with store(tmp_path) as state:
+         original = service_for(state)
+@@ -334,6 +345,7 @@ def test_reboot_closes_old_generation_before_source_inspection(tmp_path, monkeyp
+             restarted.close()
+ 
+ 
++@requires_posix_io
+ def test_source_disappears_and_same_inode_returns(tmp_path):
+     with store(tmp_path) as state:
+         service = service_for(state)
+@@ -353,6 +365,7 @@ def test_source_disappears_and_same_inode_returns(tmp_path):
+         service.close()
+ 
+ 
++@requires_posix_io
+ def test_runtime_storage_rollback_then_recovery(tmp_path):
+     with store(tmp_path) as state:
+         service = service_for(state)
+@@ -371,6 +384,7 @@ def test_runtime_storage_rollback_then_recovery(tmp_path):
+ @pytest.mark.parametrize("change,reason", [("replacement", "source_replaced_while_reader_down"),
+     ("truncation", "observed_truncation"), ("anchor", "continuity_anchor_mismatch"),
+     ("boot", "host_reboot_source_lost")])
++@requires_posix_io
+ def test_runnable_restart_source_transitions(tmp_path, change, reason):
+     with store(tmp_path) as state:
+         original = service_for(state)
+@@ -401,6 +415,7 @@ def test_runnable_restart_source_transitions(tmp_path, change, reason):
+         restarted.close()
+ 
+ 
++@requires_posix_io
+ def test_oversized_tail_closes_once_without_oversized_fault(tmp_path):
+     with store(tmp_path, source=b"x" * 2000000) as state:
+         state.config = replace(state.config, max_record_bytes=4096)
+@@ -419,6 +434,7 @@ def test_oversized_tail_closes_once_without_oversized_fault(tmp_path):
+         service.close()
+ 
+ 
++@requires_posix_io
+ def test_oversized_terminated_dedicated_checkpoint(tmp_path):
+     with store(tmp_path, source=b"x" * 5000 + b"\n" + record() + b"\n") as state:
+         state.config = replace(state.config, max_record_bytes=4096)
+@@ -432,7 +448,8 @@ def test_oversized_terminated_dedicated_checkpoint(tmp_path):
+         service.close()
+ 
+ 
+-@pytest.mark.parametrize("failure", ["nonregular", "open", "stat", "fstat", "read"])
++@pytest.mark.parametrize("failure", [pytest.param("nonregular", marks=requires_posix_io), "open", "stat",
++    pytest.param("fstat", marks=requires_posix_io), pytest.param("read", marks=requires_posix_io)])
+ def test_source_unavailable_preserves_checkpoint_and_safe_health(tmp_path, monkeypatch, failure):
+     with store(tmp_path) as state:
+         output = io.StringIO()
+@@ -488,6 +505,7 @@ def test_source_unavailable_preserves_checkpoint_and_safe_health(tmp_path, monke
+ 
+ 
+ @pytest.mark.parametrize("restart", [False, True])
++@requires_posix_io
+ def test_pending_reboot_gap_survives_absence_and_restart(tmp_path, restart):
+     with store(tmp_path) as state:
+         (tmp_path / "source.jsonl").unlink()
+@@ -514,6 +532,7 @@ def test_pending_reboot_gap_survives_absence_and_restart(tmp_path, restart):
+             service.close()
+ 
+ 
++@requires_posix_io
+ def test_first_source_and_clean_live_rotation_have_no_gap(tmp_path):
+     clock, cfg = Clock(), configuration(tmp_path)
+     repo = NetworkMetadataRepository(cfg, clock=clock)
+@@ -538,6 +557,7 @@ def test_first_source_and_clean_live_rotation_have_no_gap(tmp_path):
+ 
+ 
+ @pytest.mark.parametrize("new_fault", [False, True])
++@requires_posix_io
+ def test_partial_restart_preserved_until_clean_heartbeat(tmp_path, new_fault):
+     with store(tmp_path, source=b"{\n") as state:
+         service = service_for(state)
+@@ -564,6 +584,7 @@ def test_partial_restart_preserved_until_clean_heartbeat(tmp_path, new_fault):
+             service.close()
+ 
+ 
++@requires_posix_io
+ def test_continuity_gap_partial_preserved_on_same_generation_restart(tmp_path):
+     with store(tmp_path) as state:
+         service = NetworkMetadataService(state.config, state.repo, IDENTITY, Capture(),
+@@ -584,6 +605,7 @@ def test_continuity_gap_partial_preserved_on_same_generation_restart(tmp_path):
+             restarted.close()
+ 
+ 
++@requires_posix_io
+ def test_100_timestamp_only_batches_then_exact_heartbeat(tmp_path):
+     with store(tmp_path, source=b"") as state:
+         service = service_for(state)
+@@ -608,6 +630,7 @@ def test_100_timestamp_only_batches_then_exact_heartbeat(tmp_path):
+ 
+ 
+ @pytest.mark.parametrize("boundary", ["resume", "cutover", "ingest_anchor"])
++@requires_posix_io
+ def test_source_anchor_failure_is_not_sqlite_failure(tmp_path, monkeypatch, boundary):
+     with store(tmp_path) as state:
+         service = service_for(state)
+@@ -647,6 +670,7 @@ def test_source_anchor_failure_is_not_sqlite_failure(tmp_path, monkeypatch, boun
+ 
+ 
+ @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
++@requires_posix_io
+ def test_source_failure_keeps_heartbeat_and_due_retention(tmp_path, monkeypatch, family):
+     with store(tmp_path, source=record(source_event(family)) + b"\n") as state:
+         service = service_for(state)
+@@ -687,6 +711,7 @@ def test_source_failure_keeps_heartbeat_and_due_retention(tmp_path, monkeypatch,
+             service.close()
+ 
+ 
++@requires_posix_io
+ def test_real_sqlite_transaction_failure_remains_storage_failure(tmp_path):
+     with store(tmp_path) as state:
+         service = service_for(state)
+@@ -712,6 +737,7 @@ def test_real_sqlite_transaction_failure_remains_storage_failure(tmp_path):
+     ("running_anchor", "continuity_anchor_mismatch", True),
+     ("down_replacement", "source_replaced_while_reader_down", True),
+     ("down_truncation", "observed_truncation", True)])
++@requires_posix_io
+ def test_terminal_discontinuity_closes_before_failed_open_and_recovers(tmp_path, change, reason, gap, restart):
+     tail = b"unfinished-tail" if change == "live_rotation" else b""
+     with store(tmp_path, source=record() + b"\n" + tail) as state:
+@@ -788,6 +814,7 @@ def test_terminal_discontinuity_closes_before_failed_open_and_recovers(tmp_path,
+             service.close()
+ 
+ 
++@requires_posix_io
+ def test_same_identity_open_failure_before_anchor_preserves_authority(tmp_path):
+     with store(tmp_path) as state:
+         service = service_for(state)
+@@ -814,6 +841,7 @@ def test_same_identity_open_failure_before_anchor_preserves_authority(tmp_path):
+ 
+ 
+ @pytest.mark.parametrize("rollback", [False, True])
++@requires_posix_io
+ def test_reader_down_anchor_mismatch_one_open_one_atomic_transition(tmp_path, monkeypatch, rollback):
+     with store(tmp_path) as state:
+         service = service_for(state)
+@@ -874,6 +902,7 @@ def test_reader_down_anchor_mismatch_one_open_one_atomic_transition(tmp_path, mo
+             service.close()
+ 
+ 
++@requires_posix_io
+ def test_close_transaction_failure_retains_owned_old_reader(tmp_path):
+     with store(tmp_path) as state:
+         service = service_for(state)
+@@ -899,6 +928,7 @@ def test_close_transaction_failure_retains_owned_old_reader(tmp_path):
+ 
+ 
+ @pytest.mark.parametrize("return_as", ["same", "different", "truncated", "anchor"])
++@requires_posix_io
+ def test_absent_path_pauses_unread_records_then_full_reappearance_decision(tmp_path, monkeypatch, return_as):
+     unread = record() + b"\n" + record(source_event("tls")) + b"\n"
+     with store(tmp_path, source=unread) as state:
+@@ -977,6 +1007,7 @@ def test_absent_path_pauses_unread_records_then_full_reappearance_decision(tmp_p
+ 
+ 
+ @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
++@requires_posix_io
+ def test_canonical_absence_keeps_heartbeat_retention_and_wal(tmp_path, monkeypatch, family):
+     with store(tmp_path, source=record(source_event(family)) + b"\n") as state:
+         service = service_for(state)
+diff --git a/tests/network_metadata/test_source.py b/tests/network_metadata/test_source.py
+index c91c4353e90cf7e2764f1ede72733189017428c8..1acd23b8ca8621459cf9e6b21c3cb27f40631857 100644
+--- a/tests/network_metadata/test_source.py
++++ b/tests/network_metadata/test_source.py
+@@ -1,3 +1,4 @@
++from . import requires_posix_io
+ import os
+ import hashlib
+ from dataclasses import replace
+@@ -6,6 +7,7 @@ from app.network_metadata.source import BinarySourceReader, continuity_anchor, d
+ from . import store, record, configuration, BOOT
+ 
+ 
++@requires_posix_io
+ def test_reader_append_partial_and_crlf(tmp_path):
+     path = tmp_path / "reader"
+     path.write_bytes(b'{}\r\n{"partial":')
+@@ -25,6 +27,7 @@ def test_reader_append_partial_and_crlf(tmp_path):
+         os.close(fd)
+ 
+ 
++@requires_posix_io
+ def test_oversize_discard_and_final_tail_bounded(tmp_path):
+     path = tmp_path / "reader"
+     path.write_bytes(b"x" * 12000 + b"\n" + b"x" * 13000)
+@@ -43,6 +46,7 @@ def test_oversize_discard_and_final_tail_bounded(tmp_path):
+         os.close(fd)
+ 
+ 
++@requires_posix_io
+ def test_prefix_before_oversize_dedicated_batch(tmp_path):
+     path = tmp_path / "reader"
+     path.write_bytes(b"{}\n" + b"x" * 5000 + b"\n")
+@@ -69,6 +73,7 @@ def test_exact_decision_order(tmp_path):
+         assert continuity_anchor(state.fd, 0) == (0, 0, None)
+ 
+ 
++@requires_posix_io
+ def test_reader_restart_checkpoint_and_anchor(tmp_path):
+     with store(tmp_path) as state:
+         reader = BinarySourceReader(state.fd, max_record_bytes=4096)
+@@ -79,6 +84,7 @@ def test_reader_restart_checkpoint_and_anchor(tmp_path):
+         assert restarted.read_batch(256, 1048576) == []
+ 
+ 
++@requires_posix_io
+ def test_discard_hash_streams_across_bounded_polls_without_retaining_tail(tmp_path):
+     path = tmp_path / "stream-hash"
+     data = b"x" * 2000000 + b"\r"
+diff --git a/tests/network_metadata_projection/test_external_peer_v2.py b/tests/network_metadata_projection/test_external_peer_v2.py
+index a88576de7980a70585dde3f06d79fe84bd7a1cf1..beffb1a1d346e7bfce2e777eee4ec14544033e10 100644
+--- a/tests/network_metadata_projection/test_external_peer_v2.py
++++ b/tests/network_metadata_projection/test_external_peer_v2.py
+@@ -1,4 +1,5 @@
+ """Owner T01–T11 / V2 regression fixtures: entirely disposable, no live reset."""
++from tests.network_metadata import requires_posix_io
+ import hashlib
+ import json
+ import shutil
+@@ -186,6 +187,7 @@ def seed_source(source, *, data=None, start=0, generation=None):
+     return item
+ 
+ 
++@requires_posix_io
+ def test_V2_08_consistent_read_only_tail_not_raw_length_and_empty_generation(tmp_path):
+     with store(tmp_path) as source:
+         reader = NetworkMetadataProjectionSourceReadService(source.config.db_path)
+@@ -212,6 +214,7 @@ def staged(source, tmp_path, suffix="stage"):
+     return manifest, keep
+ 
+ 
++@requires_posix_io
+ def test_T06_T07_V2_08_09_reset_append_restart_no_pre_reset_replay(tmp_path):
+     data = record(source_event(dest_ip="203.0.113.93"))
+     with store(tmp_path, source=(data+b"\n")*3) as source:
+@@ -352,6 +355,7 @@ def test_T11_V2_14_closed_counter_and_no_raw_endpoint_logs(tmp_path, caplog):
+         value.repo.close()
+ 
+ 
++@requires_posix_io
+ def test_V2_08_single_snapshot_concurrent_append_preserves_new_tail(tmp_path, monkeypatch):
+     data = record()
+     with store(tmp_path, source=(data+b"\n")*2) as source:
+@@ -373,6 +377,7 @@ def test_V2_08_single_snapshot_concurrent_append_preserves_new_tail(tmp_path, mo
+ 
+ 
+ @pytest.mark.parametrize("point,committed", [("before_commit", False), ("after_commit", True)])
++@requires_posix_io
+ def test_V2_09_10_post_floor_crash_and_real_restart(tmp_path, point, committed):
+     data = record(source_event(dest_ip="203.0.113.93"))
+     with store(tmp_path, source=(data+b"\n")*2) as source:
+@@ -413,6 +418,7 @@ def test_V2_09_10_post_floor_crash_and_real_restart(tmp_path, point, committed):
+             repo.close()
+ 
+ 
++@requires_posix_io
+ def test_V2_09_empty_and_new_generation_natural_beginning_retention(tmp_path):
+     from app.network_metadata.retention import RetentionPolicy
+     data = record()
+@@ -517,6 +523,7 @@ def test_V2_manifest_external_hash_and_corruption_fail_closed(tmp_path):
+             verify(manifest_path=str(path), admission_json=admitted_source(source), expected_manifest_sha256=frozen)
+ 
+ 
++@requires_posix_io
+ def test_T09_V2_13_fresh_pair_publishes_only_post_floor_ni03_ni04(tmp_path):
+     from tests.network_service_recognition.support import AT, bundle
+     from tests.network_service_recognition.test_summary import EVENT
+@@ -601,14 +608,18 @@ def test_bootstrap_verify_exact_operator_inventory(tmp_path):
+             verify(manifest_path=str(path), admission_json=admitted_source(source), expected_inventory=other)
+ 
+ 
+-def test_synthetic_scope_fixture_canonical_identity_and_disabled_boundary():
++def test_synthetic_scope_fixture_canonical_identity_and_disabled_boundary(tmp_path):
+     path = Path(__file__).parent / "fixtures" / "external_peer_scope_synthetic.json"
+     fixture = ScopeAdmission(path.read_text())
+     assert fixture.canonical == ScopeAdmission(scope_admission()).canonical
+     assert projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "false",
+         "NETWORK_METADATA_PROJECTION_SCOPE_ADMISSION_JSON": "not-json"}) == ProjectionConfig()
+     with pytest.raises(ProjectionConflict, match="scope_admission_untrusted"):
+-        projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "true"})
++        projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "true",
++            "NETWORK_METADATA_PROJECTION_DB_PATH": str(tmp_path / "projection.sqlite3"),
++            "NETWORK_METADATA_DB_PATH": str(tmp_path / "metadata.sqlite3"),
++            "VISITOR_REGISTRY_DB_PATH": str(tmp_path / "registry.sqlite3")})
++    assert list(tmp_path.iterdir()) == []
+ 
+ 
+ def test_runtime_start_requires_discard_epoch_no_implicit_replay(tmp_path):
+diff --git a/tests/network_metadata_projection/test_projection_source.py b/tests/network_metadata_projection/test_projection_source.py
+index 322239118711fcef208c186b8d95851f9e64f47e..a8fec9edcd128f1067a66d5cfb298e1113b8f6f3 100644
+--- a/tests/network_metadata_projection/test_projection_source.py
++++ b/tests/network_metadata_projection/test_projection_source.py
+@@ -1,3 +1,4 @@
++from tests.network_metadata import requires_posix_io
+ from dataclasses import asdict
+ 
+ import pytest
+@@ -16,6 +17,7 @@ def seed(state, count=1):
+     return NetworkMetadataProjectionSourceReadService(state.config.db_path)
+ 
+ 
++@requires_posix_io
+ def test_exact_source_record_batch_offset_zero_and_retention(tmp_path):
+     with store(tmp_path, source=(record() + b"\n") * 3) as state:
+         reader = seed(state, 3)
+@@ -52,6 +54,7 @@ def test_exact_source_record_batch_offset_zero_and_retention(tmp_path):
+     "UPDATE network_metadata_source_health SET capture_source_id='different-source'",
+     "UPDATE network_metadata_ingest_runs SET normalizer_version='different-version'",
+ ])
++@requires_posix_io
+ def test_untrusted_source_fails_without_mutation(tmp_path, damage):
+     with store(tmp_path) as state:
+         reader = seed(state)
+@@ -66,6 +69,7 @@ def test_untrusted_source_fails_without_mutation(tmp_path, damage):
+ 
+ @pytest.mark.parametrize("method", ["list_source_generations", "read_projection_batch",
+     "get_projection_source_record", "get_source_progress"])
++@requires_posix_io
+ def test_source_connections_read_only_and_no_raw_payload_tables(tmp_path, monkeypatch, method, record_property):
+     import sqlite3
+     with store(tmp_path) as state:
+@@ -95,6 +99,7 @@ def test_source_connections_read_only_and_no_raw_payload_tables(tmp_path, monkey
+         assert not any("from network_metadata_dns" in value or "from network_metadata_source_records" in value for value in selects)
+ 
+ 
++@requires_posix_io
+ def test_not_observed_does_not_reconstruct_endpoints(tmp_path):
+     with store(tmp_path) as state:
+         reader = seed(state)
+@@ -106,6 +111,7 @@ def test_not_observed_does_not_reconstruct_endpoints(tmp_path):
+         assert result.src_ip is result.dst_ip is None
+ 
+ 
++@requires_posix_io
+ def test_source_generation_order_is_opened_time_then_identity(tmp_path):
+     from tests.network_metadata import BOOT
+     with store(tmp_path) as state:
+diff --git a/tests/visitor_registry/test_device_registry.py b/tests/visitor_registry/test_device_registry.py
+index 22ae0843ac147b42af8a5aec0f9f5472914547c8..fbe0584c642862365cf0b032775a88019bfefac8 100644
+--- a/tests/visitor_registry/test_device_registry.py
++++ b/tests/visitor_registry/test_device_registry.py
+@@ -6,6 +6,7 @@ import socket
+ import sqlite3
+ import threading
+ import time
++from tempfile import TemporaryDirectory
+ from copy import deepcopy
+ from pathlib import Path
+ 
+@@ -1403,17 +1404,21 @@ def test_fifo_source_candidate_does_not_block_and_is_ignored(tmp_path):
+     reason="Unix socket only",
+ )
+ def test_unix_socket_source_candidate_is_ignored(tmp_path):
+-    config, _, repository, reader, _ = make_stack(tmp_path)
+-    source_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+-    try:
+-        source_socket.bind(config.source_log_path)
+-        result = reader.scan()
+-    finally:
+-        source_socket.close()
++    # AF_UNIX's pathname limit is independent of pytest's --basetemp length.
++    with TemporaryDirectory(prefix="vr-", dir="/tmp") as short_root:
++        socket_path = str(Path(short_root) / "source.sock")
++        assert len(os.fsencode(socket_path)) < 100
++        config, _, repository, reader, _ = make_stack(
++            tmp_path, visitor_snapshot_log_file=socket_path,
++        )
++        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as source_socket:
++            source_socket.bind(config.source_log_path)
++            result = reader.scan()
+ 
+-    assert result.complete
+-    assert result.reason is None
+-    assert repository.get_reader_states() == {}
++        assert result.complete
++        assert result.reason is None
++        assert repository.get_reader_states() == {}
++    assert not Path(short_root).exists()
+ 
+ 
+ @pytest.mark.skipif(os.name != "posix", reason="POSIX device only")

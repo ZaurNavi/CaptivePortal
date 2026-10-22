@@ -1,0 +1,1007 @@
+diff --git a/app/network_metadata/config.py b/app/network_metadata/config.py
+index 061d78d7bf3c22e4916d386acaf51d9a54236b59..1f13eedf6017bd5f12a1ca81ab402d3c50b637b9 100644
+--- a/app/network_metadata/config.py
++++ b/app/network_metadata/config.py
+@@ -88,8 +88,9 @@ def network_metadata_config_from_env(environ=None):
+         if (not coalesce and delay != 0) or (coalesce and delay not in {100, 250, 500}):
+             raise NetworkMetadataConfigError()
+         aggregation = boolean("NETWORK_METADATA_TELEMETRY_AGGREGATION_ENABLED")
++        hotpath = boolean("NETWORK_METADATA_IO_HOTPATH_V1_ENABLED")
+         config = replace(config, ingest_coalesce_enabled=coalesce, ingest_coalesce_max_ms=delay,
+-                         telemetry_aggregation_enabled=aggregation)
++                         telemetry_aggregation_enabled=aggregation, io_hotpath_v1_enabled=hotpath)
+         binding_value = asdict(binding)
+         binding_value["ipv4_cidrs"] = list(binding.ipv4_cidrs)
+         configuration = {"capture_scope_binding": binding_value, "db_path": db,
+@@ -102,6 +103,8 @@ def network_metadata_config_from_env(environ=None):
+             configuration.update(ingest_coalesce_enabled=True, ingest_coalesce_max_ms=delay)
+         if aggregation:
+             configuration["telemetry_aggregation_enabled"] = True
++        if hotpath:
++            configuration["io_hotpath_v1_enabled"] = True
+         return replace(config, configuration_digest=semantic_digest(configuration))
+     except NetworkMetadataValidationError:
+         raise NetworkMetadataConfigError() from None
+diff --git a/app/network_metadata/models.py b/app/network_metadata/models.py
+index d79d65c5e7fdf030ab7c2511d477116e8f7cc29f..906a7af67d2a7971f8231bc7c8efb10d29329452 100644
+--- a/app/network_metadata/models.py
++++ b/app/network_metadata/models.py
+@@ -123,6 +123,7 @@ class NetworkMetadataConfig:
+     ingest_coalesce_enabled: bool = False
+     ingest_coalesce_max_ms: int = 0
+     telemetry_aggregation_enabled: bool = False
++    io_hotpath_v1_enabled: bool = False
+ 
+     @property
+     def writer_lock_path(self):
+diff --git a/app/network_metadata/repository.py b/app/network_metadata/repository.py
+index 46bc8867c5a29284108812a42a9f26fb8311badc..6d185f27e6300aaf089fcd2bf13553b1d0066711 100644
+--- a/app/network_metadata/repository.py
++++ b/app/network_metadata/repository.py
+@@ -5,13 +5,14 @@ import uuid
+ from contextlib import contextmanager
+ from dataclasses import asdict, replace
+ from datetime import datetime, timedelta, timezone
++from types import MappingProxyType
+ 
+ from .canonical import ni01_canonical_json
+ from .models import (LOGICAL_SOURCE_ID, NORMALIZER_VERSION, CONFLICT_CATEGORIES,
+     FAULT_CATEGORIES, SourceGenerationV1, SourceCheckpointV1,
+     NetworkMetadataStorageUnavailable, NetworkMetadataStorageCorrupt,
+     NetworkMetadataStorageLimit, NetworkMetadataWriterUnavailable,
+-    NetworkMetadataValidationError)
++    NetworkMetadataValidationError, INT64_MAX)
+ from .schema import TABLE_DDL, create_schema, validate_schema
+ from .validation import integer, digest, canonical_uuid, ni_format_utc, ni_timestamp
+ 
+@@ -42,12 +43,15 @@ class NetworkMetadataRepository:
+         self.config, self.clock, self.telemetry = config, clock, telemetry
+         self.connection = None
+         self.capacity_halted = False
++        self._insert_columns = self._insert_columns_connection = self._insert_columns_path = None
+ 
+     def emit(self, event, **fields):
+         if self.telemetry is not None:
+             self.telemetry.emit(event, **fields)
+ 
+     def initialize(self):
++        if self.config.io_hotpath_v1_enabled:
++            self.close()
+         try:
+             self.connection = sqlite3.connect(self.config.db_path, timeout=.5, isolation_level=None)
+             self.connection.row_factory = sqlite3.Row
+@@ -62,6 +66,22 @@ class NetworkMetadataRepository:
+                 with self.transaction():
+                     create_schema(self.connection, ni_format_utc(self.clock()))
+             validate_schema(self.connection)
++            if self.config.io_hotpath_v1_enabled:
++                columns = {}
++                for table in TABLE_DDL:
++                    rows = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
++                    if (not rows or any(not isinstance(row, (sqlite3.Row, tuple)) or
++                            len(row) != 6 or type(row[0]) is not int or row[0] != index or
++                            type(row[1]) is not str or not row[1].isascii() or not row[1].isidentifier()
++                            for index, row in enumerate(rows))):
++                        raise NetworkMetadataStorageCorrupt()
++                    names = frozenset(row[1] for row in rows)
++                    if len(names) != len(rows):
++                        raise NetworkMetadataStorageCorrupt()
++                    columns[table] = names
++                self._insert_columns = MappingProxyType(columns)
++                self._insert_columns_connection = self.connection
++                self._insert_columns_path = self.config.db_path
+             page_size = self.connection.execute("PRAGMA page_size").fetchone()[0]
+             cap = self.config.max_db_bytes // page_size
+             if self.connection.execute("PRAGMA page_count").fetchone()[0] > cap:
+@@ -75,9 +95,14 @@ class NetworkMetadataRepository:
+         except (sqlite3.Error, OSError):
+             self.close()
+             raise NetworkMetadataStorageUnavailable() from None
++        except (NetworkMetadataStorageUnavailable, NetworkMetadataValidationError):
++            if self.config.io_hotpath_v1_enabled:
++                self.close()
++            raise
+         return self
+ 
+     def close(self):
++        self._insert_columns = self._insert_columns_connection = self._insert_columns_path = None
+         if self.connection is not None:
+             self.connection.close()
+             self.connection = None
+@@ -104,7 +129,14 @@ class NetworkMetadataRepository:
+     def _insert(self, table, values):
+         if table not in TABLE_DDL:
+             raise NetworkMetadataValidationError()
+-        columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")}
++        if self.config.io_hotpath_v1_enabled:
++            if (self._insert_columns is None or self.connection is None or
++                    self._insert_columns_connection is not self.connection or
++                    self._insert_columns_path != self.config.db_path):
++                raise NetworkMetadataStorageUnavailable()
++            columns = self._insert_columns[table]
++        else:
++            columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")}
+         if not set(values) <= columns:
+             raise NetworkMetadataValidationError()
+         names = ",".join(values)
+@@ -252,6 +284,52 @@ class NetworkMetadataRepository:
+             return "normalizer_determinism_conflict"
+         return "duplicate_noop"
+ 
++    def identity_range_empty(self, generation_id, first_start, last_start):
++        """One exact generation probe; no cached/preflight transactional authority."""
++        canonical_uuid(generation_id, 4)
++        integer(first_start)
++        integer(last_start, first_start)
++        if self.connection is None:
++            raise NetworkMetadataStorageUnavailable()
++        try:
++            row = self.connection.execute(
++                "SELECT 1 FROM network_metadata_source_records WHERE source_generation_id=? "
++                "AND record_start_byte_offset BETWEEN ? AND ? LIMIT 1",
++                (generation_id, first_start, last_start)).fetchone()
++        except sqlite3.Error:
++            raise NetworkMetadataStorageUnavailable() from None
++        if row is None:
++            return True
++        if not isinstance(row, (sqlite3.Row, tuple)) or len(row) != 1 or type(row[0]) is not int or row[0] != 1:
++            raise NetworkMetadataStorageUnavailable()
++        return False
++
++    def _accumulate_fault(self, groups, generation_id, category, now, offset):
++        if type(category) is not str or category not in FAULT_CATEGORIES:
++            raise NetworkMetadataValidationError()
++        clock = ni_timestamp(now, canonical=True)
++        epoch = ni_format_utc(clock.replace(minute=clock.minute - clock.minute % 5, second=0, microsecond=0))
++        key = (LOGICAL_SOURCE_ID, generation_id or "none", category, epoch)
++        if key not in groups:
++            groups[key] = [generation_id, 1, now, now, offset, offset]
++        else:
++            group = groups[key]
++            group[1] += 1
++            group[3], group[5] = now, offset
++
++    def _flush_fault_groups(self, groups):
++        for key in sorted(groups):
++            generation_id, count, first_seen, last_seen, first_offset, last_offset = groups[key]
++            integer(count, 1, self.config.batch_max_records)
++            result = self.connection.execute("""INSERT INTO network_metadata_ingest_fault_aggregates
++                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(logical_source_id,source_generation_key,fault_category,aggregation_epoch_start_utc)
++                DO UPDATE SET count=count+excluded.count,last_seen_utc=excluded.last_seen_utc,last_relevant_offset=excluded.last_relevant_offset
++                WHERE typeof(count)='integer' AND count<=? - excluded.count""",
++                (key[0], key[1], generation_id, key[2], key[3], count,
++                 first_seen, last_seen, first_offset, last_offset, INT64_MAX))
++            if result.rowcount != 1:
++                raise NetworkMetadataStorageUnavailable()
++
+     def _crash_point(self, label):
+         """Private no-op injection boundary. Never configured in production."""
+ 
+@@ -283,6 +361,8 @@ class NetworkMetadataRepository:
+         faults = 0
+         previous_health = controller.last_snapshot
+         with self.transaction() as now:
++            all_new = self.config.io_hotpath_v1_enabled and self.identity_range_empty(
++                generation.source_generation_id, outcomes[0].start, outcomes[-1].start)
+             candidate = controller.copy()
+             plan = []
+             sensitive_cutoff = ni_timestamp(now, canonical=True) - timedelta(days=14)
+@@ -290,7 +370,7 @@ class NetworkMetadataRepository:
+             # Phase A is read-only in SQLite: freeze identity dispositions and
+             # final prefix health before retention or first-ingest writes.
+             for outcome in outcomes:
+-                disposition = self.identity_outcome(generation.source_generation_id, outcome)
++                disposition = "new" if all_new else self.identity_outcome(generation.source_generation_id, outcome)
+                 if disposition in CONFLICT_CATEGORIES:
+                     # Observe trustworthy source time, not its ordinary fault/filter category.
+                     candidate.observe_output_time(outcome.output_event_at)
+@@ -311,12 +391,16 @@ class NetworkMetadataRepository:
+             batch_health_id = candidate.ensure(self, generation, now)
+             # Phase B uses only the frozen prefix. Existing provenance is never
+             # rewritten; every first-ingest observation owns the same final ref.
++            fault_groups = {} if self.config.io_hotpath_v1_enabled else None
+             for outcome, disposition in plan:
+                 if disposition != "new":
+                     from .retention import RetentionPolicy
+                     RetentionPolicy(self).expire_touched_identity(generation.source_generation_id, outcome.start, now)
+                 if disposition in CONFLICT_CATEGORIES:
+-                    self._fault(generation.source_generation_id, disposition, now, outcome.start)
++                    if self.config.io_hotpath_v1_enabled:
++                        self._accumulate_fault(fault_groups, generation.source_generation_id, disposition, now, outcome.start)
++                    else:
++                        self._fault(generation.source_generation_id, disposition, now, outcome.start)
+                     faults += 1
+                     break
+                 if disposition == "duplicate_noop":
+@@ -328,8 +412,13 @@ class NetworkMetadataRepository:
+                     self._crash_point("after_observation_insert_before_commit")
+                     committed += 1
+                 else:
+-                    self._fault(generation.source_generation_id, outcome.category, now, outcome.start)
++                    if self.config.io_hotpath_v1_enabled:
++                        self._accumulate_fault(fault_groups, generation.source_generation_id, outcome.category, now, outcome.start)
++                    else:
++                        self._fault(generation.source_generation_id, outcome.category, now, outcome.start)
+                     faults += 1
++            if self.config.io_hotpath_v1_enabled:
++                self._flush_fault_groups(fault_groups)
+             self._crash_point("before_checkpoint_update")
+             anchor = anchor_provider(cursor)
+             self.connection.execute("UPDATE network_metadata_checkpoint SET committed_byte_offset=?,continuity_anchor_start_offset=?,continuity_anchor_length=?,continuity_anchor_sha256=?,updated_at_utc=? WHERE logical_source_id=?",
+diff --git a/app/network_metadata/service.py b/app/network_metadata/service.py
+index 7d433b82c33c06623bb757cf3d6a4666b1d115a6..dc27d46e6ad1bdb517f447b14c70afd996baa2ac 100644
+--- a/app/network_metadata/service.py
++++ b/app/network_metadata/service.py
+@@ -329,6 +329,8 @@ class NetworkMetadataService:
+                             "source_absent" not in self.health.local_reasons or self._path_info() is not None):
+                         self.health.source_available()
+                     if records:
++                        all_new = self.config.io_hotpath_v1_enabled and repo.identity_range_empty(
++                            generation.source_generation_id, records[0].start, records[-1].start)
+                         outcomes = []
+                         for record in records:
+                             result = (normalize_record(record.data, source_generation_id=generation.source_generation_id,
+@@ -337,7 +339,7 @@ class NetworkMetadataService:
+                                 else RecordOutcome(record.start, record.end, record.byte_length, "record_too_large",
+                                     source_record_sha256=record.source_record_sha256))
+                             outcomes.append(result)
+-                            if repo.identity_outcome(generation.source_generation_id, result) in {
++                            if not all_new and repo.identity_outcome(generation.source_generation_id, result) in {
+                                 "source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"}:
+                                 break
+                         repo.ingest_batch(outcomes, self.run_id, self.health,
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 119e851dd1cac527c66b7b2d08835dc7e83bccda..87c64934af0d53c3d71588e9e1e3140d07dd8857 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -686,3 +686,29 @@ Portal candidate validation checks General/Admin values, canonical non-secret
+ Controller prerequisites and all fourteen Portal values. A new generation carries
+ its parent secret binding unchanged without decrypting it. General/Controller
+ full secret validation and Stage-4 fail-closed startup remain unchanged.
++### NI-01 ingestion hot path — PERF-IO-NI01-A
++
++`NETWORK_METADATA_IO_HOTPATH_V1_ENABLED` is an independent process-startup
++boolean, **default OFF** (unset or literal `false`). Only lowercase `true`
++and `false` are accepted when `NETWORK_METADATA_ENABLED=true`; malformed
++values cause controlled NI-01 startup failure. Disabled NI-01 does not parse it.
++
++The single switch enables all three A optimizations together: an exact
++generation/start-offset range probe before normalization plus an independent
++probe under `BEGIN IMMEDIATE`; a validated connection-owned immutable insert
++column allowlist; and one fault UPSERT per actually reached batch-local group.
++Any overlap uses the original ordered per-record identity checks.
++
++OFF preserves the legacy SQL path and omits the new flag from canonical
++configuration-digest inputs. ON includes `io_hotpath_v1_enabled=true` in that
++digest for explicit run lineage. There is no Admin/runtime toggle; changing
++the environment requires a separately authorized controlled restart.
++
++SQLite V1 schema/indexes, WAL/FULL durability, source/replay/checkpoint semantics,
++health, event-count telemetry and all downstream read contracts are unchanged.
++Package B retention optimization is not implemented by A.
++
++This opt-in reduces measured SQL statement amplification only. Physical IOPS
++or host-load improvement is not established by statement counts. Publication
++does not authorize production activation; independent Tech Lead release and
++performance checks plus Owner authorization remain required.
+diff --git a/tests/network_metadata/test_capacity.py b/tests/network_metadata/test_capacity.py
+index a4fbbd53d563d6123e484bb7a7b375f374b0de02..3818e30dac66f250c8d379e34171cdf6eb272b2d 100644
+--- a/tests/network_metadata/test_capacity.py
++++ b/tests/network_metadata/test_capacity.py
+@@ -6,6 +6,24 @@ from . import store, source_event, record, outcome
+ CAPACITY_METRICS = {}
+ 
+ 
++def test_io_hotpath_capacity_guard_precedes_transactional_probe(tmp_path, monkeypatch):
++    import pytest
++    from app.network_metadata.models import NetworkMetadataStorageLimit
++    from .test_repository import _a_store, _a_outcomes, _a_rows
++    with _a_store(tmp_path, True) as state:
++        before = _a_rows(state.repo)
++        def no_headroom():
++            raise NetworkMetadataStorageLimit()
++        def forbidden(*_):
++            pytest.fail("no identity probe may run without capacity reservation")
++        monkeypatch.setattr(state.repo, "ensure_headroom", no_headroom)
++        monkeypatch.setattr(state.repo, "identity_range_empty", forbidden)
++        with pytest.raises(NetworkMetadataStorageLimit):
++            state.repo.ingest_batch(_a_outcomes(state, [record()]), state.run, state.health, state.anchor)
++        assert _a_rows(state.repo) == before
++        assert not state.repo.connection.in_transaction
++
++
+ def test_3000_temporary_observation_capacity(tmp_path):
+     data = [record(source_event(family)) for family in ("dns", "tls", "quic") for _ in range(1000)]
+     source = b"\n".join(data) + b"\n"
+diff --git a/tests/network_metadata/test_checkpoint_crash.py b/tests/network_metadata/test_checkpoint_crash.py
+index d48577b1a5f4dddab558bda47ef196ac3f78dd1e..56aeea673588e19f989dc65c43ed855294954067 100644
+--- a/tests/network_metadata/test_checkpoint_crash.py
++++ b/tests/network_metadata/test_checkpoint_crash.py
+@@ -2,6 +2,56 @@ import pytest
+ from datetime import timedelta
+ from app.network_metadata.models import NetworkMetadataStorageUnavailable
+ from . import store, outcome, seed_blocked
++from .test_repository import _a_store, _a_outcomes, _a_rows
++
++
++@pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",
++    "before_fault_flush", "after_fault_flush", "before_checkpoint_update",
++    "after_checkpoint_update_before_commit", "after_commit"])
++def test_io_hotpath_fault_flush_observation_health_checkpoint_atomicity(tmp_path, monkeypatch, point):
++    from . import record
++    from .test_service import service_for
++    with _a_store(tmp_path, True, source=record() + b"\n{\n[]\n") as state:
++        items = _a_outcomes(state, [record(), b"{", b"[]"])
++        before = _a_rows(state.repo)
++        old_snapshot = state.health.last_snapshot
++        flush = state.repo._flush_fault_groups
++        def crash(label):
++            if label == point:
++                raise RuntimeError("disposable crash injection")
++        def fault_flush(groups):
++            crash("before_fault_flush")
++            flush(groups)
++            crash("after_fault_flush")
++        monkeypatch.setattr(state.repo, "_flush_fault_groups", fault_flush)
++        monkeypatch.setattr(state.repo, "_crash_point", crash)
++        with pytest.raises(RuntimeError):
++            state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++        assert not state.repo.connection.in_transaction
++        state.repo.recover()
++        durable = point == "after_commit"
++        assert state.repo.load_active()[1].committed_byte_offset == (items[-1].end if durable else 0)
++        if not durable:
++            assert _a_rows(state.repo) == before
++            assert state.health.last_snapshot == old_snapshot
++        monkeypatch.setattr(state.repo, "_flush_fault_groups", flush)
++        monkeypatch.setattr(state.repo, "_crash_point", lambda _: None)
++        if not durable:
++            state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++        assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
++        assert state.repo.connection.execute("SELECT sum(count) FROM network_metadata_ingest_fault_aggregates").fetchone()[0] == 2
++        assert state.repo.latest_health()["health_id"] == state.health.last_snapshot.health_id
++        assert state.repo.connection.execute("SELECT source_health_ref FROM network_metadata_observations").fetchone()[0] == state.health.last_snapshot.health_id
++        assert state.repo.connection.execute("PRAGMA foreign_key_check").fetchall() == []
++        # Restart uses the durable byte checkpoint, not an artificial fault rewind.
++        restarted = service_for(state)
++        try:
++            restarted.startup()
++            assert not restarted.poll_once()
++            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
++            assert state.repo.connection.execute("SELECT sum(count) FROM network_metadata_ingest_fault_aggregates").fetchone()[0] == 2
++        finally:
++            restarted.close()
+ 
+ 
+ @pytest.mark.parametrize("category", ["source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
+diff --git a/tests/network_metadata/test_config.py b/tests/network_metadata/test_config.py
+index 16320b2903e56b10938b640ca7eb6166e4aebe5a..555ef4ea4db087dfcbfc69ce728715f670e88c3e 100644
+--- a/tests/network_metadata/test_config.py
++++ b/tests/network_metadata/test_config.py
+@@ -80,3 +80,47 @@ def test_closed_binding(tmp_path):
+             make_capture_scope_binding(candidate)
+     with pytest.raises(NetworkMetadataConfigError):
+         configuration(tmp_path, NETWORK_METADATA_CAPTURE_SCOPE_BINDING_JSON='{"x":1,"x":2}')
++
++
++@pytest.mark.parametrize("value", ["TRUE", "False", "1", "", " true", "false ", True, 1, None, []])
++def test_io_hotpath_strict_flag_and_disabled_short_circuit(tmp_path, value):
++    with pytest.raises(NetworkMetadataConfigError):
++        configuration(tmp_path, NETWORK_METADATA_IO_HOTPATH_V1_ENABLED=value)
++    disabled = network_metadata_config_from_env({
++        "NETWORK_METADATA_ENABLED": "false", "NETWORK_METADATA_IO_HOTPATH_V1_ENABLED": value,
++    })
++    assert disabled == NetworkMetadataConfig()
++
++
++@pytest.mark.parametrize("coalesce,aggregation", [(False, False), (True, False), (False, True), (True, True)])
++def test_io_hotpath_default_off_preserves_frozen_digest(tmp_path, coalesce, aggregation):
++    from dataclasses import asdict, FrozenInstanceError
++    from app.network_metadata.models import LOGICAL_SOURCE_ID, NORMALIZER_VERSION, SOURCE_CONTRACT_VERSION
++    variables = {}
++    if coalesce:
++        variables.update(NETWORK_METADATA_INGEST_COALESCE_ENABLED="true", NETWORK_METADATA_INGEST_COALESCE_MAX_MS="100")
++    if aggregation:
++        variables["NETWORK_METADATA_TELEMETRY_AGGREGATION_ENABLED"] = "true"
++    default = configuration(tmp_path, **variables)
++    off = configuration(tmp_path, **variables, NETWORK_METADATA_IO_HOTPATH_V1_ENABLED="false")
++    on = configuration(tmp_path, **variables, NETWORK_METADATA_IO_HOTPATH_V1_ENABLED="true")
++    binding = asdict(default.capture_scope_binding)
++    binding["ipv4_cidrs"] = list(default.capture_scope_binding.ipv4_cidrs)
++    legacy = dict(capture_scope_binding=binding, db_path=default.db_path,
++        logical_source_id=LOGICAL_SOURCE_ID, max_db_bytes=default.max_db_bytes,
++        max_record_bytes=default.max_record_bytes, batch_max_records=default.batch_max_records,
++        batch_max_bytes=default.batch_max_bytes, normalizer_version=NORMALIZER_VERSION,
++        poll_interval_seconds=default.poll_interval_seconds, source_contract_version=SOURCE_CONTRACT_VERSION,
++        source_path=default.source_path)
++    if coalesce:
++        legacy.update(ingest_coalesce_enabled=True, ingest_coalesce_max_ms=100)
++    if aggregation:
++        legacy["telemetry_aggregation_enabled"] = True
++    assert default == off
++    assert default.io_hotpath_v1_enabled is off.io_hotpath_v1_enabled is False
++    assert default.configuration_digest == semantic_digest(legacy)
++    assert on.io_hotpath_v1_enabled is True
++    assert on.configuration_digest == semantic_digest({**legacy, "io_hotpath_v1_enabled": True})
++    assert on.configuration_digest != off.configuration_digest
++    with pytest.raises(FrozenInstanceError):
++        on.io_hotpath_v1_enabled = False
+diff --git a/tests/network_metadata/test_repository.py b/tests/network_metadata/test_repository.py
+index 74d14ab6035f3bdb9e8a19a3ec0347ccccfdf4d8..75ca44da58c437d860ce3837326dadbe2d750192 100644
+--- a/tests/network_metadata/test_repository.py
++++ b/tests/network_metadata/test_repository.py
+@@ -8,6 +8,402 @@ from app.network_metadata.canonical import ni01_canonical_json
+ from app.network_metadata.schema import TABLE_DDL, INDEX_DDL
+ from app.network_metadata.retention import RetentionPolicy
+ from . import store, outcome, seed_blocked, configuration, record
++from contextlib import contextmanager
++from types import SimpleNamespace
++from . import Clock, BOOT, IDENTITY
++
++
++@contextmanager
++def _a_store(tmp_path, enabled, *, source=None):
++    """Disposable single-writer fixture; flag applied before actual initialization."""
++    from app.network_metadata.health import HealthController
++    from app.network_metadata.source import continuity_anchor
++    tmp_path.mkdir(parents=True, exist_ok=True)
++    config = configuration(tmp_path, NETWORK_METADATA_IO_HOTPATH_V1_ENABLED="true" if enabled else "false")
++    clock, events = Clock(), []
++    class Telemetry:
++        def emit(self, event, **fields):
++            events.append((event, fields))
++    (tmp_path / "source.jsonl").write_bytes(record() + b"\n" if source is None else source)
++    repo = NetworkMetadataRepository(config, clock=clock, telemetry=Telemetry()).initialize()
++    fd = os.open(config.source_path, os.O_RDONLY)
++    try:
++        repo.persist_binding(config.capture_scope_binding)
++        run = repo.create_ingest_run(IDENTITY)
++        info = os.fstat(fd)
++        generation, _ = repo.transition_generation(binding=config.capture_scope_binding, boot_id=BOOT,
++            physical=(info.st_dev, info.st_ino))
++        health = HealthController(config.capture_scope_binding.capture_source_id)
++        health.source_available()
++        repo.persist_health(health, generation)
++        yield SimpleNamespace(repo=repo, config=config, clock=clock, fd=fd, run=run,
++            health=health, generation=generation, events=events,
++            anchor=lambda offset: continuity_anchor(fd, offset))
++    finally:
++        os.close(fd)
++        repo.close()
++
++
++def _a_outcomes(state, data):
++    offset, result = 0, []
++    for raw in data:
++        item = outcome(state.config.capture_scope_binding, raw, start=offset,
++            generation=state.generation.source_generation_id)
++        result.append(item)
++        offset = item.end
++    return result
++
++
++def _a_rewind(state):
++    with state.repo.transaction():
++        state.repo.connection.execute("UPDATE network_metadata_checkpoint SET committed_byte_offset=0,continuity_anchor_start_offset=0,continuity_anchor_length=0,continuity_anchor_sha256=NULL")
++        state.repo.connection.execute("UPDATE network_metadata_source_generations SET committed_byte_offset=0")
++
++
++def _a_rows(repo):
++    """All persistent fields; normalize only physical fixture inode and opt-in lineage."""
++    snapshot = {}
++    for table in TABLE_DDL:
++        rows = [dict(row) for row in repo.connection.execute("SELECT * FROM " + table)]
++        for row in rows:
++            if table == "network_metadata_source_generations":
++                row["st_dev"] = row["st_ino"] = "<disposable physical identity>"
++            if table == "network_metadata_ingest_runs":
++                row["configuration_digest"] = "<explicitly different flag/path lineage>"
++        snapshot[table] = sorted(ni01_canonical_json(row).decode() for row in rows)
++    return snapshot
++
++
++def _a_sql(sql):
++    return dict(
++        range_probes=sum(q.startswith("SELECT 1 FROM network_metadata_source_records WHERE") for q in sql),
++        identities=sum(q.startswith("SELECT digest_state,source_record_sha256,semantic_payload_sha256 FROM network_metadata_source_records") for q in sql),
++        insert_pragmas=sum(q.startswith("PRAGMA table_info(") for q in sql),
++        fault_upserts=sum("INSERT INTO network_metadata_ingest_fault_aggregates" in q for q in sql),
++    )
++
++
++@pytest.mark.parametrize("category", ["duplicate_noop", "source_record_identity_conflict",
++    "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
++@pytest.mark.parametrize("index", [0, 1, 2])
++def test_io_hotpath_overlap_first_conflict_matches_off(tmp_path, monkeypatch, category, index):
++    import uuid
++    snapshots = []
++    for enabled in (False, True):
++        ids = iter(uuid.UUID(f"00000000-0000-4000-8000-{n:012d}") for n in range(1, 50))
++        monkeypatch.setattr(uuid, "uuid4", lambda: next(ids))
++        with _a_store(tmp_path / str(enabled), enabled, source=(record() + b"\n") * 3) as state:
++            items = _a_outcomes(state, [record()] * 3)
++            state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++            for position, item in enumerate(items):
++                if position != index:
++                    state.repo.connection.execute("DELETE FROM network_metadata_observations WHERE observation_id=?",
++                        (item.normalized.observation_id,))
++            if category != "duplicate_noop":
++                change = {
++                    "source_record_identity_conflict": "source_record_sha256='" + "f" * 64 + "'",
++                    "normalizer_determinism_conflict": "semantic_payload_sha256='" + "f" * 64 + "'",
++                    "replay_identity_evidence_expired": "digest_state='expired',source_record_sha256=NULL,semantic_payload_sha256=NULL",
++                }[category]
++                state.repo.connection.execute("UPDATE network_metadata_source_records SET " + change)
++            _a_rewind(state)
++            sql, reached = [], []
++            actual = state.repo.identity_outcome
++            def identity(generation_id, item):
++                reached.append(item.start)
++                return actual(generation_id, item)
++            monkeypatch.setattr(state.repo, "identity_outcome", identity)
++            state.repo.connection.set_trace_callback(sql.append)
++            result = state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++            state.repo.connection.set_trace_callback(None)
++            expected_count = 3 if category == "duplicate_noop" else index + 1
++            assert reached == [item.start for item in items[:expected_count]]
++            assert _a_sql(sql)["range_probes"] == int(enabled)
++            assert _a_sql(sql)["identities"] == expected_count
++            if category == "duplicate_noop":
++                assert result == dict(committed=2, duplicates=1, blocked=None)
++            else:
++                assert result == dict(committed=index, duplicates=0, blocked=category)
++                assert state.repo.load_active()[1].committed_byte_offset == items[index].start
++                assert state.repo.load_active()[0].blocked_record_start_byte_offset == items[index].start
++            snapshots.append((_a_rows(state.repo), result, state.events))
++    assert snapshots[0] == snapshots[1]
++
++
++def test_io_hotpath_range_gap_and_generation_isolation(tmp_path, monkeypatch):
++    with _a_store(tmp_path, True, source=(record() + b"\n") * 2) as state:
++        items = _a_outcomes(state, [record()] * 2)
++        gap = outcome(state.config.capture_scope_binding, start=1,
++            generation=state.generation.source_generation_id)
++        with state.repo.transaction() as now:
++            state.repo._observation(gap, state.generation, state.run, state.health.last_snapshot.health_id, now)
++        assert not state.repo.identity_range_empty(state.generation.source_generation_id, 0, items[-1].start)
++        assert state.repo.identity_range_empty("00000000-0000-4000-8000-000000000099", 0, items[-1].start)
++        reached, original = [], state.repo.identity_outcome
++        def identity(generation_id, item):
++            reached.append(item.start)
++            return original(generation_id, item)
++        monkeypatch.setattr(state.repo, "identity_outcome", identity)
++        assert state.repo.ingest_batch(items, state.run, state.health, state.anchor)["committed"] == 2
++        assert reached == [item.start for item in items]
++
++
++@pytest.mark.parametrize("bad", [(0,), (True,), ("1",), (), (1, 2), 1, {"value": 1}])
++def test_io_hotpath_malformed_probe_is_unavailable_not_empty(tmp_path, bad):
++    from app.network_metadata.models import NetworkMetadataStorageUnavailable
++    with _a_store(tmp_path, True) as state:
++        actual = state.repo.connection
++        class Connection:
++            def __getattr__(self, name):
++                return getattr(actual, name)
++            def execute(self, sql, *args):
++                if sql.startswith("SELECT 1 FROM network_metadata_source_records"):
++                    return SimpleNamespace(fetchone=lambda: bad)
++                return actual.execute(sql, *args)
++        state.repo.connection = Connection()
++        with pytest.raises(NetworkMetadataStorageUnavailable):
++            state.repo.ingest_batch(_a_outcomes(state, [record()]), state.run, state.health, state.anchor)
++        assert actual.execute("SELECT committed_byte_offset FROM network_metadata_checkpoint").fetchone()[0] == 0
++        assert not actual.in_transaction
++        assert actual.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 0
++
++
++def test_io_hotpath_probe_sql_failure_never_commits(tmp_path):
++    from app.network_metadata.models import NetworkMetadataStorageUnavailable
++    with _a_store(tmp_path, True) as state:
++        before = _a_rows(state.repo)
++        def authorize(action, table, *_):
++            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == "network_metadata_source_records" else sqlite3.SQLITE_OK
++        state.repo.connection.set_authorizer(authorize)
++        with pytest.raises(NetworkMetadataStorageUnavailable):
++            state.repo.ingest_batch(_a_outcomes(state, [record()]), state.run, state.health, state.anchor)
++        # Restore default authorization on supported Python 3.10, without None.
++        state.repo.connection.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
++        assert _a_rows(state.repo) == before
++
++
++def test_io_hotpath_validated_cache_lifecycle_and_closed_insert(tmp_path):
++    from app.network_metadata.models import NetworkMetadataStorageUnavailable
++    with _a_store(tmp_path, True) as state:
++        repo = state.repo
++        assert set(repo._insert_columns) == set(TABLE_DDL)
++        assert all(type(columns) is frozenset and columns for columns in repo._insert_columns.values())
++        with pytest.raises(TypeError):
++            repo._insert_columns["extra"] = frozenset()
++        sql = []
++        repo.connection.set_trace_callback(sql.append)
++        for table, values in [("not_a_table", {}), ("network_metadata_checkpoint", {"not_a_column": 1})]:
++            with pytest.raises(NetworkMetadataValidationError):
++                repo._insert(table, values)
++        assert _a_sql(sql)["insert_pragmas"] == 0
++        original_snapshot, original_connection = repo._insert_columns, repo.connection
++        repo.recover()
++        assert repo._insert_columns is not original_snapshot
++        assert repo._insert_columns_connection is repo.connection is not original_connection
++        repo.config = replace(repo.config, db_path=str(tmp_path / "another.sqlite3"))
++        with pytest.raises(NetworkMetadataStorageUnavailable):
++            repo._insert("network_metadata_checkpoint", {})
++        repo.config = state.config
++        current = repo.connection
++        other = sqlite3.connect(":memory:")
++        try:
++            repo.connection = other
++            with pytest.raises(NetworkMetadataStorageUnavailable):
++                repo._insert("network_metadata_checkpoint", {})
++        finally:
++            repo.connection = current
++            other.close()
++        repo.close()
++        assert repo._insert_columns is repo._insert_columns_connection is repo._insert_columns_path is None
++        with pytest.raises(NetworkMetadataStorageUnavailable):
++            repo._insert("network_metadata_checkpoint", {})
++        repo.initialize()
++        assert repo._insert_columns_connection is repo.connection
++
++
++@pytest.mark.parametrize("failure", ["schema_validation", "introspection", "replaced_schema"])
++def test_io_hotpath_failed_initialize_never_adopts_cache(tmp_path, monkeypatch, failure):
++    from app.network_metadata import repository as module
++    from app.network_metadata.models import NetworkMetadataStorageUnavailable
++    cfg = configuration(tmp_path, NETWORK_METADATA_IO_HOTPATH_V1_ENABLED="true")
++    repo = NetworkMetadataRepository(cfg)
++    with pytest.raises(NetworkMetadataStorageUnavailable):
++        repo._insert("network_metadata_checkpoint", {})
++    actual_validate = module.validate_schema
++    if failure == "replaced_schema":
++        repo.initialize()
++        repo.connection.execute("DROP INDEX idx_nm_observations_site_event")
++        repo.close()
++    else:
++        def validate(connection):
++            assert repo._insert_columns is None
++            actual_validate(connection)
++            if failure == "schema_validation":
++                raise NetworkMetadataStorageCorrupt()
++            connection.set_authorizer(lambda action, name, *_: sqlite3.SQLITE_DENY
++                if action == sqlite3.SQLITE_PRAGMA and name == "table_info" else sqlite3.SQLITE_OK)
++        monkeypatch.setattr(module, "validate_schema", validate)
++    with pytest.raises(NetworkMetadataStorageUnavailable):
++        repo.initialize()
++    assert repo.connection is repo._insert_columns is repo._insert_columns_connection is None
++
++
++@pytest.mark.parametrize("count", [0, 1, 10, 256])
++@pytest.mark.parametrize("many", [False, True])
++def test_io_hotpath_fault_sql_grouping_and_complete_equivalence(tmp_path, monkeypatch, count, many):
++    import uuid
++    raw = [b"{", b"\xff", b"[]"] if many else [b"{"]
++    data = [raw[index % len(raw)] for index in range(count)]
++    snapshots, metrics = [], []
++    for enabled in (False, True):
++        ids = iter(uuid.UUID(f"00000000-0000-4000-8000-{n:012d}") for n in range(1, 30))
++        monkeypatch.setattr(uuid, "uuid4", lambda: next(ids))
++        with _a_store(tmp_path / str(enabled), enabled, source=b"\n".join(data) + (b"\n" if data else b"")) as state:
++            items = _a_outcomes(state, data)
++            if count:
++                with state.repo.transaction() as now:
++                    for _ in range(3):
++                        state.repo._fault(state.generation.source_generation_id, "invalid_json", now, 999)
++                state.clock.advance(seconds=5)
++            sql = []
++            state.repo.connection.set_trace_callback(sql.append)
++            result = state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++            state.repo.connection.set_trace_callback(None)
++            group_count = len({item.category for item in items})
++            assert _a_sql(sql)["fault_upserts"] == (group_count if enabled else count)
++            if count:
++                row = state.repo.connection.execute("SELECT * FROM network_metadata_ingest_fault_aggregates WHERE fault_category='invalid_json'").fetchone()
++                assert row["first_relevant_offset"] == 999
++                assert row["first_seen_utc"] == "2026-10-07T12:00:00.000000Z"
++                assert row["last_relevant_offset"] == [item for item in items if item.category == "invalid_json"][-1].start
++                assert state.events[-1][0] == "health_transition"
++                assert next(fields["count"] for event, fields in reversed(state.events)
++                    if event == "ingest_fault_aggregate_updated") == count
++            snapshots.append((_a_rows(state.repo), result, state.events))
++            metrics.append(_a_sql(sql))
++    assert snapshots[0] == snapshots[1]
++    print("NI01_A_FAULT_SQL", {"events": count, "many_categories": many, "off": metrics[0], "on": metrics[1]})
++
++
++def test_io_hotpath_fault_epochs_stable_flush_and_invalid_category(tmp_path):
++    with _a_store(tmp_path, True) as state:
++        groups = {}
++        generation = state.generation.source_generation_id
++        for category, now, offset in [
++            ("invalid_json", "2026-10-07T12:06:00.000000Z", 7),
++            ("schema_invalid", "2026-10-07T12:00:00.000000Z", 2),
++            ("invalid_json", "2026-10-07T12:00:00.000000Z", 5),
++            ("invalid_json", "2026-10-07T12:06:00.000000Z", 1),
++        ]:
++            state.repo._accumulate_fault(groups, generation, category, now, offset)
++        before = {key: list(value) for key, value in groups.items()}
++        for category in ("unknown", True, []):
++            with pytest.raises(NetworkMetadataValidationError):
++                state.repo._accumulate_fault(groups, generation, category, "2026-10-07T12:00:00.000000Z", 0)
++            assert groups == before
++        sql = []
++        state.repo.connection.set_trace_callback(sql.append)
++        with state.repo.transaction():
++            state.repo._flush_fault_groups(groups)
++        assert _a_sql(sql)["fault_upserts"] == 3
++        rows = list(state.repo.connection.execute("SELECT fault_category,aggregation_epoch_start_utc,count,first_relevant_offset,last_relevant_offset FROM network_metadata_ingest_fault_aggregates ORDER BY rowid"))
++        assert [tuple(row) for row in rows] == [
++            ("invalid_json", "2026-10-07T12:00:00.000000Z", 1, 5, 5),
++            ("invalid_json", "2026-10-07T12:05:00.000000Z", 2, 7, 1),
++            ("schema_invalid", "2026-10-07T12:00:00.000000Z", 1, 2, 2),
++        ]
++
++
++@pytest.mark.parametrize("failure", ["overflow", "sql", "invalid_category"])
++def test_io_hotpath_fault_failure_rolls_back_entire_batch(tmp_path, monkeypatch, failure):
++    from app.network_metadata.models import INT64_MAX, NetworkMetadataStorageUnavailable
++    with _a_store(tmp_path, True, source=record() + b"\n{\n") as state:
++        items = _a_outcomes(state, [record(), b"{"])
++        if failure == "overflow":
++            with state.repo.transaction() as now:
++                state.repo._fault(state.generation.source_generation_id, "invalid_json", now, 1)
++                state.repo.connection.execute("UPDATE network_metadata_ingest_fault_aggregates SET count=?", (INT64_MAX,))
++        elif failure == "invalid_category":
++            items[-1] = replace(items[-1], category="not_admitted")
++        before = _a_rows(state.repo)
++        if failure == "sql":
++            state.repo.connection.set_authorizer(lambda action, table, *_: sqlite3.SQLITE_DENY
++                if action == sqlite3.SQLITE_INSERT and table == "network_metadata_ingest_fault_aggregates" else sqlite3.SQLITE_OK)
++        with pytest.raises(NetworkMetadataValidationError if failure == "invalid_category" else NetworkMetadataStorageUnavailable):
++            state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++        state.repo.connection.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
++        assert _a_rows(state.repo) == before
++        assert state.repo.load_active()[1].committed_byte_offset == 0
++        assert not state.repo.connection.in_transaction
++
++
++def test_io_hotpath_external_ddl_sql_failure_is_not_schema_bypass(tmp_path):
++    from app.network_metadata.models import NetworkMetadataStorageUnavailable
++    with _a_store(tmp_path, True) as state:
++        state.repo.connection.execute("DROP TABLE network_metadata_dns_queries")
++        health_before = state.repo.latest_health()["health_id"]
++        with pytest.raises(NetworkMetadataStorageUnavailable):
++            state.repo.ingest_batch(_a_outcomes(state, [record()]), state.run, state.health, state.anchor)
++        assert state.repo.latest_health()["health_id"] == health_before
++        assert state.repo.load_active()[1].committed_byte_offset == 0
++        assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 0
++
++
++@pytest.mark.parametrize("enabled", [False, True])
++def test_io_hotpath_mixed_fault_duplicate_conflict_freezes_only_reached_prefix(tmp_path, enabled):
++    from . import source_event
++    data = [record(), b"{", b"{", record(source_event("tls")), record(source_event("quic")), record()]
++    with _a_store(tmp_path, enabled, source=b"\n".join(data) + b"\n") as state:
++        items = _a_outcomes(state, data)
++        state.repo.ingest_batch(items[:5], state.run, state.health, state.anchor)
++        state.repo.connection.execute("DELETE FROM network_metadata_observations WHERE observation_id=?",
++            (items[0].normalized.observation_id,))
++        state.repo.connection.execute("DELETE FROM network_metadata_ingest_fault_aggregates")
++        state.repo.connection.execute("UPDATE network_metadata_source_records SET source_record_sha256=? WHERE record_start_byte_offset=?",
++            ("f" * 64, items[4].start))
++        _a_rewind(state)
++        sql = []
++        state.repo.connection.set_trace_callback(sql.append)
++        result = state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++        state.repo.connection.set_trace_callback(None)
++        assert result == dict(committed=1, duplicates=1, blocked="source_record_identity_conflict")
++        assert state.repo.load_active()[1].committed_byte_offset == items[4].start
++        assert _a_sql(sql)["fault_upserts"] == (2 if enabled else 3)
++        assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations WHERE observation_id=?",
++            (items[5].normalized.observation_id,)).fetchone()[0] == 0
++        assert [tuple(row) for row in state.repo.connection.execute(
++            "SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates ORDER BY fault_category")] == [
++                ("invalid_json", 2), ("source_record_identity_conflict", 1)]
++        assert next(fields["count"] for event, fields in reversed(state.events)
++            if event == "ingest_fault_aggregate_updated") == 3
++        before = _a_rows(state.repo)
++        with pytest.raises(NetworkMetadataStorageCorrupt):
++            state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++        assert _a_rows(state.repo) == before
++
++
++@pytest.mark.parametrize("enabled", [False, True])
++@pytest.mark.parametrize("age", [15, 31])
++def test_io_hotpath_retention_expiry_semantics_are_preserved(tmp_path, enabled, age):
++    from datetime import timedelta
++    from app.network_metadata.validation import ni_format_utc
++    from . import source_event, Clock
++    data = record(source_event(timestamp=ni_format_utc(Clock()() - timedelta(days=age))))
++    with _a_store(tmp_path, enabled, source=data + b"\n") as state:
++        items = _a_outcomes(state, [data])
++        result = state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++        assert state.repo.load_active()[1].committed_byte_offset == items[0].end
++        if age == 31:
++            assert result["committed"] == 0
++            assert tuple(state.repo.connection.execute("SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates").fetchone()) == ("retention_expired_event", 1)
++            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 0
++        else:
++            assert result["committed"] == 1
++            assert state.repo.connection.execute("SELECT sensitive_endpoint_presence_state FROM network_metadata_observations").fetchone()[0] == "expired"
++            assert tuple(state.repo.connection.execute("SELECT digest_state,source_record_sha256,semantic_payload_sha256 FROM network_metadata_source_records").fetchone()) == ("expired", None, None)
++            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_sensitive_endpoints").fetchone()[0] == 0
++            _a_rewind(state)
++            assert state.repo.ingest_batch(items, state.run, state.health, state.anchor)["blocked"] == "replay_identity_evidence_expired"
+ 
+ 
+ @pytest.mark.parametrize("category", ["invalid_utf8", "invalid_json", "duplicate_json_member", "non_object_json",
+diff --git a/tests/network_metadata/test_service.py b/tests/network_metadata/test_service.py
+index 31167b04ea518477d7e96338abc015440d1d55d4..9da18229c4427aa903ecdc97133aa779a3af8ac6 100644
+--- a/tests/network_metadata/test_service.py
++++ b/tests/network_metadata/test_service.py
+@@ -12,6 +12,167 @@ from app.network_metadata.models import NetworkMetadataStorageUnavailable
+ from app.network_metadata.telemetry import NetworkMetadataTelemetry
+ from app.network_metadata.validation import ni_format_utc
+ from . import configuration, Clock, Capture, IDENTITY, BOOT, store, seed_blocked, record, source_event, binding_input
++from .test_repository import _a_store, _a_outcomes, _a_rows, _a_sql
++
++
++@pytest.mark.parametrize("count", [1, 2, 256])
++def test_io_hotpath_exact_two_probes_and_all_family_equivalence(tmp_path, monkeypatch, count):
++    import uuid
++    from app.network_metadata import service as module
++    raw = [record(source_event(("dns", "tls", "quic")[index % 3])) for index in range(count)]
++    source = b"\n".join(raw) + b"\n"
++    rows, sql_metrics, results = [], [], []
++    normalize = module.normalize_record
++    for enabled in (False, True):
++        ids = iter(uuid.UUID(f"00000000-0000-4000-8000-{n:012d}") for n in range(1, 100))
++        monkeypatch.setattr(uuid, "uuid4", lambda: next(ids))
++        with _a_store(tmp_path / str(enabled), enabled, source=source) as state:
++            service = service_for(state)
++            try:
++                service.startup()
++                sql, normalized = [], []
++                def normalizer(data, **kwargs):
++                    normalized.append(kwargs["start"])
++                    return normalize(data, **kwargs)
++                monkeypatch.setattr(module, "normalize_record", normalizer)
++                state.repo.connection.set_trace_callback(sql.append)
++                assert service.poll_once()
++                state.repo.connection.set_trace_callback(None)
++                assert len(normalized) == count
++                assert state.repo.load_active()[1].committed_byte_offset == len(source)
++                assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == count
++                assert state.repo.connection.execute("PRAGMA foreign_key_check").fetchall() == []
++                metric = _a_sql(sql)
++                assert metric["range_probes"] == (2 if enabled else 0)
++                assert metric["identities"] == (0 if enabled else 2 * count)
++                assert (metric["insert_pragmas"] == 0) == enabled
++                rows.append(_a_rows(state.repo))
++                results.append((dict(service.health.__dict__), state.events))
++                sql_metrics.append(metric)
++            finally:
++                service.close()
++    assert rows[0] == rows[1]
++    assert results[0] == results[1]
++    print("NI01_A_ALL_NEW_SQL", {"N": count, "off": sql_metrics[0], "on": sql_metrics[1]})
++
++
++@pytest.mark.parametrize("category", ["duplicate_noop", "source_record_identity_conflict",
++    "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
++def test_io_hotpath_transaction_reprobe_does_not_trust_preflight(tmp_path, monkeypatch, category):
++    with _a_store(tmp_path, True, source=(record() + b"\n") * 2) as state:
++        service = service_for(state)
++        try:
++            service.startup()
++            first = _a_outcomes(state, [record()])[0]
++            original, phases = state.repo.identity_range_empty, []
++            def probe(generation, low, high):
++                phases.append(state.repo.connection.in_transaction)
++                empty = original(generation, low, high)
++                if len(phases) == 1:
++                    assert empty and not phases[0]
++                    # Fault injection on this disposable SAME connection, not a second writer.
++                    with state.repo.transaction() as now:
++                        state.repo._observation(first, state.repo.load_active()[0], service.run_id,
++                            service.health.last_snapshot.health_id, now)
++                        if category != "duplicate_noop":
++                            change = {
++                                "source_record_identity_conflict": "source_record_sha256='" + "f" * 64 + "'",
++                                "normalizer_determinism_conflict": "semantic_payload_sha256='" + "f" * 64 + "'",
++                                "replay_identity_evidence_expired": "digest_state='expired',source_record_sha256=NULL,semantic_payload_sha256=NULL",
++                            }[category]
++                            state.repo.connection.execute("UPDATE network_metadata_source_records SET " + change)
++                return empty
++            monkeypatch.setattr(state.repo, "identity_range_empty", probe)
++            assert service.poll_once()
++            assert phases == [False, True]
++            generation, checkpoint = state.repo.load_active()
++            if category == "duplicate_noop":
++                assert generation.processing_state == "runnable"
++                assert checkpoint.committed_byte_offset == 2 * first.end
++                assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 2
++                assert any(event == "duplicate_noop" and fields["count"] == 1 for event, fields in state.events)
++            else:
++                assert generation.blocked_reason_code == category
++                assert checkpoint.committed_byte_offset == 0
++                assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
++                assert state.repo.connection.execute("SELECT count FROM network_metadata_ingest_fault_aggregates").fetchone()[0] == 1
++        finally:
++            service.close()
++
++
++def test_io_hotpath_preflight_sql_failure_pauses_storage_without_cursor_gap(tmp_path):
++    import sqlite3
++    with _a_store(tmp_path, True) as state:
++        service = service_for(state)
++        try:
++            service.startup()
++            before = _a_rows(state.repo)
++            state.repo.connection.set_authorizer(lambda action, table, *_: sqlite3.SQLITE_DENY
++                if action == sqlite3.SQLITE_READ and table == "network_metadata_source_records" else sqlite3.SQLITE_OK)
++            assert not service.poll_once()
++            # Python 3.10 cannot disable the callback with None (it denies SQL).
++            state.repo.connection.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
++            assert service.storage_failed
++            assert _a_rows(state.repo) == before
++            assert service.poll_once()
++            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
++        finally:
++            service.close()
++
++
++def test_io_hotpath_partial_then_oversized_record_preserves_source_guards(tmp_path):
++    with _a_store(tmp_path, True, source=b"{") as state:
++        service = service_for(state)
++        try:
++            service.startup()
++            sql = []
++            state.repo.connection.set_trace_callback(sql.append)
++            assert not service.poll_once()
++            assert _a_sql(sql)["range_probes"] == 0
++            assert state.repo.load_active()[1].committed_byte_offset == 0
++            # Replace only uncommitted tail; source lifecycle still owns continuity.
++            oversized = b"x" * (state.config.max_record_bytes + 1)
++            (tmp_path / "source.jsonl").write_bytes(oversized + b"\n" + record() + b"\n")
++            service.reader.reset(0)
++            sql.clear()
++            assert service.poll_once()
++            assert _a_sql(sql)["range_probes"] == 2 and _a_sql(sql)["identities"] == 0
++            assert state.repo.load_active()[1].committed_byte_offset == len(oversized) + 1
++            assert state.repo.connection.execute("SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates").fetchone()[:] == ("record_too_large", 1)
++            assert service.poll_once()
++            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
++        finally:
++            service.close()
++
++
++@pytest.mark.parametrize("change,reason", [("truncate", "observed_truncation"),
++    ("rewrite", "continuity_anchor_mismatch"), ("rotate", "source_rotated_live")])
++def test_io_hotpath_generation_guards_precede_range_optimization(tmp_path, change, reason):
++    with _a_store(tmp_path, True) as state:
++        service = service_for(state)
++        try:
++            service.startup()
++            assert service.poll_once()
++            service.poll_once()
++            old = state.repo.load_active()[0].source_generation_id
++            path = tmp_path / "source.jsonl"
++            if change == "truncate":
++                path.write_bytes(b"")
++            elif change == "rewrite":
++                path.write_bytes(b"!" + record()[1:] + b"\n")
++            else:
++                path.rename(tmp_path / "historical-eve")
++                path.write_bytes(record(source_event("tls")) + b"\n")
++            for _ in range(3):
++                service.poll_once()
++            current, checkpoint = state.repo.load_active()
++            assert current.source_generation_id != old
++            assert current.processing_state == "runnable"
++            assert state.repo.connection.execute("SELECT close_reason FROM network_metadata_source_generations WHERE source_generation_id=?", (old,)).fetchone()[0] == reason
++            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_source_records WHERE source_generation_id=?", (old,)).fetchone()[0] == 1
++            assert checkpoint.committed_byte_offset == path.stat().st_size
++        finally:
++            service.close()
+ 
+ 
+ def service_for(state, **kwargs):

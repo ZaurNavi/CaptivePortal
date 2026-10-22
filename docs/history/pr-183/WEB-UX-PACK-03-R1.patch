@@ -1,0 +1,845 @@
+diff --git a/app/admin_web/static/admin.css b/app/admin_web/static/admin.css
+index cd8280e2619ad19bb0e06c864cbff562c66d6972..59e0a03f908be6037efddf6ae23526f492557d5a 100644
+--- a/app/admin_web/static/admin.css
++++ b/app/admin_web/static/admin.css
+@@ -47,7 +47,7 @@ button, input, select { font: inherit; }
+ .nav-link { display: block; margin-bottom: .3rem; padding: .72rem .85rem; color: #dce9ef; border-radius: 9px; text-decoration: none; }
+ .nav-link:hover, .nav-link:focus-visible { background: #244453; }
+ .nav-link.is-active { color: #fff; background: var(--accent); font-weight: 700; }
+-.content { width: min(1240px, 100%); padding: clamp(1.25rem, 3vw, 2.5rem); }
++.content { min-width: 0; width: min(1240px, 100%); padding: clamp(1.25rem, 3vw, 2.5rem); }
+ .page-heading { display: flex; justify-content: space-between; align-items: end; gap: 1rem; margin-bottom: 1.4rem; }
+ .page-heading h1 { margin: 0; font-size: clamp(1.65rem, 3vw, 2.35rem); letter-spacing: -.035em; }
+ .page-heading p:last-child { margin: .45rem 0 0; color: var(--muted); }
+@@ -185,7 +185,9 @@ input[type="radio"] { width: auto; min-height: 0; }
+ .traffic-statistics-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+ .traffic-peak-events, .traffic-peak-periods { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; margin-top: 1rem; }
+ .traffic-peak-events .live-metric span, .traffic-peak-periods p { display: block; margin-top: .4rem; color: var(--muted); }
+-.traffic-ap-items { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
++.traffic-ap-items { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
++.traffic-ap-subsection { margin-top: 1.5rem; padding-top: 1.2rem; border-top: 1px solid var(--line); min-width: 0; }
++.traffic-ap-subsection .traffic-ap-card { grid-column: auto; }
+ .traffic-ap-card { min-width: 0; }
+ .traffic-ap-card svg { display: block; width: 100%; height: auto; margin: .75rem 0; }
+ .traffic-ap-card path { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+@@ -215,6 +217,15 @@ input[type="radio"] { width: auto; min-height: 0; }
+ .ap24-segment[data-state="operational"] { background: #12a594; }
+ .ap24-segment[data-state="degraded"] { background: #f4b740; }
+ .ap24-segment[data-state="unavailable"] { background: #d92d20; }
++.ap24-segment[data-state="unknown"] { background: #d92d20; }
++.ap24-history { min-width: 0; }
++.ap24-unavailable, .ap24-disclaimer { color: var(--muted); font-size: .78rem; }
++.access-point-row { min-width: 0; }
++.access-point-row .mono { overflow-wrap: anywhere; }
++.ap-traffic-rates { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; margin-top: .5rem; }
++.ap-traffic-rate { display: grid; gap: .15rem; min-width: 0; }
++.ap-traffic-rate-label { color: var(--muted); font-size: .78rem; }
++.ap-traffic-rate-value { font-size: 1.05rem; font-weight: 750; }
+ .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin: 1.25rem 0 .75rem; }
+ .section-heading h2 { margin: 0; }
+ .live-metric { grid-column: auto; }
+@@ -245,6 +256,10 @@ input[type="radio"] { width: auto; min-height: 0; }
+ .live-table th { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+ .live-section[aria-labelledby="devices-now-title"] .live-table thead th:not(:first-child) { padding-left: .275rem; padding-right: .825rem; text-align: center; }
+ .live-section[aria-labelledby="devices-now-title"] .live-table tbody td:not(:first-child) { vertical-align: middle; }
++.live-section[aria-labelledby="devices-now-title"] .live-table thead th.live-fingerprint-type-header,
++.live-section[aria-labelledby="devices-now-title"] .live-table tbody td.live-fingerprint-type-cell { text-align: center; padding-inline: .55rem; vertical-align: middle; }
++.live-fingerprint-type-cell .fingerprint-type-icon { display: flex; width: 44px; height: 44px; margin-inline: auto; }
++.live-fingerprint-type-cell .fingerprint-type-icon img { width: 44px; height: 44px; }
+ .live-section[aria-labelledby="devices-now-title"] .live-table .live-device-type-header,
+ .live-section[aria-labelledby="devices-now-title"] .live-table .live-device-type-cell { width: 64px; min-width: 64px; padding-left: .4rem; padding-right: .4rem; text-align: center; vertical-align: middle; white-space: nowrap; }
+ .live-section[aria-labelledby="devices-now-title"] .live-table thead th.live-device-type-header { padding-left: .2rem; padding-right: .6rem; }
+@@ -305,6 +320,7 @@ input[type="radio"] { width: auto; min-height: 0; }
+   .live-metrics, .traffic-metrics, .traffic-online-guests-summary, .traffic-evidence-products, .activity-grid, .activity-custom, .health-components, .traffic-history-meta, .traffic-statistics-groups, .traffic-statistics-metrics { grid-template-columns: 1fr; }
+   .live-bar { grid-template-columns: 1fr auto; }
+   .live-bar-track { grid-column: 1 / -1; }
++  .ap24-summary { grid-template-columns: minmax(0, 1fr); }
+ }
+ 
+ @media (min-width: 961px) and (max-width: 1450px) {
+diff --git a/app/admin_web/static/admin.js b/app/admin_web/static/admin.js
+index 2a3dfafff7150f472ec48e2e6674bee89e0faa5f..57d2f4249ce5c0695014986de87d9f0054e875bf 100644
+--- a/app/admin_web/static/admin.js
++++ b/app/admin_web/static/admin.js
+@@ -580,7 +580,7 @@
+     value.append(header, definitionList([
+       ["MAC", item.client_mac], ["Started", item.started_at], ["Closed", item.closed_at],
+       ["Duration (s)", item.duration_seconds], ["SSID", item.final_ssid || item.start_ssid],
+-      ["AP", item.final_ap_mac || item.start_ap_mac], ["Traffic (bytes)", item.reported_traffic_total_bytes],
++      ["AP", item.final_ap_mac || item.start_ap_mac], ["Traffic", formatDeviceBytes(item.reported_traffic_total_bytes)],
+     ]));
+     return value;
+   }
+@@ -2802,6 +2802,11 @@
+     return path;
+   }
+   function apMetric(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
++  function apPresentationOrder(items) {
++    const names = new Intl.Collator("en", {numeric: true, sensitivity: "base"});
++    return [...items].sort((a, b) => names.compare(a.display_name, b.display_name)
++      || (a.ap_mac < b.ap_mac ? -1 : a.ap_mac > b.ap_mac ? 1 : 0));
++  }
+   function renderApTraffic(value, history) {
+     apElements.items.replaceChildren();
+     apElements.applied.textContent = displayRange(history.range.id);
+@@ -2824,7 +2829,7 @@
+       : (value.status === "partial" ? "Partial" : "Insufficient");
+     apElements.current.textContent = value.current_snapshot === null ? "Unavailable"
+       : `${displayTime(value.current_snapshot.evaluated_at)} · ${value.current_snapshot.freshness_status} · ${value.current_snapshot.selected_source}`;
+-    for (const item of value.items) {
++    for (const item of apPresentationOrder(value.items)) {
+       const card = document.createElement("article");
+       card.className = "card traffic-ap-card";
+       card.dataset.apMac = item.ap_mac;
+@@ -4034,7 +4039,24 @@
+     return Math.min(300000, 5000 * (2 ** Math.min(Math.max(0, failures - 1), 6)));
+   }
+   function controllerEnabled(root) { return root && root.dataset.homeAp24hEnabled === "true"; }
+-  if (typeof window !== "undefined") window.CaptivPortalHomeAp24Test = Object.freeze({validResult, retryDelay, controllerEnabled});
++  function renderTimeline(createNode, item) {
++    const region = createNode("div", "ap24-history");
++    if (!item) {
++      region.append(createNode("p", "live-detail ap24-unavailable", "24h · — · History unavailable"));
++      return region;
++    }
++    region.append(createNode("p", "live-detail", `24h ${item.history.status} · unavailable ${item.history.unavailable_seconds}s · Observation ${item.observation_quality.status}`));
++    const timeline = createNode("div", "ap24-timeline");
++    item.timeline.forEach((bucket) => {
++      const segment = createNode("span", "ap24-segment");
++      segment.dataset.state = bucket.ap_state;
++      segment.title = `${bucket.from_utc} · ${bucket.ap_state} · Observation ${bucket.observation_quality}`;
++      timeline.append(segment);
++    });
++    region.append(timeline);
++    return region;
++  }
++  if (typeof window !== "undefined") window.CaptivPortalHomeAp24Test = Object.freeze({validResult, retryDelay, controllerEnabled, renderTimeline});
+   if (typeof document === "undefined") return;
+   const root = document.getElementById("admin-page");
+   if (!root || root.dataset.page !== "home" || !controllerEnabled(root)) return;
+@@ -4042,10 +4064,10 @@
+   const base = root.dataset.apiBase + "/home/ap-24h";
+   const refreshMs = Number(root.dataset.homeAp24hRefreshSeconds) * 1000;
+   const timeoutMs = Number(root.dataset.homeAp24hRequestTimeoutSeconds) * 1000;
+-  const state = {generation: 0, controller: null, active: false, stopped: false, failures: 0, next: 0, cursor: null, timer: null};
++  const state = {generation: 0, controller: null, active: false, stopped: false, failures: 0, next: 0, timer: null, items: new Map(), available: false};
+   const panel = document.getElementById("home-ap-24h-state");
+-  const target = document.getElementById("home-ap-24h-items");
+-  const more = document.getElementById("home-ap-24h-more");
++  const listeners = new Set();
++  function notify() { listeners.forEach((listener) => listener()); }
+   function node(tag, className, text) {
+     const value = document.createElement(tag);
+     if (className) value.className = className;
+@@ -4067,17 +4089,6 @@
+     });
+     document.getElementById("home-ap-24h-window").textContent = `${value.window.from_utc} through ${value.window.to_utc} · ${value.summary.ap_count_in_window} AP(s)`;
+   }
+-  function renderItems(items, append) {
+-    if (!append) target.replaceChildren();
+-    items.forEach((item) => {
+-      const row = node("article", "data-row"); const heading = node("div", "data-row-header");
+-      heading.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.current.status));
+-      const detail = node("p", "live-detail", `${item.ap_mac} · 24h ${item.history.status} · unavailable ${item.history.unavailable_seconds}s · Observation ${item.observation_quality.status}`);
+-      const timeline = node("div", "ap24-timeline");
+-      item.timeline.forEach((bucket) => { const segment = node("span", "ap24-segment"); segment.dataset.state = bucket.ap_state; segment.title = `${bucket.from_utc} · ${bucket.ap_state} · Observation ${bucket.observation_quality}`; timeline.append(segment); });
+-      row.append(heading, detail, timeline); target.append(row);
+-    });
+-  }
+   async function request(cursor, generation) {
+     const controller = new AbortController(); state.controller = controller;
+     const timeout = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+@@ -4097,7 +4108,8 @@
+     }
+   }
+   function failure(error) {
+-    if (error && error.status === 404) { state.stopped = true; target.replaceChildren(); more.hidden = true; setPanel("unavailable", "Feature unavailable", "AP 24-hour history is disabled."); return; }
++    state.available = false; notify();
++    if (error && error.status === 404) { state.stopped = true; state.items = new Map(); setPanel("unavailable", "Feature unavailable", "AP 24-hour history is disabled."); return; }
+     state.failures += 1; state.next = performance.now() + retryDelay(state.failures, error && error.retryAfter);
+     setPanel("unavailable", "Update unavailable", "AP 24-hour evidence could not be refreshed. Other Home panels remain independent.");
+   }
+@@ -4108,31 +4120,45 @@
+     if (state.controller) state.controller.abort("superseded");
+     try {
+       const value = await request(null, generation); if (!value) return;
+-      state.failures = 0; state.next = performance.now() + refreshMs; state.cursor = value.page.next_cursor;
+-      renderSummary(value); renderItems(value.items, false); more.hidden = !state.cursor;
++      const accepted = new Map(); const cursors = new Set();
++      let page = value;
++      do {
++        if (state.stopped || generation !== state.generation || document.hidden) return;
++        if (!Object.keys(value.window).every((key) => page.window[key] === value.window[key])
++          || page.summary.ap_count_in_window !== value.summary.ap_count_in_window) throw new Error("AP24 page identity changed");
++        for (const item of page.items) {
++          if (!/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(item.ap_mac) || accepted.has(item.ap_mac)) throw new Error("Invalid AP24 identity");
++          accepted.set(item.ap_mac, item);
++        }
++        if (accepted.size > value.summary.ap_count_in_window) throw new Error("Invalid AP24 population");
++        const cursor = page.page.next_cursor;
++        if (cursor === null) break;
++        if (!cursor || cursors.has(cursor)) throw new Error("Repeated AP24 cursor");
++        cursors.add(cursor);
++        page = await request(cursor, generation); if (!page) return;
++      } while (page);
++      if (generation !== state.generation || state.stopped || document.hidden) return;
++      if (accepted.size !== value.summary.ap_count_in_window) throw new Error("Incomplete AP24 population");
++      state.items = accepted; state.available = true;
++      state.failures = 0; state.next = performance.now() + refreshMs;
++      renderSummary(value); notify();
+       setPanel(value.block_status, value.block_status[0].toUpperCase() + value.block_status.slice(1), value.block_reason || "Persisted Current State and Observation evidence loaded.");
+     } catch (error) {
+-      if (!(error && error.name === "AbortError")) failure(error);
+-    } finally { state.active = false; }
+-  }
+-  async function loadMore() {
+-    if (!state.cursor || state.active || state.stopped) return;
+-    state.active = true; state.generation += 1; const generation = state.generation;
+-    try {
+-      const value = await request(state.cursor, generation); if (!value) return;
+-      state.cursor = value.page.next_cursor; renderItems(value.items, true); more.hidden = !state.cursor;
+-    } catch (error) { if (!(error && error.name === "AbortError")) failure(error); }
+-    finally { state.active = false; }
++      if (generation === state.generation) failure(error);
++    } finally { if (generation === state.generation) state.active = false; }
+   }
+   function abort(reason) {
+     if (state.controller) {
+       state.generation += 1;
++      state.active = false;
+       state.controller.abort(reason);
+     }
+   }
+   function nextEligibleAt() { return state.stopped ? Infinity : state.next; }
+-  const api = Object.freeze({run, abort, nextEligibleAt}); window.CaptivPortalHomeAp24Coordinator = api;
+-  more.addEventListener("click", loadMore);
++  const api = Object.freeze({run, abort, nextEligibleAt,
++    lookup: (mac) => state.available ? state.items.get(mac) || null : null,
++    subscribe: (listener) => { listeners.add(listener); }});
++  window.CaptivPortalHomeAp24Coordinator = api;
+   const combined = root.dataset.homeLiveEnabled === "true" && [root.dataset.homeTrafficEnabled, root.dataset.homeActivityEnabled, root.dataset.homeHealthEnabled, root.dataset.homeAp24hEnabled].some((value) => value === "true");
+   if (!combined) {
+     const refresh = document.getElementById("refresh-button"); refresh.addEventListener("click", () => run(true));
+@@ -5114,6 +5140,8 @@
+       const header = createNode("div", "data-row-header");
+       header.append(createNode("strong", null, item.name || "Access point"), createNode("span", "badge", item.product_status_classification));
+       row.append(header, createNode("p", "mono", item.ap_mac));
++      const ap24 = window.CaptivPortalHomeAp24Coordinator;
++      if (ap24) row.append(window.CaptivPortalHomeAp24Test.renderTimeline(createNode, ap24.lookup(item.ap_mac)));
+       const devices = createNode("div", "ap-device-count");
+       const count = clientAvailable ? (buckets.get(item.ap_mac) || 0) : null;
+       const track = createNode("span", "live-bar-track");
+@@ -5125,10 +5153,16 @@
+       row.append(devices);
+       if (trafficEnabled) {
+         const rate = traffic.get(item.ap_mac);
+-        if (!rate) row.append(createNode("p", "live-detail", "Traffic · —"));
+-        else row.append(createNode("p", "live-detail", `Traffic · ${rate.rate_status}`),
+-          createNode("p", "live-detail", `Download ${formatRate(rate.download_mbps)} · Upload ${formatRate(rate.upload_mbps)} · Total ${formatRate(rate.total_mbps)}`),
+-          createNode("p", "live-detail", `Source ${rate.selected_source === "lan" ? "LAN" : "Wired"} · observed ${rate.observed_at || "—"}`));
++        row.append(createNode("p", "live-detail", `Traffic · ${rate ? rate.rate_status : "—"}`));
++        const rates = createNode("div", "ap-traffic-rates");
++        for (const [label, key] of [["Download ↓", "download_mbps"], ["Upload ↑", "upload_mbps"], ["Total ↓↑", "total_mbps"]]) {
++          const metric = createNode("div", "ap-traffic-rate");
++          metric.append(createNode("span", "ap-traffic-rate-label", label),
++            createNode("strong", "ap-traffic-rate-value", rate ? formatRate(rate[key]) : "—"));
++          rates.append(metric);
++        }
++        row.append(rates);
++        if (rate) row.append(createNode("p", "live-detail", `Source ${rate.selected_source === "lan" ? "LAN" : rate.selected_source === "wired" ? "Wired" : "—"} · observed ${rate.observed_at || "—"}`));
+       }
+       target.append(row);
+     });
+@@ -5400,6 +5434,7 @@
+       apAvailable ? sources.ap.rows : [], summary, available, [], false, false);
+     rebuildApFilter();
+   }
++  if (window.CaptivPortalHomeAp24Coordinator) window.CaptivPortalHomeAp24Coordinator.subscribe(renderApEnrichment);
+   function rebuildApFilter() {
+     const selected = filters.elements.ap.value;
+     const macs = new Set();
+@@ -6051,6 +6086,7 @@
+       apAvailable ? sources.ap.rows : [], client, available, sources.traffic.rows, trafficAvailable, trafficEnabled, formatMbps);
+     rebuildApFilter();
+   }
++  if (window.CaptivPortalHomeAp24Coordinator) window.CaptivPortalHomeAp24Coordinator.subscribe(renderApEnrichment);
+   function rebuildApFilter() {
+     const select = filters.elements.ap; const selected = select.value; const macs = new Set();
+     if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => macs.add(item.ap_mac));
+diff --git a/app/admin_web/templates/admin/home.html b/app/admin_web/templates/admin/home.html
+index 57d01641933414662314d02ccc1436ccb15200af..a54675b4c1907a251aeb6575ff7c066f7de9d423 100644
+--- a/app/admin_web/templates/admin/home.html
++++ b/app/admin_web/templates/admin/home.html
+@@ -135,26 +135,22 @@
+   <div><strong>Visits and Traffic unavailable</strong><p>Activity configuration or its persisted read source is unavailable. Current panels remain independent.</p></div>
+ </section>
+ {% endif %}
++<section class="card card-wide live-section" aria-labelledby="aps-now-title">
++  <h2 id="aps-now-title">Access Points Now</h2>
+ {% if home_ap_24h_enabled %}
+-<section id="home-ap-24h" class="card card-wide ap24-section" aria-labelledby="home-ap-24h-title">
+-  <div class="section-heading">
+-    <div><h2 id="home-ap-24h-title">Access Points · Last 24 hours</h2><p id="home-ap-24h-window" class="live-detail">Loading rolling persisted evidence…</p></div>
+-  </div>
++<div id="home-ap-24h" class="ap24-section" aria-label="24-hour persisted AP evidence">
++  <p id="home-ap-24h-window" class="live-detail">Loading rolling persisted evidence…</p>
+   <div id="home-ap-24h-state" class="state-panel" data-state="unknown" role="status" aria-live="polite">
+     <span class="state-dot" aria-hidden="true"></span><div><strong id="home-ap-24h-status">Loading</strong><p id="home-ap-24h-message">Reading Current State and Observation history.</p></div>
+   </div>
+   <div id="home-ap-24h-summary" class="ap24-summary" aria-live="polite"></div>
+-  <div id="home-ap-24h-items" class="row-list" aria-live="polite"></div>
+-  <div class="pagination"><button id="home-ap-24h-more" class="button button-secondary" type="button" hidden>Load more access points</button></div>
+-  <p class="live-detail">Unavailable duration is controller-observed persisted evidence, not physical downtime SLA.</p>
+-</section>
++  <p class="live-detail ap24-disclaimer">Unavailable duration is controller-observed persisted evidence, not physical downtime SLA.</p>
++</div>
+ {% elif home_ap_24h_unavailable %}
+ <section class="state-panel" data-state="warning" aria-label="AP 24-hour history unavailable">
+   <span class="state-dot" aria-hidden="true"></span><div><strong>AP 24-hour history unavailable</strong><p>Other Home panels remain independent.</p></div>
+ </section>
+ {% endif %}
+-<section class="card card-wide live-section" aria-labelledby="aps-now-title">
+-  <h2 id="aps-now-title">Access Points Now</h2>
+   <p id="live-ap-count" class="live-detail"></p>
+   <div id="live-ap-state" class="live-inline-state">Loading access points…</div>
+   <div id="live-ap-rows" class="row-list"></div>
+diff --git a/app/admin_web/templates/admin/traffic.html b/app/admin_web/templates/admin/traffic.html
+index 3c70a75a37d1395d0e18a985c6094be3b3976207..b37254f12a955406acc6801dcaec60b5008b8d4c 100644
+--- a/app/admin_web/templates/admin/traffic.html
++++ b/app/admin_web/templates/admin/traffic.html
+@@ -92,33 +92,7 @@
+     </div>
+   </section>
+   {% endif %}
+-  {% if traffic_completed_sessions_allowed and (traffic_completed_sessions_enabled or traffic_completed_sessions_unavailable) %}
+-  <section id="traffic-completed-sessions-panel" class="card card-wide traffic-completed-sessions" aria-labelledby="traffic-completed-sessions-heading">
+-    <div class="card-heading traffic-history-heading-row">
+-      <div><p class="eyebrow">Closed guest Visits</p><h2 id="traffic-completed-sessions-heading">Completed Guest Session Traffic</h2></div>
+-      <div id="traffic-completed-sessions-range" class="traffic-range" role="group" aria-label="Completed Guest Session Traffic range">
+-        <button id="traffic-completed-sessions-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button>
+-        <button id="traffic-completed-sessions-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button>
+-      </div>
+-    </div>
+-    <p class="live-detail">Observed traffic from persisted client samples inside each closed Visit. Values are sampled evidence, not billing-complete totals.</p>
+-    <div id="traffic-completed-sessions-state" class="state-panel" data-state="{{ 'error' if traffic_completed_sessions_unavailable else 'warning' }}" role="status" aria-live="polite">
+-      <span class="state-dot" aria-hidden="true"></span><div>
+-        <strong id="traffic-completed-sessions-state-title">{{ 'Completed session history unavailable' if traffic_completed_sessions_unavailable else 'Loading completed guest sessions…' }}</strong>
+-        <p id="traffic-completed-sessions-state-message">{{ 'The product read service could not be composed. Other Traffic panels remain available.' if traffic_completed_sessions_unavailable else 'Reading persisted Visit and client Observation evidence.' }}</p>
+-      </div>
+-    </div>
+-    <p id="traffic-completed-sessions-range-note" class="live-detail">Applied range —</p>
+-    <div class="table-scroll">
+-      <table class="live-table traffic-completed-sessions-table">
+-        <caption id="traffic-completed-sessions-caption">No completed guest sessions loaded.</caption>
+-        <thead><tr><th scope="col">Guest</th><th scope="col">Session Start</th><th scope="col">Session End</th><th scope="col">Duration</th><th scope="col">SSID</th><th scope="col">Download</th><th scope="col">Upload</th><th scope="col">Total</th><th scope="col">Evidence</th></tr></thead>
+-        <tbody id="traffic-completed-sessions-items"></tbody>
+-      </table>
+-    </div>
+-    <div class="pagination"><button id="traffic-completed-sessions-more" class="button button-secondary" type="button" hidden>Load more</button></div>
+-  </section>
+-  {% endif %}
++
+   {% if traffic_history_enabled %}
+   <section
+     id="traffic-history-panel"
+@@ -129,7 +103,7 @@
+     <div class="card-heading traffic-history-heading-row">
+       <div>
+         <p class="eyebrow">Persisted history</p>
+-        <h2 id="traffic-history-heading">Network Traffic History</h2>
++        <h2 id="traffic-history-heading">{{ 'Network & AP Traffic History' if traffic_by_ap_enabled else 'Network Traffic History' }}</h2>
+       </div>
+       <div id="{{ 'traffic-history-range' if traffic_independent_ranges_enabled else 'traffic-network-range' }}" class="traffic-range" role="group" aria-label="Network Traffic History range">
+         <button id="{{ 'traffic-history-range-24h' if traffic_independent_ranges_enabled else 'traffic-network-range-24h' }}" class="button button-small" type="button" aria-pressed="true">24h</button>
+@@ -163,6 +137,20 @@
+         <desc id="traffic-history-chart-description">No accepted traffic history has loaded yet.</desc>
+       </svg>
+     </div>
++  {% if traffic_by_ap_enabled %}
++  <section id="traffic-ap-panel" class="traffic-ap traffic-ap-subsection" aria-labelledby="traffic-ap-heading" data-ap-enabled="true">
++    <div class="card-heading traffic-history-heading-row"><div><p class="eyebrow">Selected period</p><h2 id="traffic-ap-heading">Traffic by AP</h2></div>{% if traffic_independent_ranges_enabled %}<div id="traffic-ap-range" class="traffic-range" role="group" aria-label="Traffic by AP range"><button id="traffic-ap-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button><button id="traffic-ap-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button></div>{% endif %}</div>
++    <p class="live-detail">All supported Site APs are shown together for the applied Network range. Historical values inherit the canonical Site source selected for each bucket.</p>
++    <div id="traffic-ap-state" class="state-panel" data-state="warning" role="status" aria-live="polite"><span class="state-dot" aria-hidden="true"></span><div><strong id="traffic-ap-state-title">Loading AP traffic…</strong><p id="traffic-ap-state-message">Reading the combined persisted History result and current AP evidence.</p></div></div>
++    <div class="traffic-history-meta">
++      <p>Applied range <strong id="traffic-ap-applied-range">—</strong></p>
++      <p>Population <strong id="traffic-ap-population">—</strong></p>
++      <p>Coverage <strong id="traffic-ap-coverage">—</strong></p>
++      <p>Current snapshot <strong id="traffic-ap-current">—</strong></p>
++    </div>
++    <div id="traffic-ap-items" class="traffic-ap-items" aria-live="polite"></div>
++  </section>
++  {% endif %}
+   </section>
+   {% if traffic_statistics_enabled %}
+   <section
+@@ -239,20 +227,7 @@
+   </section>
+   {% endif %}
+   {% endif %}
+-  {% if traffic_by_ap_enabled %}
+-  <section id="traffic-ap-panel" class="card card-wide traffic-ap" aria-labelledby="traffic-ap-heading" data-ap-enabled="true">
+-    <div class="card-heading traffic-history-heading-row"><div><p class="eyebrow">Selected period</p><h2 id="traffic-ap-heading">Traffic by AP</h2></div>{% if traffic_independent_ranges_enabled %}<div id="traffic-ap-range" class="traffic-range" role="group" aria-label="Traffic by AP range"><button id="traffic-ap-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button><button id="traffic-ap-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button></div>{% endif %}</div>
+-    <p class="live-detail">All supported Site APs are shown together for the applied Network range. Historical values inherit the canonical Site source selected for each bucket.</p>
+-    <div id="traffic-ap-state" class="state-panel" data-state="warning" role="status" aria-live="polite"><span class="state-dot" aria-hidden="true"></span><div><strong id="traffic-ap-state-title">Loading AP traffic…</strong><p id="traffic-ap-state-message">Reading the combined persisted History result and current AP evidence.</p></div></div>
+-    <div class="traffic-history-meta">
+-      <p>Applied range <strong id="traffic-ap-applied-range">—</strong></p>
+-      <p>Population <strong id="traffic-ap-population">—</strong></p>
+-      <p>Coverage <strong id="traffic-ap-coverage">—</strong></p>
+-      <p>Current snapshot <strong id="traffic-ap-current">—</strong></p>
+-    </div>
+-    <div id="traffic-ap-items" class="traffic-ap-items" aria-live="polite"></div>
+-  </section>
+-  {% endif %}
++
+   {% if traffic_ap_share_enabled %}
+   <section id="traffic-apshare-panel" class="card card-wide traffic-ap" aria-labelledby="traffic-apshare-heading" data-apshare-enabled="true">
+     <div class="card-heading traffic-history-heading-row">
+@@ -312,5 +287,32 @@
+     </div>
+   </section>
+   {% endif %}
++  {% if traffic_completed_sessions_allowed and (traffic_completed_sessions_enabled or traffic_completed_sessions_unavailable) %}
++  <section id="traffic-completed-sessions-panel" class="card card-wide traffic-completed-sessions" aria-labelledby="traffic-completed-sessions-heading">
++    <div class="card-heading traffic-history-heading-row">
++      <div><p class="eyebrow">Closed guest Visits</p><h2 id="traffic-completed-sessions-heading">Completed Guest Session Traffic</h2></div>
++      <div id="traffic-completed-sessions-range" class="traffic-range" role="group" aria-label="Completed Guest Session Traffic range">
++        <button id="traffic-completed-sessions-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button>
++        <button id="traffic-completed-sessions-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button>
++      </div>
++    </div>
++    <p class="live-detail">Observed traffic from persisted client samples inside each closed Visit. Values are sampled evidence, not billing-complete totals.</p>
++    <div id="traffic-completed-sessions-state" class="state-panel" data-state="{{ 'error' if traffic_completed_sessions_unavailable else 'warning' }}" role="status" aria-live="polite">
++      <span class="state-dot" aria-hidden="true"></span><div>
++        <strong id="traffic-completed-sessions-state-title">{{ 'Completed session history unavailable' if traffic_completed_sessions_unavailable else 'Loading completed guest sessions…' }}</strong>
++        <p id="traffic-completed-sessions-state-message">{{ 'The product read service could not be composed. Other Traffic panels remain available.' if traffic_completed_sessions_unavailable else 'Reading persisted Visit and client Observation evidence.' }}</p>
++      </div>
++    </div>
++    <p id="traffic-completed-sessions-range-note" class="live-detail">Applied range —</p>
++    <div class="table-scroll">
++      <table class="live-table traffic-completed-sessions-table">
++        <caption id="traffic-completed-sessions-caption">No completed guest sessions loaded.</caption>
++        <thead><tr><th scope="col">Guest</th><th scope="col">Session Start</th><th scope="col">Session End</th><th scope="col">Duration</th><th scope="col">SSID</th><th scope="col">Download</th><th scope="col">Upload</th><th scope="col">Total</th><th scope="col">Evidence</th></tr></thead>
++        <tbody id="traffic-completed-sessions-items"></tbody>
++      </table>
++    </div>
++    <div class="pagination"><button id="traffic-completed-sessions-more" class="button button-secondary" type="button" hidden>Load more</button></div>
++  </section>
++  {% endif %}
+ </div>
+ {% endblock %}
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index d11b7fc67bc89ec464aeb82b645d26f81d86bed5..eea1541d3a880ea227852c93a1fad708853b85fb 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -504,6 +504,14 @@ Observation evidence (96 x 15-minute buckets). AP-24H telemetry is separately
+ feature-gated and uses existing Authorization Telemetry. Repository defaults for
+ both AP-24H and its telemetry are disabled; production flags remain host-verified.
+ 
++Home presents this evidence inside Access Points Now, not a second AP card.
++The current roster owns identity and visible pagination. AP-24H cursors are
++consumed sequentially into an atomically published exact-MAC map; each roster
++row shows its 24-hour timeline above Devices and the prominent rate trio.
++Valid unknown buckets are red without changing their state/tooltips; missing
++history is neutral. Home Type icons are 44×44; Devices icons remain 22×22.
++Closed Visit Traffic uses the existing binary byte formatter.
++
+ ## Traffic Section
+ 
+ Repository defaults:
+@@ -536,19 +544,19 @@ WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+ WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
+ ```
+ 
+-Current functional panels:
++Visual panel order (the underlying eight product contracts remain separate):
+ 
+ 1. Current Network Throughput;
+ 2. Online Guests Traffic;
+-3. Completed Guest Session Traffic;
+-4. Network Traffic History;
+-5. Period Statistics;
+-6. Peak Load;
+-7. Traffic by AP;
+-8. AP Traffic Share.
+-
+-After these eight products, the page contains the standalone `TRAFFIC EVIDENCE`
+-area from TASK-TRAFFIC-09.
++3. Network & AP Traffic History (Network chart first, Traffic by AP subsection);
++4. Period Statistics;
++5. Peak Load;
++6. AP Traffic Share;
++7. standalone `TRAFFIC EVIDENCE` from TASK-TRAFFIC-09;
++8. Completed Guest Session Traffic, always the last enabled panel.
++
++AP charts use natural display-name order with a MAC tie-break only after API
++validation; canonical API ordering and AP Traffic Share ordering are unchanged.
+ 
+ Current Network Throughput is range-insensitive.
+ 
+diff --git a/docs/modules/traffic.md b/docs/modules/traffic.md
+index 7b77b9aefa60c99b5b9bf751c995ade7cf588a84..d3bbb25f47284453ab5084372dd704228f3d4b63 100644
+--- a/docs/modules/traffic.md
++++ b/docs/modules/traffic.md
+@@ -97,19 +97,20 @@ including `WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false` and
+ 
+ ## Current Traffic product surface
+ 
+-Production Traffic contains:
++Traffic presentation order (no product/API contract change):
+ 
+ 1. Current Network Throughput;
+ 2. Online Guests Traffic;
+-3. Completed Guest Session Traffic;
+-4. Network Traffic History;
+-5. Period Statistics;
+-6. Peak Load;
+-7. Traffic by AP;
+-8. AP Traffic Share.
+-
+-After these eight product surfaces, `TRAFFIC EVIDENCE` is a separate consolidated
+-evidence area. It is not a ninth business metric.
++3. Network & AP Traffic History (one outer card, Network chart before AP charts);
++4. Period Statistics;
++5. Peak Load;
++6. AP Traffic Share;
++7. `TRAFFIC EVIDENCE`, a separate consolidated evidence area, not a business metric;
++8. Completed Guest Session Traffic, last among enabled panels.
++
++Traffic by AP retains its own range semantics and uses a post-validation natural
++display-name sort with MAC tie-break. API MAC ordering and AP Traffic Share are
++unchanged; History-only mode retains the Network Traffic History heading.
+ 
+ Current layout is production-current functional layout, not a permanently approved final visual composition.
+ 
+diff --git a/tests/admin_web/test_home_ap_24h_frontend.py b/tests/admin_web/test_home_ap_24h_frontend.py
+index 978010a7143654f10b3a69ad7ad358bd66aabe32..a8b15bc27a6f454fc2ecd2f025cd4cf139e17dfc 100644
+--- a/tests/admin_web/test_home_ap_24h_frontend.py
++++ b/tests/admin_web/test_home_ap_24h_frontend.py
+@@ -81,7 +81,7 @@ class Element {
+   dispatch(name) { return Promise.all((this.listeners[name] || []).map((callback) => callback())); }
+ }
+ const ids = ["admin-page", "refresh-button", "home-ap-24h-state", "home-ap-24h-status",
+-  "home-ap-24h-message", "home-ap-24h-items", "home-ap-24h-more",
++  "home-ap-24h-message", "live-ap-rows", "live-ap-more",
+   "home-ap-24h-summary", "home-ap-24h-window"];
+ const elements = Object.fromEntries(ids.map((id) => [id, new Element(id)]));
+ const site = "0123456789abcdef01234567";
+@@ -101,7 +101,7 @@ global.fetch = (url, options) => { calls.push(url); signals.push(options.signal)
+   const next=queue.shift(); if (!next) throw new Error("unexpected fetch"); return next; };
+ function response(status,payload,retryAfter=null) { return {ok:status>=200&&status<300,status,
+   json:async()=>payload,headers:{get:(name)=>name==="Retry-After"?retryAfter:null}}; }
+-function payload(nextCursor=null,name="AP-A") {
++function payload(nextCursor=null,name="AP-A",mac="AA:BB:CC:DD:EE:01",population=1) {
+   const start=Date.parse("2026-08-27T12:00:00.000Z");
+   const timeline=Array.from({length:96},(_,index)=>({
+     from_utc:new Date(start+index*900000).toISOString(),to_utc:new Date(start+(index+1)*900000).toISOString(),
+@@ -109,42 +109,60 @@ function payload(nextCursor=null,name="AP-A") {
+     observation_reason_codes:[],operational_seconds:900,unavailable_seconds:0,
+     unknown_evidence_seconds:0,short_history_seconds:0,authoritative_state_sample_count:1,
+     complete_observation_sample_count:1,diagnostic_partial_observation_sample_count:0}));
+-  const counts={operational:1,degraded:0,unavailable:0,unknown:0};
++  const counts={operational:population,degraded:0,unavailable:0,unknown:0};
+   return {api_version:"admin.read.v1",site_id:site,result:{contract_version:"admin.home_ap_24h.v1",
+     window:{kind:"rolling_24h",evaluated_at_utc:"2026-08-28T12:00:00.000Z",
+       from_utc:"2026-08-27T12:00:00.000Z",to_utc:"2026-08-28T12:00:00.000Z",bucket_seconds:900,bucket_count:96},
+     block_status:"operational",block_reason:null,sources:{current_state:{status:"operational"},observations:{status:"operational"}},
+-    summary:{ap_count_in_window:1,current:counts,history:counts,observation_quality:counts,
++    summary:{ap_count_in_window:population,current:counts,history:counts,observation_quality:counts,
+       short_history_ap_count:0,status_gap_ap_count:0,observation_problem_ap_count:0},
+-    items:[{ap_mac:"AA:BB:CC:DD:EE:01",name,model:"EAP",identity_source:"current_state",
++    items:[{ap_mac:mac,name,model:"EAP",identity_source:"current_state",
+       current:{status:"operational",freshness_status:"fresh"},history:{status:"operational",coverage_status:"complete",unavailable_seconds:0},
+       observation_quality:{status:"operational"},timeline}],page:{limit:20,next_cursor:nextCursor}}};
+ }
+ ''' + controller_source + r'''
+ const controller=window.CaptivPortalHomeAp24Coordinator;
+ (async()=>{
+-  queue.push(Promise.resolve(response(200,payload("next"))));
+-  await controller.run(true);
+-  assert(calls.length===1 && elements["home-ap-24h-items"].children.length===1,"initial page renders");
+-  assert(!elements["home-ap-24h-more"].hidden,"pagination is exposed");
+-  queue.push(Promise.resolve(response(200,payload(null,"AP-B"))));
+-  await elements["home-ap-24h-more"].dispatch("click");
+-  assert(calls.length===2 && elements["home-ap-24h-items"].children.length===2,"page appends without replacing");
++  let publications=0; controller.subscribe(()=>{publications++;});
++  let resolveSecond;
++  queue.push(Promise.resolve(response(200,payload("next","AP-A","AA:BB:CC:DD:EE:01",2))));
++  queue.push(new Promise(resolve=>{resolveSecond=resolve;}));
++  const first=controller.run(true); await new Promise(resolve=>setImmediate(resolve));
++  assert(calls.length===2 && publications===0,"sequential exhaustion, no partial map published");
++  assert(controller.lookup("AA:BB:CC:DD:EE:01")===null,"no intermediate page visible");
++  resolveSecond(response(200,payload(null,"AP-B","AA:BB:CC:DD:EE:02",2))); await first;
++  assert(publications===1 && controller.lookup("AA:BB:CC:DD:EE:02").name==="AP-B","one complete map publication including AP not yet in roster");
++  assert(controller.lookup("aa:bb:cc:dd:ee:02")===null,"exact canonical MAC join only");
++  const createNode=(tag,cls,text)=>{const e=new Element(tag);e.className=cls;e.textContent=text;return e;};
++  const timeline=window.CaptivPortalHomeAp24Test.renderTimeline(createNode,controller.lookup("AA:BB:CC:DD:EE:02"));
++  assert(timeline.children[1].children.length===96,"cached history can enrich a later roster page");
++  assert(!timeline.children.some(x=>x.textContent==="AP-B"),"timeline never duplicates AP identity");
++  const absent=window.CaptivPortalHomeAp24Test.renderTimeline(createNode,null);
++  assert(absent.children.length===1 && absent.children[0].textContent.includes("—"),"missing source is neutral, not red unknown bucket");
+ 
+   let resolvePending; now += 200000;
+   queue.push(new Promise((resolve)=>{resolvePending=resolve;}));
+   const pending=controller.run(true); await new Promise((resolve)=>setImmediate(resolve));
+   await controller.run(true); assert(calls.length===3,"active request blocks overlap");
+   controller.abort("hidden"); assert(signals.at(-1).aborted,"hidden/page lifecycle aborts owner");
++  queue.push(Promise.resolve(response(200,payload(null,"fresh"))));
++  await controller.run(true);
+   resolvePending(response(200,payload(null,"late"))); await pending;
++  assert(controller.lookup("AA:BB:CC:DD:EE:01").name==="fresh","superseded response cannot overwrite current map");
++
++  now += 400000;
++  const timeoutError=new Error("request timed out"); timeoutError.name="AbortError";
++  queue.push(Promise.reject(timeoutError)); await controller.run(true);
++  assert(controller.lookup("AA:BB:CC:DD:EE:01")===null,"current-generation timeout becomes neutral");
+ 
+   now += 400000; queue.push(Promise.resolve(response(503,{error:{code:"query_deadline"}})));
+   await controller.run(true);
+-  assert(elements["home-ap-24h-items"].children.length===2,"independent failure preserves last safe rows");
++  assert(controller.lookup("AA:BB:CC:DD:EE:01")===null,"failed history becomes neutral without owning roster");
++  assert(elements["live-ap-rows"].children.length===0,"AP24 never creates competing roster rows");
+   now += 400000; queue.push(Promise.resolve(response(404,{error:{code:"not_found"}})));
+   const before404=calls.length; await controller.run(true); await controller.run(true);
+   assert(calls.length===before404+1,"feature 404 stops only AP24 polling");
+-  assert(elements["home-ap-24h-items"].children.length===0,"feature 404 clears AP24 current values");
++  assert(controller.lookup("AA:BB:CC:DD:EE:01")===null,"feature 404 clears AP24 current values");
+   console.log("ap24 DOM contract passed");
+ })().catch((error)=>{console.error(error);process.exitCode=1;});
+ ''',
+diff --git a/tests/admin_web/test_traffic_ap_frontend.py b/tests/admin_web/test_traffic_ap_frontend.py
+index c991283f79c6ea6d504bd453c639cc3029842db9..6f3be814a8b41bd4abef214963855841efd0ebcb 100644
+--- a/tests/admin_web/test_traffic_ap_frontend.py
++++ b/tests/admin_web/test_traffic_ap_frontend.py
+@@ -68,7 +68,7 @@ global.document={
+   createElement(name){return new Element(name);},
+   createElementNS(namespace,name){return new Element(name,namespace);},
+ };
+-global.Intl={DateTimeFormat(){return{resolvedOptions(){return{timeZone:"UTC"};}}}};
++global.Intl={Collator:Intl.Collator,DateTimeFormat(){return{resolvedOptions(){return{timeZone:"UTC"};}}}};
+ function payload(){
+   const count=288,start=Date.parse("2026-08-29T12:00:00.000Z"),bucket=300;
+   const buckets=Array.from({length:count},(_,index)=>({
+@@ -128,7 +128,15 @@ assert(registered!==null,"history panel registered");
+   assert(decodeURIComponent(requests[0]).includes("include=statistics,peak,aps"),"canonical decoded combined include");
+   const cards=ids["traffic-ap-items"].children;
+   assert(cards.length===12,"all twelve AP cards");
++  assert(cards.map(card=>card.children[0].textContent).join(",")===Array.from({length:12},(_,i)=>`AP ${i}`).join(","),"natural presentation order, not lexical AP 10 before AP 2");
+   for(const card of cards){const svg=card.children.find((child)=>child.id==="svg");assert(svg,"one AP svg");assert(svg.children.length===2,"two AP paths");}
++  let rejected=false;
++  try {
++    await registered.load({apiBase:"/admin/api/v1/sites/site-a",siteId:"site-a",requestJson:async()=>{
++      const invalid=payload(); invalid.result.ap_traffic.items.reverse(); return invalid;
++    }});
++  } catch (_) { rejected=true; }
++  assert(rejected,"non-canonical API MAC ordering remains rejected before presentation");
+   console.log("traffic-ap-node-ok");
+ })().catch((error)=>{console.error(error);process.exit(1);});
+ '''
+diff --git a/tests/admin_web/test_traffic_completed_sessions_frontend.py b/tests/admin_web/test_traffic_completed_sessions_frontend.py
+index a9eecf0700d9bd90c40e1bc5734c8adfc4044790..db4575ae57415d18235d037c3bb702778c390e72 100644
+--- a/tests/admin_web/test_traffic_completed_sessions_frontend.py
++++ b/tests/admin_web/test_traffic_completed_sessions_frontend.py
+@@ -18,13 +18,15 @@ def _block(source: str, name: str) -> str:
+     return source.split(start, 1)[1].split(end, 1)[0]
+ 
+ 
+-def test_template_contract_places_completed_sessions_between_online_and_history():
++def test_template_contract_places_completed_sessions_last_after_evidence():
+     template = TRAFFIC_TEMPLATE.read_text(encoding="utf-8")
+     base = BASE_TEMPLATE.read_text(encoding="utf-8")
+     assert "data-traffic-completed-sessions-enabled" in base
+-    assert template.index('id="traffic-online-guests-panel"') < template.index(
++    assert template.index('id="traffic-history-panel"') < template.index(
++        'id="traffic-evidence-panel"'
++    ) < template.index(
+         'id="traffic-completed-sessions-panel"'
+-    ) < template.index('id="traffic-history-panel"')
++    )
+     for heading in (
+         "Guest", "Session Start", "Session End", "Duration", "SSID",
+         "Download", "Upload", "Total", "Evidence",
+diff --git a/tests/admin_web/test_web_ux_pack_02.py b/tests/admin_web/test_web_ux_pack_02.py
+index f86af8a5a1080089cf279b7e609dcbbcdcf5facf..ff90a7b14f08db196591ffcc662b883c6aa23f68 100644
+--- a/tests/admin_web/test_web_ux_pack_02.py
++++ b/tests/admin_web/test_web_ux_pack_02.py
+@@ -230,7 +230,8 @@ function render(c,t,enabled=true){live.renderAccessPointRoster(node,target,foote
+ render(true,true); assert.equal(target.children.length,2); assert.equal(footer.textContent,'AP Unknown · 3');
+ assert.equal(target.children[0].children[2].children[1].children[0].style.width,'25%');
+ assert.equal(target.children[1].children[2].children[0].textContent,'Devices · 0');
+-assert.equal(target.children[0].children[4].textContent,'Download 0 Mbps · Upload — · Total 0 Mbps');
++assert.deepEqual(target.children[0].children[4].children.map(x=>x.children[0].textContent),['Download ↓','Upload ↑','Total ↓↑']);
++assert.deepEqual(target.children[0].children[4].children.map(x=>x.children[1].textContent),['0 Mbps','—','0 Mbps']);
+ assert.equal(target.children[0].children[5].textContent,'Source LAN · observed NOW');
+ assert.equal(target.children[1].children[3].textContent,'Traffic · —');
+ render(false,false); assert.equal(target.children.length,2); assert.equal(footer.hidden,true);
+diff --git a/tests/admin_web/test_web_ux_pack_03.py b/tests/admin_web/test_web_ux_pack_03.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..133d384dbed4d55b9423f4cd312482e8cecd9185
+--- /dev/null
++++ b/tests/admin_web/test_web_ux_pack_03.py
+@@ -0,0 +1,165 @@
++from __future__ import annotations
++
++from html.parser import HTMLParser
++from pathlib import Path
++import re
++import subprocess
++import shutil
++
++from jinja2 import Environment, FileSystemLoader, select_autoescape
++import pytest
++
++
++ROOT = Path(__file__).resolve().parents[2]
++STATIC = ROOT / "app/admin_web/static"
++SOURCE = (STATIC / "admin.js").read_text(encoding="utf-8")
++NODE = shutil.which("node")
++
++
++class Dom(HTMLParser):
++    def __init__(self, html):
++        super().__init__()
++        self.stack = []
++        self.ids = {}
++        self.feed(html)
++
++    def handle_starttag(self, tag, attrs):
++        item = dict(attrs)
++        item["ancestors"] = self.stack[:]
++        if "id" in item:
++            self.ids[item["id"]] = item
++        if tag not in {"meta", "link", "img", "input", "br", "hr"}:
++            self.stack.append(item)
++
++    def handle_endtag(self, tag):
++        if self.stack:
++            self.stack.pop()
++
++
++def render(page, **flags):
++    env = Environment(loader=FileSystemLoader(ROOT / "app/admin_web/templates"),
++                      autoescape=select_autoescape())
++    return env.get_template(f"admin/{page}.html").render(
++        page={"key": page, "title": page.title()}, site_id="synthetic-site",
++        url_for=lambda *args, **kwargs: "/admin/static/" + kwargs["filename"], **flags,
++    )
++
++
++def function(name):
++    start = SOURCE.index(f"  function {name}(")
++    following = re.search(r"\n  (?:async )?function ", SOURCE[start + 1:])
++    assert following is not None
++    return SOURCE[start:start + 1 + following.start()]
++
++
++FAKE_NODE = r'''
++const assert=require('assert'); global.window={};
++function node(tag,className,text) {return {tag,className,textContent:text,
++  children:[],dataset:{},style:{},attributes:{},append(...xs){this.children.push(...xs)},
++  replaceChildren(...xs){this.children=xs},setAttribute(k,v){this.attributes[k]=v}};}
++'''
++
++
++def run_node(program):
++    assert NODE is not None, "Node is required for WEB-UX-PACK-03"
++    result = subprocess.run([NODE, "-e", program], capture_output=True, text=True, timeout=30)
++    assert result.returncode == 0, result.stdout + result.stderr
++
++
++def test_home_one_ap_card_and_home_only_type_style():
++    html = render("home", home_live_enabled=True, home_ap_24h_enabled=True)
++    dom = Dom(html)
++    parents = dom.ids["home-ap-24h"]["ancestors"]
++    assert any(parent.get("aria-labelledby") == "aps-now-title" for parent in parents)
++    assert "card" not in dom.ids["home-ap-24h"]["class"].split()
++    assert "home-ap-24h-items" not in dom.ids and "home-ap-24h-more" not in dom.ids
++    assert "live-ap-more" in dom.ids
++    css = (STATIC / "admin.css").read_text(encoding="utf-8")
++    assert ".live-fingerprint-type-cell .fingerprint-type-icon { display: flex; width: 44px; height: 44px; margin-inline: auto; }" in css
++    assert ".live-fingerprint-type-cell .fingerprint-type-icon img { width: 44px; height: 44px; }" in css
++    assert "width: 22px; height: 22px;" in css
++    assert ".content { min-width: 0;" in css
++    assert ".traffic-ap-subsection .traffic-ap-card { grid-column: auto; }" in css
++    assert '.live-table thead th.live-fingerprint-type-header,' in css
++    assert '.live-table tbody td.live-fingerprint-type-cell { text-align: center;' in css
++    assert '.ap24-segment[data-state="unknown"] { background: #d92d20; }' in css
++    for state, color in [("operational", "#12a594"), ("degraded", "#f4b740"), ("unavailable", "#d92d20")]:
++        assert f'.ap24-segment[data-state="{state}"] {{ background: {color}; }}' in css
++
++
++def test_roster_exact_join_timeline_before_devices_and_history_failure_is_local():
++    run_node(FAKE_NODE + "require(" + repr((STATIC / "admin.js").as_posix()) + ");" + r'''
++const api=window.CaptivPortalHomeLiveTest, target=node('div'), footer=node('p');
++const mac='AA:BB:CC:DD:EE:01', second='AA:BB:CC:DD:EE:02';
++const history={history:{status:'unknown',unavailable_seconds:0},observation_quality:{status:'unknown'},
++  timeline:Array.from({length:96},(_,i)=>({ap_state:i?'operational':'unknown',from_utc:'TIME',observation_quality:'unknown'}))};
++const cache=new Map([[second,history]]); let available=true;
++window.CaptivPortalHomeAp24Coordinator={lookup:m=>available?cache.get(m)||null:null};
++const rows=[{ap_mac:mac,name:'Same name',product_status_classification:'online'},
++  {ap_mac:second,name:'Same name',product_status_classification:'online'}];
++const clients={devices_by_ap:[{ap_mac:mac,client_count:2}],counts:{ap_unknown:0}};
++const rates=[{ap_mac:second,rate_status:'valid',download_mbps:0,upload_mbps:null,total_mbps:0,selected_source:'wired',observed_at:'TIME'}];
++const render=r=>api.renderAccessPointRoster(node,target,footer,r,clients,true,rates,true,true,x=>x==null?'—':x+' Mbps');
++render(rows.slice(0,1)); assert.equal(target.children[0].children[2].children.length,1);
++render(rows); const row=target.children[1];
++assert.equal(target.children.length,2); assert.equal(row.children[0].children[0].textContent,'Same name');
++assert.equal(row.children[1].textContent,second); assert.equal(row.children[2].className,'ap24-history');
++assert.equal(row.children[3].className,'ap-device-count');
++const segment=row.children[2].children[1].children[0];
++assert.equal(segment.dataset.state,'unknown'); assert(segment.title.includes('unknown'));
++assert.deepEqual(row.children[5].children.map(x=>x.children[1].textContent),['0 Mbps','—','0 Mbps']);
++assert.equal(row.children[6].textContent,'Source Wired · observed TIME');
++available=false; render(rows);
++assert.equal(target.children.length,2); assert.equal(target.children[1].children[1].textContent,second);
++assert.equal(target.children[1].children[2].children.length,1);
++assert.equal(target.children[0].children[3].children[0].textContent,'Devices · 2');
++assert.equal(target.children[1].children[5].children[0].children[1].textContent,'0 Mbps');
++''')
++
++
++def test_closed_visit_uses_existing_binary_formatter_only():
++    run_node(FAKE_NODE + "\n".join(function(name) for name in
++        ["display", "compactDecimal", "formatDeviceBytes", "definitionList", "visitRow"]) + r'''
++for(const [value,shown] of [[0,'0 B'],[842,'842 B'],[1024,'1 KB'],[1048576,'1 MB'],
++  [19608371,'18.7 MB'],[2300000000,'2.14 GB'],[1099511627776,'1 TB'],[null,'—']]) {
++  const row=visitRow({status:'closed',started_at:'TIME',duration_seconds:71,reported_traffic_total_bytes:value});
++  const fields=row.children[1].children;
++  const traffic=fields.findIndex(x=>x.tag==='dt'&&x.textContent==='Traffic');
++  assert(traffic>=0); assert.equal(fields[traffic+1].textContent,shown);
++  assert(!fields.some(x=>x.textContent==='Traffic (bytes)'));
++  const duration=fields.findIndex(x=>x.textContent==='Duration (s)');
++  assert.equal(fields[duration+1].textContent,'71');
++}
++''')
++
++
++@pytest.mark.parametrize("independent", [False, True])
++@pytest.mark.parametrize("aps,evidence", [(True, True), (False, True), (True, False)])
++def test_traffic_combined_card_and_completed_last(independent, aps, evidence):
++    html = render("traffic", traffic_enabled=True, traffic_history_enabled=True,
++        traffic_by_ap_enabled=aps, traffic_statistics_enabled=True, traffic_peak_enabled=True,
++        traffic_ap_share_enabled=True, traffic_independent_ranges_enabled=independent,
++        traffic_evidence_allowed=True, traffic_evidence_enabled=evidence,
++        traffic_completed_sessions_allowed=True, traffic_completed_sessions_enabled=True)
++    dom = Dom(html)
++    panels = [key for key in dom.ids if key.endswith("-panel") and key.startswith("traffic-")]
++    assert panels[-1] == "traffic-completed-sessions-panel"
++    assert ("Network &amp; AP Traffic History" if aps else "Network Traffic History") in html
++    if aps:
++        assert "card" not in dom.ids["traffic-ap-panel"]["class"].split()
++        assert dom.ids["traffic-history-panel"] in dom.ids["traffic-ap-panel"]["ancestors"]
++        assert html.index('id="traffic-history-chart-svg"') < html.index('id="traffic-ap-items"')
++        assert ("traffic-ap-range" in dom.ids) == independent
++    for key in ["traffic-statistics-panel", "traffic-peak-panel", "traffic-apshare-panel"]:
++        assert dom.ids["traffic-history-panel"] not in dom.ids[key]["ancestors"]
++
++
++def test_natural_order_is_copy_only_with_exact_mac_tie_break():
++    run_node(FAKE_NODE + function("apPresentationOrder") + r'''
++const input=[{display_name:'AP10',ap_mac:'01'}, {display_name:'AP2',ap_mac:'02'},
++  {display_name:'ap1',ap_mac:'03'},{display_name:'AP1',ap_mac:'04'}];
++const before=JSON.stringify(input), sorted=apPresentationOrder(input);
++assert.deepEqual(sorted.map(x=>x.display_name),['ap1','AP1','AP2','AP10']);
++assert.deepEqual(sorted.slice(0,2).map(x=>x.ap_mac),['03','04']);
++assert.equal(JSON.stringify(input),before); assert.notEqual(sorted,input);
++''')
