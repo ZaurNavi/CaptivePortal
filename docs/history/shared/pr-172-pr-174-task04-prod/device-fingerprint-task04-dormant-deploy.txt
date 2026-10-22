@@ -1,0 +1,131 @@
+
+===== DORMANT DEPLOYMENT SAFETY =====
+2026-10-03T15:23:27+04:00
+TARGET_SHA=fecdb5a7c79e56bb49be4797ca875d6720670042
+TARGET_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+WORKTREE=/home/admin/CaptivePortal-Deploy/task04-dormant-fecdb5a7
+CLASS_DB=/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
+CONTROL_DB=/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3
+CLASSIFICATION_ACTIVATION=NO
+CLASSIFICATION_DAEMON=NO
+CAPTIVE_PORTAL_RESTART=NO
+EVIDENCE_RESTART=NO
+SENSOR_RESTART=NO
+SURICATA_RESTART=NO
+--- captive-portal.service
+MainPID=3008787
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-evidence.service
+MainPID=3602244
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-sensor.service
+MainPID=2760947
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-suricata.service
+MainPID=3636938
+NRestarts=0
+ActiveState=active
+SubState=running
+CLASSIFICATION_DB_PRESTATE=ABSENT
+CONTROL_PLANE_PRESTATE=ABSENT
+
+===== VERIFY EXACT OWNER-MERGED GIT TARGET =====
+ORIGIN_MAIN=fecdb5a7c79e56bb49be4797ca875d6720670042
+TARGET_SHA_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+GIT_PROVENANCE=PASS
+
+===== MATERIALIZE DORMANT TASK-04 CODE =====
+Preparing worktree (detached HEAD fecdb5a)
+HEAD is now at fecdb5a Merge pull request #174 from ZaurNavi/fix/foundation-prod-stability-01-fix1
+WORKTREE_HEAD=fecdb5a7c79e56bb49be4797ca875d6720670042
+WORKTREE_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+WORKTREE_CLEAN=YES
+
+===== STATIC IMPORT / COMPILE SMOKE =====
+TASK04_IMPORT_SMOKE=PASS
+TASK04_COMPILE_IMPORT=PASS
+
+===== CREATE DORMANT CLASSIFICATION SQLITE ONLY =====
+CLASSIFICATION_STORE_INITIALIZE=PASS
+CONTROL_PLANE_CREATED=NO
+ACTIVE_CLASSIFICATION_POINTER=IMPOSSIBLE_CONTROL_DB_ABSENT
+
+===== CLASSIFICATION SQLITE STRUCTURE =====
+check_name|quick_check
+quick_check|ok
+name|type
+idx_classifications_device_history_v1|index
+sqlite_autoindex_artifact_dependencies_1|index
+sqlite_autoindex_artifacts_1|index
+sqlite_autoindex_classification_roots_1|index
+sqlite_autoindex_classifications_1|index
+artifact_dependencies|table
+artifacts|table
+classification_roots|table
+classifications|table
+object_name|rows
+artifacts|0
+artifact_dependencies|0
+classifications|0
+classification_roots|0
+DORMANT_DB_EMPTY=PASS
+
+===== INTERNAL READ CONTRACT ON EMPTY DATABASE =====
+GET_CURRENT_EMPTY=PASS
+LIST_HISTORY_EMPTY=PASS
+INTERNAL_READ_CONTRACT=PASS
+
+===== PROVE NO ACTIVATION / NO RUNTIME INTEGRATION =====
+CLASSIFICATION_SERVICE_UNIT=ABSENT
+CLASSIFICATION_PROCESS=ABSENT
+
+===== POST-DEPLOY SERVICE IMMUTABILITY =====
+--- captive-portal.service
+MainPID=3008787
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-evidence.service
+MainPID=3602244
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-sensor.service
+MainPID=2760947
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-suricata.service
+MainPID=3636938
+NRestarts=0
+ActiveState=active
+SubState=running
+EXISTING_SERVICE_PIDS_UNCHANGED=PASS
+--- classification DB
+CLASS_DB path=/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3 bytes=40960 owner=admin group=admin mode=640 mtime=2026-10-03 15:23:48.557347243 +0400
+f28817e529026c43808cbc75ae39641c8656da4f7aeebb579d79fe55a4018505  /opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
+--- /run
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs           794M  2.2M  792M   1% /run
+DIAG_EVE_PRESENT=NO
+
+===== FINAL =====
+TASK04_DORMANT_CODE_DEPLOY=PASS
+TASK04_CLASSIFICATION_DB_INITIALIZED=PASS
+TASK04_CLASSIFICATION_ROWS=0
+TASK04_ARTIFACT_ROWS=0
+TASK04_CONTROL_PLANE_DB=ABSENT
+TASK04_ACTIVE_POINTER=ABSENT_BY_CONSTRUCTION
+TASK04_CLASSIFICATION_PROCESS=ABSENT
+TASK04_INTERNAL_READ_EMPTY=PASS
+CLASSIFICATION_ACTIVATION=NO
+EXISTING_SERVICES_RESTARTED=NO
+TARGET_SHA=fecdb5a7c79e56bb49be4797ca875d6720670042
+TARGET_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+REPORT=/home/admin/device-fingerprint-task04-dormant-deploy.txt

@@ -1,0 +1,48 @@
+
+===== SAFETY / PRESTATE =====
+2026-10-03T15:37:24+04:00
+TARGET_SHA=fecdb5a7c79e56bb49be4797ca875d6720670042
+TARGET_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+STAGED_SEED=/tmp/task04-production-control-plane-seed.sqlite3
+EXPECTED_SEED_SHA=091334a08bde5099c26c5f53252fb83d656f9c71b8ee28f4b0a03db46483ba28
+CONTROL_DB=/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3
+CLASSIFICATION_ACTIVATION=NO
+ACTIVATE_PROFILE_CALL=FORBIDDEN
+SERVICES_RESTARTED=NO
+WORKTREE_HEAD=fecdb5a7c79e56bb49be4797ca875d6720670042
+WORKTREE_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+WORKTREE_PROVENANCE=PASS
+MainPID=3008787
+NRestarts=0
+ActiveState=active
+SubState=running
+MainPID=3602244
+NRestarts=0
+ActiveState=active
+SubState=running
+MainPID=2760947
+NRestarts=0
+ActiveState=active
+SubState=running
+MainPID=3636938
+NRestarts=0
+ActiveState=active
+SubState=running
+
+===== VERIFY STAGED SEED SHA =====
+ACTUAL_SEED_SHA=091334a08bde5099c26c5f53252fb83d656f9c71b8ee28f4b0a03db46483ba28
+SEED_SHA=PASS
+
+===== READ-ONLY SEED VALIDATION =====
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "/home/admin/CaptivePortal-Deploy/task04-dormant-fecdb5a7/app/device_fingerprint/__init__.py", line 3, in <module>
+    from .api import API_PREFIX, API_VERSION, create_device_fingerprint_app
+  File "/home/admin/CaptivePortal-Deploy/task04-dormant-fecdb5a7/app/device_fingerprint/api.py", line 13, in <module>
+    from flask import Flask, Response, g, request
+ModuleNotFoundError: No module named 'flask'
+
+===== ABORT =====
+EXIT_CODE=1
+CLASSIFICATION_ACTIVATION=NO
+SERVICES_RESTARTED=NO

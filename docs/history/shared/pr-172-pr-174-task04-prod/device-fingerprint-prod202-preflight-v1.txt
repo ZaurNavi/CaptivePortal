@@ -1,0 +1,898 @@
+
+===== IDENTITY =====
+
+$ hostname
+local.domain.az
+
+$ hostname -I
+192.168.0.202 172.17.0.1 172.19.0.1 172.18.0.1 
+
+$ uname -a
+Linux local.domain.az 5.15.0-191-generic #201-Ubuntu SMP Fri Aug 7 18:39:04 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 22.04.5 LTS"
+VERSION_ID="22.04"
+
+$ date -Is
+2026-10-03T12:07:50+04:00
+
+$ timedatectl
+               Local time: Sat 2026-10-03 12:07:50 +04
+           Universal time: Sat 2026-10-03 08:07:50 UTC
+                 RTC time: Sat 2026-10-03 08:07:50
+                Time zone: Asia/Baku (+04, +0400)
+System clock synchronized: yes
+              NTP service: active
+          RTC in local TZ: no
+
+===== RESOURCES =====
+
+$ uptime
+ 12:07:50 up 18 days, 20:04,  3 users,  load average: 2.34, 2.07, 2.11
+
+$ free -h
+               total        used        free      shared  buff/cache   available
+Mem:           7.7Gi       1.6Gi       238Mi        98Mi       5.9Gi       5.8Gi
+Swap:          4.0Gi       1.6Gi       2.4Gi
+
+$ df -hT / /opt /var
+Filesystem                        Type  Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv ext4   98G   53G   40G  57% /
+/dev/mapper/ubuntu--vg-ubuntu--lv ext4   98G   53G   40G  57% /
+/dev/mapper/ubuntu--vg-ubuntu--lv ext4   98G   53G   40G  57% /
+
+$ df -ih / /opt /var
+Filesystem                        Inodes IUsed IFree IUse% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   6.3M  688K  5.6M   11% /
+/dev/mapper/ubuntu--vg-ubuntu--lv   6.3M  688K  5.6M   11% /
+/dev/mapper/ubuntu--vg-ubuntu--lv   6.3M  688K  5.6M   11% /
+
+===== NETWORK =====
+
+$ ip -br link
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP> 
+enp1s0           UP             52:54:00:0d:2f:54 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+enp8s0           UP             52:54:00:59:23:b8 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+docker0          DOWN           16:a6:02:d1:6f:f0 <NO-CARRIER,BROADCAST,MULTICAST,UP> 
+br-7cd6762cb0a5  UP             ea:8d:76:06:85:ff <BROADCAST,MULTICAST,UP,LOWER_UP> 
+br-824f4551f992  UP             1a:7b:c7:0e:69:83 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+vethb972d7c@if2  UP             32:2d:82:ce:12:27 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+vethbd0dcc2@if2  UP             3e:ee:9b:be:35:46 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+veth1b3e12c@if2  UP             1e:43:3a:ba:f4:c9 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+vethe29362a@if2  UP             66:17:ec:2c:66:45 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+calib2c919092b4@if2 UP             ee:ee:ee:ee:ee:ee <BROADCAST,MULTICAST,UP,LOWER_UP> 
+cali400bdda75ce@if2 UP             ee:ee:ee:ee:ee:ee <BROADCAST,MULTICAST,UP,LOWER_UP> 
+
+$ ip -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+enp1s0           UP             192.168.0.202/24 fe80::5054:ff:fe0d:2f54/64 
+enp8s0           UP             
+docker0          DOWN           172.17.0.1/16 
+br-7cd6762cb0a5  UP             172.19.0.1/16 fe80::e88d:76ff:fe06:85ff/64 
+br-824f4551f992  UP             172.18.0.1/16 fe80::187b:c7ff:fe0e:6983/64 
+vethb972d7c@if2  UP             fe80::302d:82ff:fece:1227/64 
+vethbd0dcc2@if2  UP             fe80::3cee:9bff:febe:3546/64 
+veth1b3e12c@if2  UP             fe80::1c43:3aff:feba:f4c9/64 
+vethe29362a@if2  UP             fe80::6417:ecff:fe2c:6645/64 
+calib2c919092b4@if2 UP             fe80::ecee:eeff:feee:eeee/64 
+cali400bdda75ce@if2 UP             fe80::ecee:eeff:feee:eeee/64 
+
+$ ip route
+default via 192.168.0.1 dev enp1s0 proto static 
+10.1.203.80 dev calib2c919092b4 scope link 
+10.1.203.81 dev cali400bdda75ce scope link 
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown 
+172.18.0.0/16 dev br-824f4551f992 proto kernel scope link src 172.18.0.1 
+172.19.0.0/16 dev br-7cd6762cb0a5 proto kernel scope link src 172.19.0.1 
+192.168.0.0/24 dev enp1s0 proto kernel scope link src 192.168.0.202 
+
+--- detailed link properties
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 promiscuity 0 minmtu 0 maxmtu 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 
+2: enp1s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
+    link/ether 52:54:00:0d:2f:54 brd ff:ff:ff:ff:ff:ff promiscuity 0 minmtu 68 maxmtu 65535 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 parentbus virtio parentdev virtio1 
+3: enp8s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
+    link/ether 52:54:00:59:23:b8 brd ff:ff:ff:ff:ff:ff promiscuity 1 minmtu 68 maxmtu 65535 addrgenmode none numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 parentbus virtio parentdev virtio7 
+4: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default 
+    link/ether 16:a6:02:d1:6f:f0 brd ff:ff:ff:ff:ff:ff promiscuity 0 minmtu 68 maxmtu 65535 
+    bridge forward_delay 1500 hello_time 200 max_age 2000 ageing_time 30000 stp_state 0 priority 32768 vlan_filtering 0 vlan_protocol 802.1Q bridge_id 8000.16:a6:2:d1:6f:f0 designated_root 8000.16:a6:2:d1:6f:f0 root_port 0 root_path_cost 0 topology_change 0 topology_change_detected 0 hello_timer    0.00 tcn_timer    0.00 topology_change_timer    0.00 gc_timer  213.52 vlan_default_pvid 1 vlan_stats_enabled 0 vlan_stats_per_port 0 group_fwd_mask 0 group_address 01:80:c2:00:00:00 mcast_snooping 1 mcast_router 1 mcast_query_use_ifaddr 0 mcast_querier 0 mcast_hash_elasticity 16 mcast_hash_max 4096 mcast_last_member_count 2 mcast_startup_query_count 2 mcast_last_member_interval 100 mcast_membership_interval 26000 mcast_querier_interval 25500 mcast_query_interval 12500 mcast_query_response_interval 1000 mcast_startup_query_interval 3124 mcast_stats_enabled 0 mcast_igmp_version 2 mcast_mld_version 1 nf_call_iptables 0 nf_call_ip6tables 0 nf_call_arptables 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 
+5: br-7cd6762cb0a5: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default 
+    link/ether ea:8d:76:06:85:ff brd ff:ff:ff:ff:ff:ff promiscuity 0 minmtu 68 maxmtu 65535 
+    bridge forward_delay 1500 hello_time 200 max_age 2000 ageing_time 30000 stp_state 0 priority 32768 vlan_filtering 0 vlan_protocol 802.1Q bridge_id 8000.ea:8d:76:6:85:ff designated_root 8000.ea:8d:76:6:85:ff root_port 0 root_path_cost 0 topology_change 0 topology_change_detected 0 hello_timer    0.00 tcn_timer    0.00 topology_change_timer    0.00 gc_timer   66.06 vlan_default_pvid 1 vlan_stats_enabled 0 vlan_stats_per_port 0 group_fwd_mask 0 group_address 01:80:c2:00:00:00 mcast_snooping 1 mcast_router 1 mcast_query_use_ifaddr 0 mcast_querier 0 mcast_hash_elasticity 16 mcast_hash_max 4096 mcast_last_member_count 2 mcast_startup_query_count 2 mcast_last_member_interval 100 mcast_membership_interval 26000 mcast_querier_interval 25500 mcast_query_interval 12500 mcast_query_response_interval 1000 mcast_startup_query_interval 3124 mcast_stats_enabled 0 mcast_igmp_version 2 mcast_mld_version 1 nf_call_iptables 0 nf_call_ip6tables 0 nf_call_arptables 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 
+6: br-824f4551f992: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default 
+    link/ether 1a:7b:c7:0e:69:83 brd ff:ff:ff:ff:ff:ff promiscuity 0 minmtu 68 maxmtu 65535 
+    bridge forward_delay 1500 hello_time 200 max_age 2000 ageing_time 30000 stp_state 0 priority 32768 vlan_filtering 0 vlan_protocol 802.1Q bridge_id 8000.1a:7b:c7:e:69:83 designated_root 8000.1a:7b:c7:e:69:83 root_port 0 root_path_cost 0 topology_change 0 topology_change_detected 0 hello_timer    0.00 tcn_timer    0.00 topology_change_timer    0.00 gc_timer  263.94 vlan_default_pvid 1 vlan_stats_enabled 0 vlan_stats_per_port 0 group_fwd_mask 0 group_address 01:80:c2:00:00:00 mcast_snooping 1 mcast_router 1 mcast_query_use_ifaddr 0 mcast_querier 0 mcast_hash_elasticity 16 mcast_hash_max 4096 mcast_last_member_count 2 mcast_startup_query_count 2 mcast_last_member_interval 100 mcast_membership_interval 26000 mcast_querier_interval 25500 mcast_query_interval 12500 mcast_query_response_interval 1000 mcast_startup_query_interval 3124 mcast_stats_enabled 0 mcast_igmp_version 2 mcast_mld_version 1 nf_call_iptables 0 nf_call_ip6tables 0 nf_call_arptables 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 
+7: vethb972d7c@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-824f4551f992 state UP mode DEFAULT group default 
+    link/ether 32:2d:82:ce:12:27 brd ff:ff:ff:ff:ff:ff link-netnsid 0 promiscuity 1 minmtu 68 maxmtu 65535 
+    veth 
+    bridge_slave state forwarding priority 32 cost 2 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.1a:7b:c7:e:69:83 designated_root 8000.1a:7b:c7:e:69:83 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off addrgenmode eui64 numtxqueues 4 numrxqueues 4 gso_max_size 65536 gso_max_segs 65535 
+8: vethbd0dcc2@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-824f4551f992 state UP mode DEFAULT group default 
+    link/ether 3e:ee:9b:be:35:46 brd ff:ff:ff:ff:ff:ff link-netnsid 1 promiscuity 1 minmtu 68 maxmtu 65535 
+    veth 
+    bridge_slave state forwarding priority 32 cost 2 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8002 port_no 0x2 designated_port 32770 designated_cost 0 designated_bridge 8000.1a:7b:c7:e:69:83 designated_root 8000.1a:7b:c7:e:69:83 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off addrgenmode eui64 numtxqueues 4 numrxqueues 4 gso_max_size 65536 gso_max_segs 65535 
+9: veth1b3e12c@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-7cd6762cb0a5 state UP mode DEFAULT group default 
+    link/ether 1e:43:3a:ba:f4:c9 brd ff:ff:ff:ff:ff:ff link-netnsid 2 promiscuity 1 minmtu 68 maxmtu 65535 
+    veth 
+    bridge_slave state forwarding priority 32 cost 2 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.ea:8d:76:6:85:ff designated_root 8000.ea:8d:76:6:85:ff hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off addrgenmode eui64 numtxqueues 4 numrxqueues 4 gso_max_size 65536 gso_max_segs 65535 
+11: vethe29362a@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-824f4551f992 state UP mode DEFAULT group default 
+    link/ether 66:17:ec:2c:66:45 brd ff:ff:ff:ff:ff:ff link-netnsid 4 promiscuity 1 minmtu 68 maxmtu 65535 
+    veth 
+    bridge_slave state forwarding priority 32 cost 2 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8003 port_no 0x3 designated_port 32771 designated_cost 0 designated_bridge 8000.1a:7b:c7:e:69:83 designated_root 8000.1a:7b:c7:e:69:83 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off addrgenmode eui64 numtxqueues 4 numrxqueues 4 gso_max_size 65536 gso_max_segs 65535 
+39: calib2c919092b4@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1450 qdisc noqueue state UP mode DEFAULT group default qlen 1000
+    link/ether ee:ee:ee:ee:ee:ee brd ff:ff:ff:ff:ff:ff link-netns cni-17d2f1a8-ea7f-0d00-abdf-8982c32adc6d promiscuity 0 minmtu 68 maxmtu 65535 
+    veth addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 
+40: cali400bdda75ce@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1450 qdisc noqueue state UP mode DEFAULT group default qlen 1000
+    link/ether ee:ee:ee:ee:ee:ee brd ff:ff:ff:ff:ff:ff link-netns cni-52888394-d5d4-e82a-f008-392d5f97374f promiscuity 0 minmtu 68 maxmtu 65535 
+    veth addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 
+
+--- PCI / NIC inventory
+01:00.0 Ethernet controller [0200]: Red Hat, Inc. Virtio network device [1af4:1041] (rev 01)
+	Subsystem: Red Hat, Inc. Virtio network device [1af4:1100]
+	Kernel driver in use: virtio-pci
+02:00.0 USB controller [0c03]: Red Hat, Inc. QEMU XHCI Host Controller [1b36:000d] (rev 01)
+	Subsystem: Red Hat, Inc. QEMU XHCI Host Controller [1af4:1100]
+	Kernel driver in use: xhci_hcd
+--
+08:00.0 Ethernet controller [0200]: Red Hat, Inc. Virtio network device [1af4:1041] (rev 01)
+	Subsystem: Red Hat, Inc. Virtio network device [1af4:1100]
+	Kernel driver in use: virtio-pci
+
+--- per-interface driver facts
+INTERFACE=br-7cd6762cb0a5
+driver: bridge
+version: 2.3
+firmware-version: N/A
+expansion-rom-version: 
+bus-info: N/A
+supports-statistics: no
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=ea:8d:76:06:85:ff
+INTERFACE=br-824f4551f992
+driver: bridge
+version: 2.3
+firmware-version: N/A
+expansion-rom-version: 
+bus-info: N/A
+supports-statistics: no
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=1a:7b:c7:0e:69:83
+INTERFACE=cali400bdda75ce
+driver: veth
+version: 1.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=ee:ee:ee:ee:ee:ee
+INTERFACE=calib2c919092b4
+driver: veth
+version: 1.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=ee:ee:ee:ee:ee:ee
+INTERFACE=docker0
+driver: bridge
+version: 2.3
+firmware-version: N/A
+expansion-rom-version: 
+bus-info: N/A
+supports-statistics: no
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=down
+ADDRESS=16:a6:02:d1:6f:f0
+INTERFACE=enp1s0
+driver: virtio_net
+version: 1.0.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 0000:01:00.0
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=52:54:00:0d:2f:54
+INTERFACE=enp8s0
+driver: virtio_net
+version: 1.0.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 0000:08:00.0
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=52:54:00:59:23:b8
+INTERFACE=veth1b3e12c
+driver: veth
+version: 1.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=1e:43:3a:ba:f4:c9
+INTERFACE=vethb972d7c
+driver: veth
+version: 1.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=32:2d:82:ce:12:27
+INTERFACE=vethbd0dcc2
+driver: veth
+version: 1.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=3e:ee:9b:be:35:46
+INTERFACE=vethe29362a
+driver: veth
+version: 1.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: no
+OPERSTATE=up
+ADDRESS=66:17:ec:2c:66:45
+
+===== LISTENERS =====
+Netid State  Recv-Q Send-Q                               Local Address:Port  Peer Address:PortProcess                                                                                                                                          
+udp   UNCONN 0      0                                       172.18.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=80))                                                                                                             
+udp   UNCONN 0      0                                       172.18.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=79))                                                                                                             
+udp   UNCONN 0      0                                       172.18.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=78))                                                                                                             
+udp   UNCONN 0      0                                       172.18.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=77))                                                                                                             
+udp   UNCONN 0      0                                       172.19.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=70))                                                                                                             
+udp   UNCONN 0      0                                       172.19.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=71))                                                                                                             
+udp   UNCONN 0      0                                       172.19.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=72))                                                                                                             
+udp   UNCONN 0      0                                       172.19.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=69))                                                                                                             
+udp   UNCONN 0      0                                       172.17.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=64))                                                                                                             
+udp   UNCONN 0      0                                       172.17.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=63))                                                                                                             
+udp   UNCONN 0      0                                       172.17.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=62))                                                                                                             
+udp   UNCONN 0      0                                       172.17.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=61))                                                                                                             
+udp   UNCONN 0      0                                    192.168.0.202:53         0.0.0.0:*    users:(("named",pid=1137904,fd=54))                                                                                                             
+udp   UNCONN 0      0                                    192.168.0.202:53         0.0.0.0:*    users:(("named",pid=1137904,fd=55))                                                                                                             
+udp   UNCONN 0      0                                    192.168.0.202:53         0.0.0.0:*    users:(("named",pid=1137904,fd=56))                                                                                                             
+udp   UNCONN 0      0                                    192.168.0.202:53         0.0.0.0:*    users:(("named",pid=1137904,fd=53))                                                                                                             
+udp   UNCONN 0      0                                        127.0.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=42))                                                                                                             
+udp   UNCONN 0      0                                        127.0.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=44))                                                                                                             
+udp   UNCONN 0      0                                        127.0.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=43))                                                                                                             
+udp   UNCONN 0      0                                        127.0.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=41))                                                                                                             
+udp   UNCONN 0      0                                    127.0.0.53%lo:53         0.0.0.0:*    users:(("systemd-resolve",pid=976,fd=13))                                                                                                       
+udp   UNCONN 0      0                                          0.0.0.0:161        0.0.0.0:*    users:(("snmpd",pid=1069,fd=6))                                                                                                                 
+udp   UNCONN 0      0                                          0.0.0.0:9995       0.0.0.0:*    users:(("nfcapd",pid=1029,fd=3))                                                                                                                
+udp   UNCONN 0      0                                          0.0.0.0:2055       0.0.0.0:*    users:(("nfcapd",pid=1047,fd=4))                                                                                                                
+udp   UNCONN 0      0                                            [::1]:53            [::]:*    users:(("named",pid=1137904,fd=85))                                                                                                             
+udp   UNCONN 0      0                                            [::1]:53            [::]:*    users:(("named",pid=1137904,fd=86))                                                                                                             
+udp   UNCONN 0      0                                            [::1]:53            [::]:*    users:(("named",pid=1137904,fd=87))                                                                                                             
+udp   UNCONN 0      0                                            [::1]:53            [::]:*    users:(("named",pid=1137904,fd=88))                                                                                                             
+udp   UNCONN 0      0                 [fe80::5054:ff:fe0d:2f54]%enp1s0:53            [::]:*    users:(("named",pid=1137904,fd=93))                                                                                                             
+udp   UNCONN 0      0                 [fe80::5054:ff:fe0d:2f54]%enp1s0:53            [::]:*    users:(("named",pid=1137904,fd=94))                                                                                                             
+udp   UNCONN 0      0                 [fe80::5054:ff:fe0d:2f54]%enp1s0:53            [::]:*    users:(("named",pid=1137904,fd=95))                                                                                                             
+udp   UNCONN 0      0                 [fe80::5054:ff:fe0d:2f54]%enp1s0:53            [::]:*    users:(("named",pid=1137904,fd=96))                                                                                                             
+udp   UNCONN 0      0      [fe80::e88d:76ff:fe06:85ff]%br-7cd6762cb0a5:53            [::]:*    users:(("named",pid=1137904,fd=101))                                                                                                            
+udp   UNCONN 0      0      [fe80::e88d:76ff:fe06:85ff]%br-7cd6762cb0a5:53            [::]:*    users:(("named",pid=1137904,fd=102))                                                                                                            
+udp   UNCONN 0      0      [fe80::e88d:76ff:fe06:85ff]%br-7cd6762cb0a5:53            [::]:*    users:(("named",pid=1137904,fd=104))                                                                                                            
+udp   UNCONN 0      0      [fe80::e88d:76ff:fe06:85ff]%br-7cd6762cb0a5:53            [::]:*    users:(("named",pid=1137904,fd=103))                                                                                                            
+udp   UNCONN 0      0      [fe80::187b:c7ff:fe0e:6983]%br-824f4551f992:53            [::]:*    users:(("named",pid=1137904,fd=112))                                                                                                            
+udp   UNCONN 0      0      [fe80::187b:c7ff:fe0e:6983]%br-824f4551f992:53            [::]:*    users:(("named",pid=1137904,fd=111))                                                                                                            
+udp   UNCONN 0      0      [fe80::187b:c7ff:fe0e:6983]%br-824f4551f992:53            [::]:*    users:(("named",pid=1137904,fd=109))                                                                                                            
+udp   UNCONN 0      0      [fe80::187b:c7ff:fe0e:6983]%br-824f4551f992:53            [::]:*    users:(("named",pid=1137904,fd=110))                                                                                                            
+udp   UNCONN 0      0          [fe80::302d:82ff:fece:1227]%vethb972d7c:53            [::]:*    users:(("named",pid=1137904,fd=117))                                                                                                            
+udp   UNCONN 0      0          [fe80::302d:82ff:fece:1227]%vethb972d7c:53            [::]:*    users:(("named",pid=1137904,fd=118))                                                                                                            
+udp   UNCONN 0      0          [fe80::302d:82ff:fece:1227]%vethb972d7c:53            [::]:*    users:(("named",pid=1137904,fd=119))                                                                                                            
+udp   UNCONN 0      0          [fe80::302d:82ff:fece:1227]%vethb972d7c:53            [::]:*    users:(("named",pid=1137904,fd=120))                                                                                                            
+udp   UNCONN 0      0          [fe80::3cee:9bff:febe:3546]%vethbd0dcc2:53            [::]:*    users:(("named",pid=1137904,fd=125))                                                                                                            
+udp   UNCONN 0      0          [fe80::3cee:9bff:febe:3546]%vethbd0dcc2:53            [::]:*    users:(("named",pid=1137904,fd=126))                                                                                                            
+udp   UNCONN 0      0          [fe80::3cee:9bff:febe:3546]%vethbd0dcc2:53            [::]:*    users:(("named",pid=1137904,fd=127))                                                                                                            
+udp   UNCONN 0      0          [fe80::3cee:9bff:febe:3546]%vethbd0dcc2:53            [::]:*    users:(("named",pid=1137904,fd=128))                                                                                                            
+udp   UNCONN 0      0          [fe80::1c43:3aff:feba:f4c9]%veth1b3e12c:53            [::]:*    users:(("named",pid=1137904,fd=133))                                                                                                            
+udp   UNCONN 0      0          [fe80::1c43:3aff:feba:f4c9]%veth1b3e12c:53            [::]:*    users:(("named",pid=1137904,fd=136))                                                                                                            
+udp   UNCONN 0      0          [fe80::1c43:3aff:feba:f4c9]%veth1b3e12c:53            [::]:*    users:(("named",pid=1137904,fd=134))                                                                                                            
+udp   UNCONN 0      0          [fe80::1c43:3aff:feba:f4c9]%veth1b3e12c:53            [::]:*    users:(("named",pid=1137904,fd=135))                                                                                                            
+udp   UNCONN 0      0          [fe80::6417:ecff:fe2c:6645]%vethe29362a:53            [::]:*    users:(("named",pid=1137904,fd=141))                                                                                                            
+udp   UNCONN 0      0          [fe80::6417:ecff:fe2c:6645]%vethe29362a:53            [::]:*    users:(("named",pid=1137904,fd=144))                                                                                                            
+udp   UNCONN 0      0          [fe80::6417:ecff:fe2c:6645]%vethe29362a:53            [::]:*    users:(("named",pid=1137904,fd=142))                                                                                                            
+udp   UNCONN 0      0          [fe80::6417:ecff:fe2c:6645]%vethe29362a:53            [::]:*    users:(("named",pid=1137904,fd=143))                                                                                                            
+udp   UNCONN 0      0      [fe80::ecee:eeff:feee:eeee]%calib2c919092b4:53            [::]:*    users:(("named",pid=1137904,fd=149))                                                                                                            
+udp   UNCONN 0      0      [fe80::ecee:eeff:feee:eeee]%calib2c919092b4:53            [::]:*    users:(("named",pid=1137904,fd=150))                                                                                                            
+udp   UNCONN 0      0      [fe80::ecee:eeff:feee:eeee]%calib2c919092b4:53            [::]:*    users:(("named",pid=1137904,fd=151))                                                                                                            
+udp   UNCONN 0      0      [fe80::ecee:eeff:feee:eeee]%calib2c919092b4:53            [::]:*    users:(("named",pid=1137904,fd=152))                                                                                                            
+udp   UNCONN 0      0      [fe80::ecee:eeff:feee:eeee]%cali400bdda75ce:53            [::]:*    users:(("named",pid=1137904,fd=157))                                                                                                            
+udp   UNCONN 0      0      [fe80::ecee:eeff:feee:eeee]%cali400bdda75ce:53            [::]:*    users:(("named",pid=1137904,fd=158))                                                                                                            
+udp   UNCONN 0      0      [fe80::ecee:eeff:feee:eeee]%cali400bdda75ce:53            [::]:*    users:(("named",pid=1137904,fd=160))                                                                                                            
+udp   UNCONN 0      0      [fe80::ecee:eeff:feee:eeee]%cali400bdda75ce:53            [::]:*    users:(("named",pid=1137904,fd=159))                                                                                                            
+tcp   LISTEN 0      20                                         0.0.0.0:587        0.0.0.0:*    users:(("exim4",pid=1137520,fd=6))                                                                                                              
+tcp   LISTEN 0      128                                        0.0.0.0:5000       0.0.0.0:*    users:(("python3",pid=1007,fd=3))                                                                                                               
+tcp   LISTEN 0      100                                        0.0.0.0:995        0.0.0.0:*    users:(("dovecot",pid=1137145,fd=23))                                                                                                           
+tcp   LISTEN 0      100                                        0.0.0.0:993        0.0.0.0:*    users:(("dovecot",pid=1137145,fd=40))                                                                                                           
+tcp   LISTEN 0      4096                                     127.0.0.1:12345      0.0.0.0:*    users:(("alloy",pid=1004,fd=7))                                                                                                                 
+tcp   LISTEN 0      10                                       127.0.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=50))                                                                                                             
+tcp   LISTEN 0      10                                       127.0.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=48))                                                                                                             
+tcp   LISTEN 0      10                                       127.0.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=46))                                                                                                             
+tcp   LISTEN 0      10                                       127.0.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=45))                                                                                                             
+tcp   LISTEN 0      100                                        0.0.0.0:143        0.0.0.0:*    users:(("dovecot",pid=1137145,fd=38))                                                                                                           
+tcp   LISTEN 0      5                                        127.0.0.1:953        0.0.0.0:*    users:(("named",pid=1137904,fd=173))                                                                                                            
+tcp   LISTEN 0      5                                        127.0.0.1:953        0.0.0.0:*    users:(("named",pid=1137904,fd=174))                                                                                                            
+tcp   LISTEN 0      5                                        127.0.0.1:953        0.0.0.0:*    users:(("named",pid=1137904,fd=175))                                                                                                            
+tcp   LISTEN 0      5                                        127.0.0.1:953        0.0.0.0:*    users:(("named",pid=1137904,fd=176))                                                                                                            
+tcp   LISTEN 0      20                                         0.0.0.0:25         0.0.0.0:*    users:(("exim4",pid=1137520,fd=4))                                                                                                              
+tcp   LISTEN 0      128                                        0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=3270,fd=3))                                                                                                                  
+tcp   LISTEN 0      32                                         0.0.0.0:21         0.0.0.0:*    users:(("vsftpd",pid=1138943,fd=3))                                                                                                             
+tcp   LISTEN 0      100                                        0.0.0.0:110        0.0.0.0:*    users:(("dovecot",pid=1137145,fd=21))                                                                                                           
+tcp   LISTEN 0      4096                                     127.0.0.1:33451      0.0.0.0:*    users:(("containerd",pid=8606,fd=16))                                                                                                           
+tcp   LISTEN 0      20                                         0.0.0.0:465        0.0.0.0:*    users:(("exim4",pid=1137520,fd=5))                                                                                                              
+tcp   LISTEN 0      10                                      172.17.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=67))                                                                                                             
+tcp   LISTEN 0      10                                      172.17.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=68))                                                                                                             
+tcp   LISTEN 0      10                                      172.17.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=66))                                                                                                             
+tcp   LISTEN 0      10                                      172.17.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=65))                                                                                                             
+tcp   LISTEN 0      10                                      172.19.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=75))                                                                                                             
+tcp   LISTEN 0      10                                      172.19.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=76))                                                                                                             
+tcp   LISTEN 0      10                                      172.19.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=74))                                                                                                             
+tcp   LISTEN 0      10                                      172.19.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=73))                                                                                                             
+tcp   LISTEN 0      4096                                     127.0.0.1:1338       0.0.0.0:*    users:(("containerd",pid=8606,fd=10))                                                                                                           
+tcp   LISTEN 0      4096                                     127.0.0.1:42117      0.0.0.0:*    users:(("containerd",pid=1084,fd=13))                                                                                                           
+tcp   LISTEN 0      100                                      127.0.0.1:1883       0.0.0.0:*    users:(("mosquitto",pid=2764,fd=5))                                                                                                             
+tcp   LISTEN 0      10                                      172.18.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=82))                                                                                                             
+tcp   LISTEN 0      10                                      172.18.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=84))                                                                                                             
+tcp   LISTEN 0      10                                      172.18.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=83))                                                                                                             
+tcp   LISTEN 0      10                                      172.18.0.1:53         0.0.0.0:*    users:(("named",pid=1137904,fd=81))                                                                                                             
+tcp   LISTEN 0      4096                                     127.0.0.1:9883       0.0.0.0:*    users:(("mosquitto",pid=2764,fd=7))                                                                                                             
+tcp   LISTEN 0      128                                  192.168.0.202:9443       0.0.0.0:*    users:(("python3",pid=2341196,fd=7))                                                                                                            
+tcp   LISTEN 0      4096                                 127.0.0.53%lo:53         0.0.0.0:*    users:(("systemd-resolve",pid=976,fd=14))                                                                                                       
+tcp   LISTEN 0      4096                                     127.0.0.1:10248      0.0.0.0:*    users:(("kubelite",pid=955004,fd=95))                                                                                                           
+tcp   LISTEN 0      4096                                     127.0.0.1:10249      0.0.0.0:*    users:(("kubelite",pid=955004,fd=106))                                                                                                          
+tcp   LISTEN 0      4096                                     127.0.0.1:10256      0.0.0.0:*    users:(("kubelite",pid=955004,fd=104))                                                                                                          
+tcp   LISTEN 0      4096                                     127.0.0.1:19001      0.0.0.0:*    users:(("k8s-dqlite",pid=1061,fd=16))                                                                                                           
+tcp   LISTEN 0      10                                   192.168.0.202:53         0.0.0.0:*    users:(("named",pid=1137904,fd=59))                                                                                                             
+tcp   LISTEN 0      10                                   192.168.0.202:53         0.0.0.0:*    users:(("named",pid=1137904,fd=60))                                                                                                             
+tcp   LISTEN 0      10                                   192.168.0.202:53         0.0.0.0:*    users:(("named",pid=1137904,fd=58))                                                                                                             
+tcp   LISTEN 0      10                                   192.168.0.202:53         0.0.0.0:*    users:(("named",pid=1137904,fd=57))                                                                                                             
+tcp   LISTEN 0      511                                  192.168.0.202:80         0.0.0.0:*    users:(("nginx",pid=2783807,fd=30),("nginx",pid=2783806,fd=30),("nginx",pid=2783805,fd=30),("nginx",pid=2783804,fd=30),("nginx",pid=2100,fd=30))
+tcp   LISTEN 0      90                                       127.0.0.1:3306       0.0.0.0:*    users:(("mariadbd",pid=1266,fd=65))                                                                                                             
+tcp   LISTEN 0      4096                                       0.0.0.0:8082       0.0.0.0:*    users:(("docker-proxy",pid=7040,fd=7))                                                                                                          
+tcp   LISTEN 0      511                                  192.168.0.202:443        0.0.0.0:*    users:(("nginx",pid=2783807,fd=31),("nginx",pid=2783806,fd=31),("nginx",pid=2783805,fd=31),("nginx",pid=2783804,fd=31),("nginx",pid=2100,fd=31))
+tcp   LISTEN 0      128                                      127.0.0.1:8088       0.0.0.0:*    users:(("python3",pid=3008787,fd=23))                                                                                                           
+tcp   LISTEN 0      511                                      127.0.0.1:8084       0.0.0.0:*    users:(("nginx",pid=2783807,fd=32),("nginx",pid=2783806,fd=32),("nginx",pid=2783805,fd=32),("nginx",pid=2783804,fd=32),("nginx",pid=2100,fd=32))
+tcp   LISTEN 0      10         [fe80::302d:82ff:fece:1227]%vethb972d7c:53            [::]:*    users:(("named",pid=1137904,fd=121))                                                                                                            
+tcp   LISTEN 0      10         [fe80::302d:82ff:fece:1227]%vethb972d7c:53            [::]:*    users:(("named",pid=1137904,fd=122))                                                                                                            
+tcp   LISTEN 0      10         [fe80::302d:82ff:fece:1227]%vethb972d7c:53            [::]:*    users:(("named",pid=1137904,fd=123))                                                                                                            
+tcp   LISTEN 0      10         [fe80::302d:82ff:fece:1227]%vethb972d7c:53            [::]:*    users:(("named",pid=1137904,fd=124))                                                                                                            
+tcp   LISTEN 0      10     [fe80::e88d:76ff:fe06:85ff]%br-7cd6762cb0a5:53            [::]:*    users:(("named",pid=1137904,fd=105))                                                                                                            
+tcp   LISTEN 0      10     [fe80::e88d:76ff:fe06:85ff]%br-7cd6762cb0a5:53            [::]:*    users:(("named",pid=1137904,fd=107))                                                                                                            
+tcp   LISTEN 0      10     [fe80::e88d:76ff:fe06:85ff]%br-7cd6762cb0a5:53            [::]:*    users:(("named",pid=1137904,fd=108))                                                                                                            
+tcp   LISTEN 0      10     [fe80::e88d:76ff:fe06:85ff]%br-7cd6762cb0a5:53            [::]:*    users:(("named",pid=1137904,fd=106))                                                                                                            
+tcp   LISTEN 0      100                                           [::]:995           [::]:*    users:(("dovecot",pid=1137145,fd=24))                                                                                                           
+tcp   LISTEN 0      100                                           [::]:993           [::]:*    users:(("dovecot",pid=1137145,fd=41))                                                                                                           
+tcp   LISTEN 0      100                                          [::1]:1883          [::]:*    users:(("mosquitto",pid=2764,fd=6))                                                                                                             
+tcp   LISTEN 0      100                                           [::]:143           [::]:*    users:(("dovecot",pid=1137145,fd=39))                                                                                                           
+tcp   LISTEN 0      128                                           [::]:22            [::]:*    users:(("sshd",pid=3270,fd=4))                                                                                                                  
+tcp   LISTEN 0      4096                                             *:16443            *:*    users:(("kubelite",pid=955004,fd=3))                                                                                                            
+tcp   LISTEN 0      100                                           [::]:110           [::]:*    users:(("dovecot",pid=1137145,fd=22))                                                                                                           
+tcp   LISTEN 0      4096                                             *:25000            *:*    users:(("cluster-agent",pid=7182,fd=3))                                                                                                         
+tcp   LISTEN 0      10     [fe80::ecee:eeff:feee:eeee]%calib2c919092b4:53            [::]:*    users:(("named",pid=1137904,fd=153))                                                                                                            
+tcp   LISTEN 0      10     [fe80::ecee:eeff:feee:eeee]%calib2c919092b4:53            [::]:*    users:(("named",pid=1137904,fd=154))                                                                                                            
+tcp   LISTEN 0      10     [fe80::ecee:eeff:feee:eeee]%calib2c919092b4:53            [::]:*    users:(("named",pid=1137904,fd=155))                                                                                                            
+tcp   LISTEN 0      10     [fe80::ecee:eeff:feee:eeee]%calib2c919092b4:53            [::]:*    users:(("named",pid=1137904,fd=156))                                                                                                            
+tcp   LISTEN 0      10     [fe80::ecee:eeff:feee:eeee]%cali400bdda75ce:53            [::]:*    users:(("named",pid=1137904,fd=161))                                                                                                            
+tcp   LISTEN 0      10     [fe80::ecee:eeff:feee:eeee]%cali400bdda75ce:53            [::]:*    users:(("named",pid=1137904,fd=162))                                                                                                            
+tcp   LISTEN 0      10     [fe80::ecee:eeff:feee:eeee]%cali400bdda75ce:53            [::]:*    users:(("named",pid=1137904,fd=164))                                                                                                            
+tcp   LISTEN 0      10     [fe80::ecee:eeff:feee:eeee]%cali400bdda75ce:53            [::]:*    users:(("named",pid=1137904,fd=163))                                                                                                            
+tcp   LISTEN 0      10     [fe80::187b:c7ff:fe0e:6983]%br-824f4551f992:53            [::]:*    users:(("named",pid=1137904,fd=113))                                                                                                            
+tcp   LISTEN 0      10     [fe80::187b:c7ff:fe0e:6983]%br-824f4551f992:53            [::]:*    users:(("named",pid=1137904,fd=114))                                                                                                            
+tcp   LISTEN 0      10     [fe80::187b:c7ff:fe0e:6983]%br-824f4551f992:53            [::]:*    users:(("named",pid=1137904,fd=115))                                                                                                            
+tcp   LISTEN 0      10     [fe80::187b:c7ff:fe0e:6983]%br-824f4551f992:53            [::]:*    users:(("named",pid=1137904,fd=116))                                                                                                            
+tcp   LISTEN 0      5                                            [::1]:953           [::]:*    users:(("named",pid=1137904,fd=177))                                                                                                            
+tcp   LISTEN 0      5                                            [::1]:953           [::]:*    users:(("named",pid=1137904,fd=178))                                                                                                            
+tcp   LISTEN 0      5                                            [::1]:953           [::]:*    users:(("named",pid=1137904,fd=179))                                                                                                            
+tcp   LISTEN 0      5                                            [::1]:953           [::]:*    users:(("named",pid=1137904,fd=180))                                                                                                            
+tcp   LISTEN 0      10                                           [::1]:53            [::]:*    users:(("named",pid=1137904,fd=89))                                                                                                             
+tcp   LISTEN 0      10                                           [::1]:53            [::]:*    users:(("named",pid=1137904,fd=90))                                                                                                             
+tcp   LISTEN 0      10                                           [::1]:53            [::]:*    users:(("named",pid=1137904,fd=92))                                                                                                             
+tcp   LISTEN 0      10                                           [::1]:53            [::]:*    users:(("named",pid=1137904,fd=91))                                                                                                             
+tcp   LISTEN 0      10                [fe80::5054:ff:fe0d:2f54]%enp1s0:53            [::]:*    users:(("named",pid=1137904,fd=97))                                                                                                             
+tcp   LISTEN 0      10                [fe80::5054:ff:fe0d:2f54]%enp1s0:53            [::]:*    users:(("named",pid=1137904,fd=98))                                                                                                             
+tcp   LISTEN 0      10                [fe80::5054:ff:fe0d:2f54]%enp1s0:53            [::]:*    users:(("named",pid=1137904,fd=99))                                                                                                             
+tcp   LISTEN 0      10                [fe80::5054:ff:fe0d:2f54]%enp1s0:53            [::]:*    users:(("named",pid=1137904,fd=100))                                                                                                            
+tcp   LISTEN 0      10         [fe80::3cee:9bff:febe:3546]%vethbd0dcc2:53            [::]:*    users:(("named",pid=1137904,fd=129))                                                                                                            
+tcp   LISTEN 0      10         [fe80::3cee:9bff:febe:3546]%vethbd0dcc2:53            [::]:*    users:(("named",pid=1137904,fd=130))                                                                                                            
+tcp   LISTEN 0      10         [fe80::3cee:9bff:febe:3546]%vethbd0dcc2:53            [::]:*    users:(("named",pid=1137904,fd=132))                                                                                                            
+tcp   LISTEN 0      10         [fe80::3cee:9bff:febe:3546]%vethbd0dcc2:53            [::]:*    users:(("named",pid=1137904,fd=131))                                                                                                            
+tcp   LISTEN 0      4096                                             *:10250            *:*    users:(("kubelite",pid=955004,fd=80))                                                                                                           
+tcp   LISTEN 0      4096                                             *:10259            *:*    users:(("kubelite",pid=955004,fd=94))                                                                                                           
+tcp   LISTEN 0      4096                                             *:10257            *:*    users:(("kubelite",pid=955004,fd=78))                                                                                                           
+tcp   LISTEN 0      10         [fe80::6417:ecff:fe2c:6645]%vethe29362a:53            [::]:*    users:(("named",pid=1137904,fd=145))                                                                                                            
+tcp   LISTEN 0      10         [fe80::6417:ecff:fe2c:6645]%vethe29362a:53            [::]:*    users:(("named",pid=1137904,fd=148))                                                                                                            
+tcp   LISTEN 0      10         [fe80::6417:ecff:fe2c:6645]%vethe29362a:53            [::]:*    users:(("named",pid=1137904,fd=147))                                                                                                            
+tcp   LISTEN 0      10         [fe80::6417:ecff:fe2c:6645]%vethe29362a:53            [::]:*    users:(("named",pid=1137904,fd=146))                                                                                                            
+tcp   LISTEN 0      4096                                          [::]:8082          [::]:*    users:(("docker-proxy",pid=7047,fd=7))                                                                                                          
+tcp   LISTEN 0      10         [fe80::1c43:3aff:feba:f4c9]%veth1b3e12c:53            [::]:*    users:(("named",pid=1137904,fd=137))                                                                                                            
+tcp   LISTEN 0      10         [fe80::1c43:3aff:feba:f4c9]%veth1b3e12c:53            [::]:*    users:(("named",pid=1137904,fd=138))                                                                                                            
+tcp   LISTEN 0      10         [fe80::1c43:3aff:feba:f4c9]%veth1b3e12c:53            [::]:*    users:(("named",pid=1137904,fd=139))                                                                                                            
+tcp   LISTEN 0      10         [fe80::1c43:3aff:feba:f4c9]%veth1b3e12c:53            [::]:*    users:(("named",pid=1137904,fd=140))                                                                                                            
+
+===== APPLICATION GIT =====
+APP_PRESENT=YES
+HEAD=f5e3d194ebffb3c6c1e1cd8afc31f80911e2ce71
+TREE=02b6af353643a4321a6f14d01735b9c0e305842e
+WORKTREE_CLEAN=YES
+REMOTE=origin	git@github.com:ZaurNavi/CaptivePortal.git (fetch)
+REMOTE=origin	git@github.com:ZaurNavi/CaptivePortal.git (push)
+COMMIT_TIME=2026-09-19T23:01:27+04:00
+SUBJECT=Merge pull request #149 from ZaurNavi/feature/device-fingerprint-03r2-n-f-a4-final-sizing
+
+===== SYSTEMD UNITS =====
+--- UNIT=captive-portal.service
+ACTIVE=active
+ENABLED=enabled
+MainPID=3008787
+ExecStart={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /opt/CaptivePortal/run.py ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+User=admin
+Group=
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/etc/systemd/system/captive-portal.service
+--- UNIT=fingerprint-evidence.service
+ACTIVE=active
+ENABLED=enabled
+MainPID=2341196
+ExecStart={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -m app.device_fingerprint.cli run ; ignore_errors=no ; start_time=[Wed 2026-09-30 09:14:12 +04] ; stop_time=[n/a] ; pid=2341196 ; code=(null) ; status=0/0 }
+User=admin
+Group=
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/etc/systemd/system/fingerprint-evidence.service
+--- UNIT=fingerprint-sensor.service
+ACTIVE=active
+ENABLED=enabled
+MainPID=2760947
+ExecStart={ path=/opt/captiveportal-runtime/device-fingerprint-venv/bin/python ; argv[]=/opt/captiveportal-runtime/device-fingerprint-venv/bin/python -m app.device_fingerprint_sensor.cli run ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+User=fingerprint-sensor
+Group=fingerprint-sensor
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/etc/systemd/system/fingerprint-sensor.service
+--- UNIT=fingerprint-suricata.service
+ACTIVE=active
+ENABLED=enabled
+MainPID=2761003
+ExecStart={ path=/usr/bin/suricata ; argv[]=/usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+User=suricata
+Group=suricata
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/etc/systemd/system/fingerprint-suricata.service
+--- UNIT=traffic-projection.service
+ACTIVE=active
+ENABLED=enabled
+MainPID=2869
+ExecStart={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -m app.traffic_projection.cli run ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+User=admin
+Group=admin
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/etc/systemd/system/traffic-projection.service
+--- UNIT=alloy.service
+ACTIVE=active
+ENABLED=enabled
+MainPID=1004
+ExecStart={ path=/usr/bin/alloy ; argv[]=/usr/bin/alloy run $CUSTOM_ARGS --storage.path=/var/lib/alloy/data $CONFIG_FILE ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+User=alloy
+Group=
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/lib/systemd/system/alloy.service
+
+===== CAPTIVE PORTAL UNIT =====
+# /etc/systemd/system/captive-portal.service
+[Unit]
+Description=Captive Portal Web Application
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/CaptivePortal
+ExecStart=/usr/bin/python3 /opt/CaptivePortal/run.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/captive-portal.service.d/10-omada-environment.conf
+[Service]
+EnvironmentFile=/etc/default/captive-portal
+
+# /etc/systemd/system/captive-portal.service.d/device-current-context.conf
+[Service]
+Environment="WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true"
+
+# /etc/systemd/system/captive-portal.service.d/override.conf
+[Service]
+Environment="OMADA_WEBHOOK_ENABLED=true"
+Environment="OMADA_WEBHOOK_ALLOWED_IPS=192.168.0.222"
+Environment="OMADA_WEBHOOK_AUTH_MODE=ip_only"
+Environment="OMADA_WEBHOOK_MAX_BODY_BYTES=1048576"
+Environment="OMADA_WEBHOOK_LOG_FILE=/opt/CaptivePortal/logs/omada_webhook.log"
+
+# /etc/systemd/system/captive-portal.service.d/pending-session-cleaner.conf
+[Service]
+Environment="PENDING_SESSION_CLEANER_ENABLED=true"
+Environment="PENDING_SESSION_CLEANER_MAX_ACTIONS_PER_SCAN=1"
+Environment="PENDING_SESSION_CLEANER_SSIDS=Zefer_Parki"
+
+# /etc/systemd/system/captive-portal.service.d/visitor-registry.conf
+[Service]
+Environment=VISITOR_REGISTRY_ENABLED=true
+
+# /etc/systemd/system/captive-portal.service.d/visitor-snapshot.conf
+[Service]
+Environment="VISITOR_SNAPSHOT_ENABLED=true"
+
+===== FINGERPRINT UNIT DEFINITIONS =====
+--- fingerprint-evidence.service
+# /etc/systemd/system/fingerprint-evidence.service
+[Unit]
+Description=CaptivPortal Device Fingerprint Evidence Foundation
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/CaptivePortal
+EnvironmentFile=/etc/captive-portal/device-fingerprint/evidence.env
+ExecStart=/usr/bin/python3 -m app.device_fingerprint.cli run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/opt/CaptivePortal/data
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/fingerprint-evidence.service.d/20-task01-v2.conf
+[Service]
+WorkingDirectory=/home/admin/CaptivePortal-Deploy/task01-v2-db5c2388
+--- fingerprint-sensor.service
+# /etc/systemd/system/fingerprint-sensor.service
+[Unit]
+Description=CaptivPortal passive device fingerprint sensor
+After=captive-portal.service
+
+[Service]
+Type=simple
+User=fingerprint-sensor
+Group=fingerprint-sensor
+SupplementaryGroups=fingerprint-eve
+WorkingDirectory=/opt/CaptivePortal
+EnvironmentFile=-/etc/captive-portal/device-fingerprint/sensor.env
+LoadCredential=device-fingerprint-bearer:/etc/captive-portal/device-fingerprint/sensor.bearer
+ExecStart=/opt/captiveportal-runtime/device-fingerprint-venv/bin/python -m app.device_fingerprint_sensor.cli run
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=20
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+CPUQuota=50%
+MemoryMax=256M
+TasksMax=64
+Nice=10
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/captive-portal/fingerprint-sensor /var/lib/captive-portal/fingerprint-sensor
+
+[Install]
+WantedBy=multi-user.target
+--- fingerprint-suricata.service
+# /etc/systemd/system/fingerprint-suricata.service
+[Unit]
+Description=CaptivPortal dedicated passive fingerprint Suricata
+After=fingerprint-sensor.service
+BindsTo=fingerprint-sensor.service
+PartOf=fingerprint-sensor.service
+
+[Service]
+Type=simple
+User=suricata
+Group=suricata
+RuntimeDirectory=fingerprint-suricata
+RuntimeDirectoryMode=0750
+SupplementaryGroups=fingerprint-eve
+ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0
+ExecStartPre=/usr/bin/test -r /etc/captive-portal/device-fingerprint/suricata.yaml
+ExecStartPre=/usr/bin/timeout 1830 /bin/sh -c 'until test -S /run/captive-portal/fingerprint-sensor/suricata-eve.sock; do sleep 1; done'
+ExecStartPre=/bin/sh -c '/usr/bin/suricata --build-info | /bin/grep -q "^This is Suricata version 8.0.6 RELEASE"'
+ExecStartPre=/usr/bin/suricata -T -c /etc/captive-portal/device-fingerprint/suricata.yaml
+ExecStart=/usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers
+Restart=on-failure
+RestartSec=30
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+CPUQuota=150%
+MemoryHigh=768M
+MemoryMax=1024M
+Nice=10
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+
+===== SAFE PRODUCTION ENV =====
+ENV_FILE=/etc/default/captive-portal
+ENV_FILE_READABLE=YES
+DEVICE_FINGERPRINT_PORTAL_ENABLED=true
+SECRET_KEY_PRESENT=ANALYTICS_API_BEARER_TOKEN
+SECRET_KEY_PRESENT=OMADA_CLIENT_SECRET
+SECRET_KEY_PRESENT=WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET
+SECRET_KEY_PRESENT=WEB_ADMIN_MAX_PASSWORD_CHARS
+SECRET_KEY_PRESENT=WEB_ADMIN_PASSWORD_HASH
+
+===== FINGERPRINT CONFIG DIRECTORY METADATA =====
+DF_CONFIG_DIR_PRESENT=YES
+-rw------- root:root 65 2026-09-15T15:38:06.3215941220 /etc/captive-portal/device-fingerprint/sensor.bearer
+-rw-r----- root:admin 1509 2026-09-15T15:38:10.0136394260 /etc/captive-portal/device-fingerprint/evidence.env.bak.20260930-091337
+-rw-r----- root:admin 1509 2026-09-30T09:13:42.3208334870 /etc/captive-portal/device-fingerprint/evidence.env
+-rw-r----- root:admin 2488 2026-09-15T15:38:09.6656351560 /etc/captive-portal/device-fingerprint/server.key
+-rw-r----- root:admin 65 2026-09-15T15:38:06.3935950060 /etc/captive-portal/device-fingerprint/portal.bearer
+-rw-r--r-- root:root 108 2026-09-15T15:58:40.2247343730 /etc/captive-portal/device-fingerprint/raw-capture.bpf
+-rw-r--r-- root:root 1150 2026-09-15T15:58:40.2087341770 /etc/captive-portal/device-fingerprint/suricata.yaml.pre-runtime-dir-20260915-160341
+-rw-r--r-- root:root 1443 2026-09-15T16:15:28.5651066920 /etc/captive-portal/device-fingerprint/suricata.yaml
+-rw-r--r-- root:root 1566 2026-09-15T15:38:09.6336347630 /etc/captive-portal/device-fingerprint/ca.crt
+-rw-r--r-- root:root 1566 2026-09-15T15:38:09.6936354990 /etc/captive-portal/device-fingerprint/sensor-ca.crt
+-rw-r--r-- root:root 1566 2026-09-15T15:38:09.7136357450 /etc/captive-portal/device-fingerprint/portal-ca.crt
+-rw-r--r-- root:root 1578 2026-09-15T15:38:09.6496349590 /etc/captive-portal/device-fingerprint/server.crt
+-rw-r--r-- root:root 1768 2026-09-15T15:58:40.2447346190 /etc/captive-portal/device-fingerprint/sensor.env
+drwxr-xr-x root:root 4096 2026-09-30T09:13:42.3488337990 /etc/captive-portal/device-fingerprint
+
+===== FINGERPRINT DATA PATHS =====
+PRESENT=/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
+-rw-r----- 1 admin telemetry 1468854272 Oct  3 12:06 /opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
+PRESENT=/opt/CaptivePortal/data/device_fingerprint_evidence.writer.lock
+-rw-r----- 1 admin telemetry 1 Sep 15 15:42 /opt/CaptivePortal/data/device_fingerprint_evidence.writer.lock
+ABSENT=/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
+ABSENT=/opt/CaptivePortal/data/classification.sqlite3
+PRESENT=/var/lib/captive-portal/fingerprint-sensor/spool.sqlite3
+-rw-r----- 1 fingerprint-sensor fingerprint-sensor 93708288 Oct  3 12:07 /var/lib/captive-portal/fingerprint-sensor/spool.sqlite3
+PRESENT=/run/captive-portal/fingerprint-sensor/suricata-eve.sock
+srw-rw---- 1 fingerprint-sensor fingerprint-eve 0 Sep 15 22:49 /run/captive-portal/fingerprint-sensor/suricata-eve.sock
+
+===== FINGERPRINT REPOSITORY DEPLOY FILES =====
+REPO_FILE_PRESENT=deploy/device-fingerprint/fingerprint-sensor.service
+4a26ba66606754b1344dc349b8946e35c76070c7dc42a1e56688c31c5fcd6f77  /opt/CaptivePortal/deploy/device-fingerprint/fingerprint-sensor.service
+REPO_FILE_PRESENT=deploy/device-fingerprint/fingerprint-suricata.service
+b8b2724eb955b5bc54bedb53a7cd18f753ccbf8fb39fd1bd62da153e392a93fe  /opt/CaptivePortal/deploy/device-fingerprint/fingerprint-suricata.service
+REPO_FILE_PRESENT=deploy/device-fingerprint/suricata.yaml
+52fdc69656b5b62f221f68f8c6649ad83db751bc6b2228398b0ec8db4991865d  /opt/CaptivePortal/deploy/device-fingerprint/suricata.yaml
+REPO_FILE_PRESENT=deploy/device-fingerprint/raw-capture.bpf
+2236af1b61e85c69e5e5da03459702984a38057b434aa4364a3135013895e211  /opt/CaptivePortal/deploy/device-fingerprint/raw-capture.bpf
+
+===== RUNTIME BINARIES =====
+python3=/usr/bin/python3
+git=/usr/bin/git
+curl=/usr/bin/curl
+sqlite3=/usr/bin/sqlite3
+tcpdump=/usr/bin/tcpdump
+suricata=/usr/bin/suricata
+ethtool=/usr/sbin/ethtool
+nft=/usr/sbin/nft
+iptables=/usr/sbin/iptables
+Python 3.10.12
+git version 2.34.1
+This is Suricata version 8.0.6 RELEASE
+Features: NFQ PCAP_SET_BUFF AF_PACKET HAVE_PACKET_FANOUT LIBCAP_NG LIBNET1.1 HAVE_HTP_URI_NORMALIZE_HOOK PCRE_JIT HAVE_NSS HTTP2_DECOMPRESSION HAVE_LUA HAVE_JA3 HAVE_JA4 HAVE_LIBJANSSON TLS TLS_C11 MAGIC RUST POPCNT64 
+SIMD support: SSE_2 
+Atomic intrinsics: 1 2 4 8 byte(s)
+64-bits, Little-endian architecture
+GCC version 11.4.0, C version 201112
+compiled with _FORTIFY_SOURCE=2
+L1 cache line size (CLS)=64
+thread local storage method: _Thread_local
+compiled with LibHTP v8.0.6
+
+Suricata Configuration:
+tcpdump version 4.99.1
+libpcap version 1.10.1 (with TPACKET_V3)
+OpenSSL 3.0.2 15 Mar 2022
+
+===== FINGERPRINT PROCESSES =====
+2341196 admin    admin     3-02:53:46 /usr/bin/python3 -m app.device_fingerprint.cli run
+2760947 fingerp+ fingerp+ 17-13:18:46 /opt/captiveportal-runtime/device-fingerprint-venv/bin/python -m app.device_fingerprint_sensor.cli run
+2761003 suricata suricata 17-13:18:42 /usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers
+
+===== RECENT SERVICE LOGS =====
+--- captive-portal.service
+Oct 03 12:07:43 local.domain.az python3[3008787]: INFO    observation.client_cycle_completed site_id=6a64f17630da7c70d232187a cycle_id=3b379411-bb48-440d-b392-c5f2f994fb59 duration_ms=593 complete=True items_seen=10 items_stored=1 items_skipped=9 error_count=0 duplicate_mac_count=0 unknown_auth_status_count=9 failure_category=None http_status=200 error_code=0
+Oct 03 12:07:54 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:54 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:54 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:54 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:54 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:54 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:55 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:55 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:56 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:56 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:56 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:56 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:56 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:56 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:56 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:56 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:57 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:57 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:57 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:57 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:57 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:57 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:07:58 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:07:58 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:08:00 local.domain.az python3[3008787]: 192.168.0.222 - - [03/Oct/2026 12:08:00] "POST /api/integrations/omada/webhook HTTP/1.1" 204 -
+Oct 03 12:08:02 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:08:02 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:08:02 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:08:02 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:08:02 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:08:02 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:08:02 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:08:02 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:08:06 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:08:06 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:08:10 local.domain.az python3[3008787]: INFO    {"event":"portal_evidence_source_health","source_health_transition":"available"}
+Oct 03 12:08:15 local.domain.az python3[3008787]: /usr/lib/python3/dist-packages/urllib3/connectionpool.py:1032: InsecureRequestWarning: Unverified HTTPS request is being made to host '192.168.0.222'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#ssl-warnings
+Oct 03 12:08:15 local.domain.az python3[3008787]:   warnings.warn(
+Oct 03 12:08:21 local.domain.az python3[3008787]: 192.168.0.220 - - [03/Oct/2026 12:08:21] "GET /api/public/portal-counter HTTP/1.1" 200 -
+--- fingerprint-evidence.service
+Oct 03 12:05:48 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":1,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":1,"request_id":"b788d1b4-ed8d-4a7d-90d4-ee307afea1d4","service_name":"fingerprint-evidence.service"}
+Oct 03 12:05:48 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:05:48] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:05:50 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":1,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":1,"request_id":"c092937e-9c99-4097-a8cb-58142858f8ab","service_name":"fingerprint-evidence.service"}
+Oct 03 12:05:50 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:05:50] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:06:00 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":6,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":6,"request_id":"8205e02b-5833-45bf-ac21-a3b45f16c87a","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:00 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:06:00] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:06:01 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":4,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":4,"request_id":"635c658c-d4d8-4fbc-ba44-65399a512e3e","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:01 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:06:01] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:06:10 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_source_health_completed","http_status":200,"inserted":1,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"portal-zefer-01","received":1,"request_id":"75989e28-fd5e-414e-923d-3cd80a78a99c","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:10 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:06:10] "POST /api/internal/device-fingerprint/v1/source-health/batch HTTP/1.1" 200 -
+Oct 03 12:06:41 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":2,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":2,"request_id":"1f6cb679-0c5b-4310-86ac-f482be27f5d2","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:41 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:06:41] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:06:43 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":3,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":3,"request_id":"6f9dd248-86f1-4ad2-9cd1-3b127862752a","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:43 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:06:43] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:06:50 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":1,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":1,"request_id":"c1f3308e-37c3-4f41-9243-8658454b3542","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:50 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:06:50] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:06:53 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":1,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":6,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":7,"request_id":"174c9708-8393-409f-83e5-53f1e55e2141","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:53 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":1,"event":"device_fingerprint_ingest_duplicate","process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:53 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:06:53] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:06:54 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_source_health_completed","http_status":200,"inserted":8,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":8,"request_id":"a9516b94-6aec-498e-80b7-33e1c98f0c52","service_name":"fingerprint-evidence.service"}
+Oct 03 12:06:54 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:06:54] "POST /api/internal/device-fingerprint/v1/source-health/batch HTTP/1.1" 200 -
+Oct 03 12:07:23 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","deleted_evidence":0,"deleted_source_health":0,"event":"device_fingerprint_retention_completed","process_started_at":"2026-09-30T05:14:14.846Z","service_name":"fingerprint-evidence.service"}
+Oct 03 12:07:23 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_source_health_completed","http_status":200,"inserted":1,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"portal-zefer-01","received":1,"request_id":"16fcf081-ec2d-44d9-82e6-65a6bac002f6","service_name":"fingerprint-evidence.service"}
+Oct 03 12:07:23 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:07:23] "POST /api/internal/device-fingerprint/v1/source-health/batch HTTP/1.1" 200 -
+Oct 03 12:07:35 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":2,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":2,"request_id":"7cd1cfa2-aeb4-460f-8d08-1d0f797b15cf","service_name":"fingerprint-evidence.service"}
+Oct 03 12:07:35 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:07:35] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:07:36 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":4,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":4,"request_id":"3cab13d7-e149-4c1b-8600-3c936b8374e5","service_name":"fingerprint-evidence.service"}
+Oct 03 12:07:36 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:07:36] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:07:48 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":1,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":1,"request_id":"cad75345-9453-4063-8475-b97d62512bdd","service_name":"fingerprint-evidence.service"}
+Oct 03 12:07:48 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:07:48] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:07:49 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":1,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":1,"request_id":"149da55a-a252-4aa3-89e9-55371b5f9da8","service_name":"fingerprint-evidence.service"}
+Oct 03 12:07:49 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:07:49] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:08:07 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":3,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":3,"request_id":"b3916230-ed22-49ac-8eff-3cbc89a1eedc","service_name":"fingerprint-evidence.service"}
+Oct 03 12:08:07 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:08:07] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:08:10 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_source_health_completed","http_status":200,"inserted":2,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"portal-zefer-01","received":2,"request_id":"9bd8b430-114a-4365-9c20-84f423d2e3b5","service_name":"fingerprint-evidence.service"}
+Oct 03 12:08:10 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:08:10] "POST /api/internal/device-fingerprint/v1/source-health/batch HTTP/1.1" 200 -
+Oct 03 12:08:11 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":3,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":3,"request_id":"f6bd4cde-4efb-4424-8825-9d27d6591021","service_name":"fingerprint-evidence.service"}
+Oct 03 12:08:11 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:08:11] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+Oct 03 12:08:18 local.domain.az python3[2341196]: {"artifact_sha":"db5c23885c90daa771703638ac71da31e071fa15","artifact_tree":"6ffc63b12590f2ec2c019d1bfc3297c7882843ca","duplicate_noop":0,"event":"device_fingerprint_ingest_completed","http_status":200,"inserted":2,"process_started_at":"2026-09-30T05:14:14.846Z","producer_id":"sensor-zefer-01","received":2,"request_id":"96d8c445-525a-45e6-8e9f-37a082de6c62","service_name":"fingerprint-evidence.service"}
+Oct 03 12:08:18 local.domain.az python3[2341196]: 192.168.0.202 - - [03/Oct/2026 12:08:18] "POST /api/internal/device-fingerprint/v1/evidence/batch HTTP/1.1" 200 -
+--- fingerprint-sensor.service
+Oct 03 12:05:45 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928090362,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:05:49 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":1,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:05:50 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":1,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:05:55 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928090549,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:06:00 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":6,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:06:02 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":4,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:06:05 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928095805,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:06:15 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928096579,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:06:19 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","deduplicated_packet_count":1151265,"dhcp_candidate_count":72587,"dhcp_scoped_count":35128,"duplicate_packet_count":1220486,"eve_datagram_truncated":0,"eve_json_invalid":0,"event":"fingerprint_sensor_metrics","oldest_spool_age":0,"process_started_at":"2026-09-15T18:49:13.791Z","quic_eve_count":1014899,"quic_normalized_count":203221,"quic_version_invalid":276557,"raw_dedup_ratio":0.5145928050625888,"raw_packet_count":2371751,"runtime_state":"ready","sensor_cpu_usec":21430821523,"sensor_memory_current":69771264,"service_name":"fingerprint-sensor.service","spool_bytes":93708288,"spool_rows":0,"stale_spool_event_dropped":496043,"suricata_cpu_usec":12041295431,"suricata_memory_current":81747968,"suricata_process_active":true,"tcp_syn_event_count":1078393,"tls_eve_count":568311,"tls_normalized_count":568311}
+Oct 03 12:06:25 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928101291,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:06:35 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928103687,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:06:41 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":2,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:06:44 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":3,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:06:45 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928108460,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:06:52 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_retry":1,"event":"fingerprint_delivery_retry","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:06:53 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":7,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:06:54 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":8,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:06:55 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928114668,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:07:05 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928116763,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:07:15 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928120630,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:07:19 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","deduplicated_packet_count":1151274,"dhcp_candidate_count":72591,"dhcp_scoped_count":35130,"duplicate_packet_count":1220495,"eve_datagram_truncated":0,"eve_json_invalid":0,"event":"fingerprint_sensor_metrics","oldest_spool_age":0,"process_started_at":"2026-09-15T18:49:13.791Z","quic_eve_count":1014899,"quic_normalized_count":203221,"quic_version_invalid":276557,"raw_dedup_ratio":0.5145926943138223,"raw_packet_count":2371769,"runtime_state":"ready","sensor_cpu_usec":21430993173,"sensor_memory_current":69726208,"service_name":"fingerprint-sensor.service","spool_bytes":93708288,"spool_rows":0,"stale_spool_event_dropped":496043,"suricata_cpu_usec":12041690268,"suricata_memory_current":81747968,"suricata_process_active":true,"tcp_syn_event_count":1078398,"tls_eve_count":568316,"tls_normalized_count":568316}
+Oct 03 12:07:25 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928120924,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:07:35 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":2,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:07:35 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928120937,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:07:36 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":4,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:07:45 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928126863,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:07:48 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":1,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:07:49 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":1,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:07:55 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928129950,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:08:05 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928133907,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:08:10 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":3,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:08:12 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":3,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:08:15 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928136761,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:08:18 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":2,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:08:19 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","deduplicated_packet_count":1151286,"dhcp_candidate_count":72596,"dhcp_scoped_count":35133,"duplicate_packet_count":1220516,"eve_datagram_truncated":0,"eve_json_invalid":0,"event":"fingerprint_sensor_metrics","oldest_spool_age":0,"process_started_at":"2026-09-15T18:49:13.791Z","quic_eve_count":1014899,"quic_normalized_count":203221,"quic_version_invalid":276557,"raw_dedup_ratio":0.5145943885703781,"raw_packet_count":2371802,"runtime_state":"ready","sensor_cpu_usec":21431260200,"sensor_memory_current":69726208,"service_name":"fingerprint-sensor.service","spool_bytes":93708288,"spool_rows":0,"stale_spool_event_dropped":496043,"suricata_cpu_usec":12042086029,"suricata_memory_current":81747968,"suricata_process_active":true,"tcp_syn_event_count":1078405,"tls_eve_count":568322,"tls_normalized_count":568322}
+Oct 03 12:08:25 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928142415,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:08:35 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928142609,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:08:45 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","capture_kernel_drops":101768,"capture_kernel_ifdrops":null,"capture_kernel_packets":928143842,"event":"fingerprint_suricata_stats","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service","suricata_version":"8.0.6"}
+Oct 03 12:08:49 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":1,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+Oct 03 12:08:50 local.domain.az python[2760947]: {"artifact_sha":"d37d3ec126ccd512fe835af0db21221e2f83d565","artifact_tree":"3145e904ad5027d0d584945f4814f3ade59d44ea","delivery_success":1,"event":"fingerprint_delivery_completed","process_started_at":"2026-09-15T18:49:13.791Z","service_name":"fingerprint-sensor.service"}
+--- fingerprint-suricata.service
+Sep 25 21:34:42 local.domain.az suricata[2761003]: E: logopenfile: No space left on device error while writing to /run/fingerprint-suricata/diag-eve.json
+
+===== PREFLIGHT MARKERS =====
+TARGET_HOST_EXPECTED=192.168.0.202
+EXPECTED_CURRENT_PORTAL_ROOT=/opt/CaptivePortal
+EXPECTED_EVIDENCE_BIND=192.168.0.202:9443
+NO_CHANGES_PERFORMED=YES

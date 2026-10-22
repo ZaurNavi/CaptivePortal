@@ -1,0 +1,74 @@
+
+===== SAFETY / CURRENT STATE =====
+2026-10-03T15:13:18+04:00
+TARGET_SHA=fecdb5a7c79e56bb49be4797ca875d6720670042
+TARGET_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+CLASSIFICATION_ACTIVATION=NO
+CAPTIVE_PORTAL_RESTART=NO
+EVIDENCE_RESTART=NO
+--- captive-portal.service
+MainPID=3008787
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-evidence.service
+MainPID=3602244
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-sensor.service
+MainPID=2760947
+NRestarts=0
+ActiveState=active
+SubState=running
+--- fingerprint-suricata.service
+MainPID=3613622
+NRestarts=1
+ActiveState=active
+SubState=running
+--- current live config
+12:default-log-dir: /run/fingerprint-suricata
+46:      filetype: unix_dgram
+47:      filename: /run/captive-portal/fingerprint-sensor/suricata-eve.sock
+--- current live unit
+11:RuntimeDirectory=fingerprint-suricata
+12:RuntimeDirectoryMode=0750
+--- /run
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs           794M  2.2M  792M   1% /run
+DIAG_BEFORE=ABSENT
+
+===== VERIFY EXACT OWNER-MERGED GIT TARGET =====
+From github.com:ZaurNavi/CaptivePortal
+   810484e..fecdb5a  main       -> origin/main
+ORIGIN_MAIN=fecdb5a7c79e56bb49be4797ca875d6720670042
+TARGET_SHA_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+POST_MERGE_PROVENANCE=PASS
+
+===== MATERIALIZE EXACT FIX1 MERGE =====
+Preparing worktree (detached HEAD fecdb5a)
+HEAD is now at fecdb5a Merge pull request #174 from ZaurNavi/fix/foundation-prod-stability-01-fix1
+WORKTREE_HEAD=fecdb5a7c79e56bb49be4797ca875d6720670042
+WORKTREE_TREE=85d7d41e1ad19c079cad0ae819a3fe38a068e242
+WORKTREE_CLEAN=YES
+
+===== VERIFY SOURCE ARTIFACT CONTRACT =====
+SOURCE_ARTIFACT_CONTRACT=PASS
+
+===== BACKUP CURRENT INSTALLED FILES =====
+BACKUP=/home/admin/captivportal-recovery/foundation-fix1-reconcile-20261003T111318Z
+
+===== RECONCILE SURICATA FROM EXACT GIT MERGE =====
+INSTALLED_CONFIG_GIT_IDENTITY=PASS
+INSTALLED_UNIT_GIT_IDENTITY=PASS
+
+===== SYSTEMD VALIDATE / START =====
+/lib/systemd/system/snapd.service:23: Unknown key name 'RestartMode' in section 'Service', ignoring.
+SYSTEMD_VERIFY=PASS
+i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+E: suricata: The logging directory "/run/fingerprint-suricata" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) doesn't exist. Shutting down the engine
+
+===== ABORT =====
+EXIT_CODE=1
+BACKUP=/home/admin/captivportal-recovery/foundation-fix1-reconcile-20261003T111318Z
+CLASSIFICATION_ACTIVATION=NO
