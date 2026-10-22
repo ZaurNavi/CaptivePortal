@@ -1070,3 +1070,69 @@ def test_04I_A_lexical_proposal_preserves_literals_identifiers_types_and_operato
     ids=['unclosed_string','unclosed_identifier','unclosed_comment','non_SQL_whitespace','none','empty','oversize'])
 def test_04I_A_lexical_uncertainty_is_not_equivalence(sql):
     with pytest.raises(ValueError):proposed_04I_ddl_tokens(sql)
+
+
+def compile_04J_guard(namespace):
+    """Execute the actual nested body, without adding a production test seam."""
+    import ast
+    source=Path(__file__).resolve().parents[2]/'app/db_audit_coordinator/child_bootstrap.py'
+    tree=ast.parse(source.read_text(encoding='utf-8'))
+    outer=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='execute_r4')
+    guard=next(n for n in outer.body if isinstance(n,ast.FunctionDef) and n.name=='guard')
+    exec(compile(ast.Module(body=[guard],type_ignores=[]),str(source),'exec'),namespace)
+    return namespace['guard']
+
+
+@pytest.mark.parametrize('fault',['none','deadline','gate','leaf','cancel','membership',
+    'memory_max','swap_max','swap_current','ancestor'])
+def test_04J_each_guard_uses_one_fresh_complete_sample_and_exact_failure(fault):
+    from types import SimpleNamespace
+    trace=[];observations=[];received=[]
+    def check(name):
+        trace.append(name)
+        if fault==name:raise c.CoordinatorError('unsafe_path' if name in {'gate','leaf'} else 'not_admitted')
+    def samples():
+        trace.append('samples')
+        nodes=(object(),SimpleNamespace(maximum=1 if fault=='memory_max' else 128,
+            swap_max=1 if fault=='swap_max' else 0,swap_current=1 if fault=='swap_current' else 0))
+        observations.append(nodes);return nodes
+    def guest(nodes):
+        trace.append('guest');received.append(nodes)
+        def validate():
+            trace.append('sample_check')
+            if fault=='ancestor':raise c.CoordinatorError('not_admitted')
+        return SimpleNamespace(check=validate)
+    def member(pid):trace.append('membership');return '/wrong' if fault=='membership' else '/leaf'
+    def select_ready(*args):trace.append('cancel');return ([7] if fault=='cancel' else [],[],[])
+    namespace=dict(deadline=SimpleNamespace(check=lambda:check('deadline')),
+        gate=SimpleNamespace(check=lambda:check('gate')),leaf=SimpleNamespace(check=lambda:check('leaf'),
+        samples=samples,relative='/leaf'),data={'cancel_fd':7},policy=SimpleNamespace(memory_max_bytes=128),
+        os=SimpleNamespace(getpid=lambda:42),select=SimpleNamespace(select=select_ready),
+        membership=member,guest_sample=guest,require=p.require,c=c)
+    guard=compile_04J_guard(namespace)
+    if fault=='none':
+        guard();guard()
+        one=['deadline','gate','leaf','cancel','membership','samples','guest','sample_check']
+        assert trace==one*2 and observations[0] is not observations[1]
+        assert all(actual is supplied for actual,supplied in zip(observations,received))
+    else:
+        with pytest.raises(c.CoordinatorError) as error:guard()
+        # Existing closed CoordinatorError normalizes the internal 'canceled'
+        # token; the runtime's result mapping still emits canceled separately.
+        expected='coordinator_unavailable' if fault=='cancel' else 'unauthorized' if fault=='membership' else 'unsafe_path' if fault in {'gate','leaf'} else 'not_admitted'
+        assert error.value.code==expected and error.value.code!='audit_failed'
+        assert len(observations)==int(fault in {'memory_max','swap_max','swap_current','ancestor'})
+
+
+def test_04J_cancel_false_preserves_cleanup_checks_but_does_not_read_cancel_pipe():
+    from types import SimpleNamespace
+    calls=[];nodes=(SimpleNamespace(maximum=128,swap_max=0,swap_current=0),)
+    namespace=dict(deadline=SimpleNamespace(check=lambda:calls.append('deadline')),
+        gate=SimpleNamespace(check=lambda:calls.append('gate')),leaf=SimpleNamespace(
+            check=lambda:calls.append('leaf'),samples=lambda:calls.append('samples') or nodes,relative='/leaf'),
+        policy=SimpleNamespace(memory_max_bytes=128),data={'cancel_fd':7},os=SimpleNamespace(getpid=lambda:42),
+        select=SimpleNamespace(select=lambda *a:pytest.fail('cleanup cancel=False must not poll pipe')),
+        membership=lambda pid:'/leaf',guest_sample=lambda sample:SimpleNamespace(check=lambda:calls.append('full_check')),
+        require=p.require,c=c)
+    compile_04J_guard(namespace)(cancel=False)
+    assert calls==['deadline','gate','leaf','samples','full_check']

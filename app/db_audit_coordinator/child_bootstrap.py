@@ -212,9 +212,10 @@ def execute_r4(data,job,profile,policy):
         deadline.check();gate.check();leaf.check()
         if cancel and select.select([data['cancel_fd']],[],[],0)[0]:raise c.CoordinatorError('canceled')
         require(membership(os.getpid())==leaf.relative,'unauthorized')
-        node=leaf.samples()[-1]
+        samples=leaf.samples()
+        node=samples[-1]
         require(node.maximum==policy.memory_max_bytes and node.swap_max==node.swap_current==0,'not_admitted')
-        sample=guest_sample(leaf.samples());sample.check()
+        sample=guest_sample(samples);sample.check()
     def receive(*,snapshot=False):
         remaining=(data['started_ns']+policy.attempt_seconds*10**9-time.monotonic_ns())/1e9
         require(remaining>0,'not_admitted')

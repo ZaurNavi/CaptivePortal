@@ -698,6 +698,9 @@ original=worker.r4_snapshot if hasattr(worker,'r4_snapshot') else None
 if len(sys.argv)>3 and sys.argv[3].startswith('04i_'):
  from tests.db_audit_coordinator.test_qio226_r4_native import install_04I_cost_probe
  install_04I_cost_probe()
+elif len(sys.argv)>3 and sys.argv[3].startswith('04j_'):
+ from tests.db_audit_coordinator.test_qio226_r4_native import install_04I_cost_probe,install_04J_sample_probe
+ install_04I_cost_probe();install_04J_sample_probe()
 try:os._exit(worker.execute(int(sys.argv[1])))
 except BaseException:traceback.print_exc();os._exit(3)
 '''
@@ -1453,3 +1456,273 @@ def test_04I_private_cost_probe_preserves_UID995_guards_and_positive_release(rec
     assert finals[2]['canonical_deep']==[False]
     assert len(observations)<=21 and len(blobs)>0
     record_property('04i_private_cost_smoke',json.dumps(dict(result=result,observations=observations),sort_keys=True))
+
+
+class Guard04JProbe:
+    """Aggregate actual kernel opens/reads; never substitute kernel data.
+
+    QA only, one worker thread. No per-row log or production instrumentation.
+    read_at/open/read wrappers always execute the original functions. Root
+    optional controls may be absent: attempted fields != successful opens.
+    """
+    def __enter__(self):
+        from app.db_audit_coordinator import live_cgroup as lc
+        self.lc=lc;self.active=False;self.sampling=False;self.reading=None;self.opened=None
+        self.locations={};self.directories={};self.last_nodes=None
+        self.stats=dict(guards=0,passed=0,samples=0,read_at=0,opens=0,reads=0,bytes=0,
+            min_samples=None,max_samples=0,errors={},ancestors={})
+        self.original=(lc.Leaf.samples,lc.directory,lc.read_at,os.open,os.read)
+        samples,directory,read_at,opened,read=self.original
+        def sample(leaf):
+            if not self.active:return samples(leaf)
+            self.stats['samples']+=1;self.sampling=True
+            components=leaf.relative.strip('/').split('/')
+            names=['/']+['/'+'/'.join(components[:n]) for n in range(1,len(components)+1)]
+            self.locations={leaf.mount+('' if name=='/' else name):str(n) for n,name in enumerate(names)}
+            self.directories={}
+            try:
+                nodes=samples(leaf)
+                assert nodes is not self.last_nodes and len(nodes)==len(names)
+                self.last_nodes=nodes
+                return nodes
+            finally:self.sampling=False
+        def directory_call(value,*args,**kwargs):
+            fd=directory(value,*args,**kwargs)
+            if self.active and self.sampling:
+                name=os.fspath(value)
+                assert name in self.locations
+                self.directories[fd]=self.locations[name]
+            return fd
+        def read_call(fd,name,*args,**kwargs):
+            if not (self.active and self.sampling):return read_at(fd,name,*args,**kwargs)
+            depth=self.directories[fd]
+            bucket=self.stats['ancestors'].setdefault(depth,{})
+            field=bucket.setdefault(name,dict(read_at=0,opens=0,reads=0,bytes=0))
+            self.stats['read_at']+=1;field['read_at']+=1;self.reading=(fd,field)
+            try:return read_at(fd,name,*args,**kwargs)
+            finally:self.reading=None;self.opened=None
+        def open_call(*args,**kwargs):
+            fd=opened(*args,**kwargs)
+            if self.reading is not None and kwargs.get('dir_fd')==self.reading[0]:
+                self.opened=fd;self.stats['opens']+=1;self.reading[1]['opens']+=1
+            return fd
+        def kernel_read(fd,count):
+            value=read(fd,count)
+            if self.reading is not None and fd==self.opened:
+                self.stats['reads']+=1;self.stats['bytes']+=len(value)
+                self.reading[1]['reads']+=1;self.reading[1]['bytes']+=len(value)
+            return value
+        lc.Leaf.samples=sample;lc.directory=directory_call;lc.read_at=read_call
+        os.open=open_call;os.read=kernel_read
+        return self
+
+    def guard(self,original):
+        def observed(*args,**kwargs):
+            assert not self.active
+            self.active=True;before=self.stats['samples'];self.stats['guards']+=1
+            try:
+                result=original(*args,**kwargs)
+                count=self.stats['samples']-before
+                assert count==1
+                self.stats['passed']+=1
+                self.stats['min_samples']=count if self.stats['min_samples'] is None else min(self.stats['min_samples'],count)
+                self.stats['max_samples']=max(self.stats['max_samples'],count)
+                return result
+            except BaseException as error:
+                code=getattr(error,'code',type(error).__name__)
+                self.stats['errors'][code]=self.stats['errors'].get(code,0)+1
+                raise
+            finally:self.active=False
+        return observed
+
+    def __exit__(self,*args):
+        self.lc.Leaf.samples,self.lc.directory,self.lc.read_at,os.open,os.read=self.original
+
+
+def install_04J_sample_probe():
+    from app.db_audit_coordinator import r4_snapshot
+    original=r4_snapshot.validate
+    def measured(fd,parent,receipt,folder_receipt,policy,guard,**kwargs):
+        with Guard04JProbe() as probe:
+            try:return original(fd,parent,receipt,folder_receipt,policy,probe.guard(guard),**kwargs)
+            finally:
+                print(json.dumps(dict(event='qio226_04j_kernel_samples',store=policy.store_id,
+                    uid=os.geteuid(),gid=os.getegid(),stats=probe.stats),sort_keys=True),file=sys.stderr,flush=True)
+    r4_snapshot.validate=measured
+
+
+def pipeline_04J_driver():
+    code=pipeline_04I_driver();old="large=sys.argv[1]=='04i_dense'"
+    assert code.count(old)==1
+    return code.replace(old,"large=sys.argv[1]=='04j_dense'",1)
+
+
+def run_04J_readable_pipeline(source_root,scenario):
+    # Reuse every 04I copy/interpreter/UID/FD/fixture/release instruction. Only
+    # select this test-only driver; original 04I function remains unchanged.
+    import inspect
+    source=inspect.getsource(run_04I_readable_pipeline)
+    assert source.count('pipeline_04I_driver()')==1
+    source=source.replace('def run_04I_readable_pipeline(', 'def qualified_04J_pipeline(',1)
+    source=source.replace('pipeline_04I_driver()', 'pipeline_04J_driver()',1)
+    namespace=dict(globals());exec(compile(source,__file__,'exec'),namespace)
+    return namespace['qualified_04J_pipeline'](source_root,scenario)
+
+
+@NATIVE
+def test_04J_actual_UID995_ABC_full_T3_one_kernel_hierarchy_per_guard(record_property):
+    process,blobs=run_04J_readable_pipeline(ROOT,'04j_small')
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout);records=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{')]
+    samples=[r for r in records if r.get('event')=='qio226_04j_kernel_samples']
+    finals=[r for r in records if r.get('event')=='qio226_04i_private_cost' and r['kind']=='final']
+    assert len(samples)==len(finals)==len(result['proofs'])==3
+    assert result['states']==['completed']*3 and result['source_hashes_unchanged']
+    for measured,timing,proof in zip(samples,finals,result['proofs']):
+        stats=measured['stats'];count=stats['guards']
+        assert measured['uid']==995 and measured['gid']==993 and timing['groups']==[]
+        assert count==stats['passed']==stats['samples']==timing['counts']['guard']==timing['trace']['guard_fast_count']>0
+        assert stats['min_samples']==stats['max_samples']==1 and stats['errors']=={}
+        assert set(stats['ancestors'])=={'0','1','2','3'}
+        for fields in stats['ancestors'].values():
+            assert set(fields)=={'memory.max','memory.current','memory.swap.max','memory.swap.current','memory.events',
+                'memory.pressure','cgroup.events','cgroup.procs','cgroup.controllers','cgroup.subtree_control'}
+            assert all(f['read_at']==count for f in fields.values())
+        assert stats['opens']>0 and stats['reads']>=stats['opens'] and stats['bytes']>0
+        assert timing['trace']['digest_full_count']==3 and timing['trace']['digest_bytes_verified']==3*timing['image_bytes']
+        assert timing['scans']['integrity_check']['count']==timing['scans']['foreign_key_check']['count']==1
+        assert timing['scans']['quick_check']['count']==0
+        assert all(proof[k] for k in ('helper_reaped','gatekeeper_reaped','cleanup_complete','shmem_zero'))
+        assert proof['empty_observations']==2 and proof['memory_observations']['swap_current']==0
+    assert finals[2]['canonical_deep']==[False] and blobs
+    record_property('04j_native_kernel_ABC',json.dumps(dict(result=result,samples=samples,finals=finals),sort_keys=True))
+
+
+GUARD_04J_DRIVER=r'''
+import json,os,select,shutil,signal,subprocess,tempfile,time,uuid
+from pathlib import Path
+from types import SimpleNamespace
+from app.db_audit_coordinator import child_bootstrap as worker,contracts as c
+from app.db_audit_coordinator.live_cgroup import Leaf
+from app.db_audit_coordinator.live_policy import Deadlines,require
+from app.db_audit_coordinator.live_receipts import guest_sample,membership
+from tests.db_audit_coordinator.test_qio226_r4_crash import compile_04J_guard
+from tests.db_audit_coordinator.test_qio226_r4_native import Guard04JProbe
+assert os.geteuid()==0 and os.getpid()==1
+fault=__import__('sys').argv[1];top=Path('/sys/fs/cgroup')/('qio226-04j-guard-'+uuid.uuid4().hex)
+root=Path(tempfile.mkdtemp(prefix='qio226-04j-guard-'));root.chmod(0o755)
+pid=None;mounts=[];fds=[]
+def write(folder,key,value):(folder/key).write_text(str(value))
+def bound_file(target,value):
+ path=root/('counter-'+str(len(mounts)));path.write_text(value);path.chmod(0o444)
+ subprocess.run(['mount','--bind',str(path),str(target)],check=True,capture_output=True);mounts.append(target)
+try:
+ top.mkdir();write(top,'memory.max',256*1024**2);write(top,'memory.swap.max',0);write(top,'cgroup.subtree_control','+memory +pids')
+ parent=top/'delegated';parent.mkdir();write(parent,'memory.max',192*1024**2);write(parent,'memory.swap.max',0)
+ write(parent,'cgroup.subtree_control','+memory +pids')
+ leaf=parent/'worker';other=parent/'other'
+ for location in (leaf,other):
+  location.mkdir(mode=0o750);os.chown(location,0,993)
+  write(location,'memory.max',128*1024**2);write(location,'memory.swap.max',0);write(location,'pids.max',8)
+ lock=root/'heavy.lock';lock.touch(mode=0o640);os.chown(lock,0,993)
+ expected=(lock.stat().st_dev,lock.stat().st_ino);leaf_id=(leaf.stat().st_dev,leaf.stat().st_ino)
+ commands_r,commands_w=os.pipe();results_r,results_w=os.pipe();cancel_r,cancel_w=os.pipe()
+ fds=[commands_r,commands_w,results_r,results_w,cancel_r,cancel_w]
+ pid=os.fork()
+ if pid==0:
+  try:
+   os.close(commands_w);os.close(results_r);os.close(cancel_w)
+   assert os.read(commands_r,1)==b'G'
+   # Compile exact source while root can traverse the checkout; execute only
+   # after the real UID/GID drop. Never chmod HOME/source to aid the fixture.
+   namespace={};guard=compile_04J_guard(namespace)
+   os.setgroups([]);os.setgid(993);os.setuid(995)
+   actual=Leaf('/sys/fs/cgroup',str(leaf).removeprefix('/sys/fs/cgroup'),leaf_id)
+   gate=worker.Gate(str(lock),*expected).acquire()
+   namespace.update(deadline=Deadlines(time.monotonic_ns(),10),gate=gate,leaf=actual,
+    data={'cancel_fd':cancel_r},policy=SimpleNamespace(memory_max_bytes=128*1024**2),
+    os=os,select=select,c=c,require=require,membership=membership,guest_sample=guest_sample)
+   with Guard04JProbe() as probe:
+    observed=probe.guard(guard)
+    def report():
+     try:observed();outcome='passed'
+     except c.CoordinatorError as error:outcome=error.code
+     raw=json.dumps(dict(outcome=outcome,uid=os.geteuid(),gid=os.getegid(),groups=os.getgroups(),stats=probe.stats))+'\n'
+     assert os.write(results_w,raw.encode())==len(raw.encode())
+    report();assert os.read(commands_r,1)==b'G'
+    if fault=='deadline':namespace['deadline']=Deadlines(0,1)
+    if fault=='real_oom':payload=bytearray(128*1024**2);raise AssertionError('kernel did not enforce own leaf memory.max')
+    report()
+   actual.close();os.close(gate.fd);os._exit(0)
+  except BaseException:
+   __import__('traceback').print_exc();os._exit(3)
+ os.close(commands_r);fds.remove(commands_r);os.close(results_w);fds.remove(results_w)
+ stream=os.fdopen(results_r,'r');fds.remove(results_r)
+ write(leaf,'cgroup.procs',pid);os.write(commands_w,b'G')
+ first=json.loads(stream.readline());assert first['outcome']=='passed' and first['stats']['samples']==1
+ if fault=='cancel':os.write(cancel_w,b'x')
+ elif fault=='gate':
+  changed=root/'replacement';changed.touch(mode=0o640);os.chown(changed,0,993);os.replace(changed,lock)
+ elif fault=='membership':write(other,'cgroup.procs',pid)
+ elif fault=='mount':
+  subprocess.run(['mount','--bind',str(other),str(leaf)],check=True,capture_output=True);mounts.append(leaf)
+ elif fault=='memory_max':write(leaf,'memory.max',129*1024**2)
+ elif fault=='swap_max':write(leaf,'memory.swap.max',4096)
+ elif fault=='swap_current':bound_file(leaf/'memory.swap.current','1\n')
+ elif fault=='ancestor_memory':bound_file(parent/'memory.current',str(256*1024**2)+'\n')
+ elif fault=='ancestor_swap':bound_file(parent/'memory.swap.current','1\n')
+ elif fault=='ancestor_subtree':bound_file(parent/'cgroup.subtree_control','pids\n')
+ elif fault=='ancestor_pressure':bound_file(parent/'memory.pressure','some avg10=0.01 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n')
+ elif fault=='leaf_oom_counter':bound_file(leaf/'memory.events',(leaf/'memory.events').read_text().replace('oom 0','oom 1'))
+ elif fault=='real_oom':write(leaf,'memory.max',32*1024**2)
+ os.write(commands_w,b'G');line=stream.readline()
+ _,status=os.waitpid(pid,0);pid=None
+ if fault=='real_oom':
+  assert not line and os.waitstatus_to_exitcode(status)==-signal.SIGKILL
+  events=dict(row.split() for row in (leaf/'memory.events').read_text().splitlines())
+  assert int(events['oom_kill'])>=1
+  final=dict(outcome='kernel_resource_killed',oom_kill=int(events['oom_kill']),positive_R4_release=False)
+ else:
+  assert os.waitstatus_to_exitcode(status)==0
+  final=json.loads(line)
+  expected='coordinator_unavailable' if fault=='cancel' else 'unsafe_path' if fault in {'gate','mount'} else 'unauthorized' if fault=='membership' else 'passed' if fault=='none' else 'not_admitted'
+  assert final['outcome']==expected and final['outcome']!='audit_failed'
+  stats=final['stats'];assert stats['guards']==2
+  assert stats['samples']==(1 if fault in {'deadline','cancel','gate','membership','mount'} else 2)
+ stream.close()
+ print(json.dumps(dict(fault=fault,first=first,final=final,kernel=os.uname().release,
+  bound_counter_fault=(fault in {'swap_current','ancestor_memory','ancestor_swap','ancestor_subtree','ancestor_pressure','leaf_oom_counter'}),
+  scope='NATIVE_EXACT_GUARD_BODY_NOT_R4_RELEASE_OR_ORIGINALS')))
+finally:
+ if pid is not None:
+  try:os.kill(pid,signal.SIGKILL)
+  except ProcessLookupError:pass
+  os.waitpid(pid,0)
+ for target in reversed(mounts):subprocess.run(['umount',str(target)],check=True,capture_output=True)
+ for fd in fds:os.close(fd)
+ if top.exists():
+  assert top.parent==Path('/sys/fs/cgroup') and top.name.startswith('qio226-04j-guard-')
+  for folder in sorted(top.rglob('*'),key=lambda p:len(p.parts),reverse=True):
+   if folder.is_dir():folder.rmdir()
+  top.rmdir()
+ assert root.parent==Path('/tmp') and root.name.startswith('qio226-04j-guard-')
+ shutil.rmtree(root)
+'''
+
+
+@NATIVE
+@pytest.mark.parametrize('fault',['none','cancel','deadline','gate','membership','mount','memory_max','swap_max',
+    'swap_current','ancestor_memory','ancestor_swap','ancestor_subtree','ancestor_pressure','leaf_oom_counter','real_oom'])
+def test_04J_native_fresh_guard_kernel_controls_and_exact_resource_failure(fault,record_property):
+    process=subprocess.run(['unshare','--mount','--pid','--fork','--propagation','private','--mount-proc',
+        sys.executable,'-B','-E','-s','-c',GUARD_04J_DRIVER,fault],cwd=ROOT,capture_output=True,text=True,timeout=20)
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout);first=result['first']
+    assert first['uid']==995 and first['gid']==993 and first['groups']==[]
+    assert first['stats']['samples']==first['stats']['guards']==first['stats']['passed']==1
+    assert set(first['stats']['ancestors'])=={'0','1','2','3'}
+    assert first['stats']['opens']>0 and first['stats']['reads']>=first['stats']['opens']
+    if fault=='none':
+        assert result['final']['stats']['samples']==result['final']['stats']['passed']==2
+        assert result['final']['stats']['min_samples']==result['final']['stats']['max_samples']==1
+    record_property('04j_native_guard',json.dumps(result,sort_keys=True))

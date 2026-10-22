@@ -596,3 +596,65 @@ independent acceptance belongs to TechLead. Existing OLD LAB results and scoped
 SysAdmin retirement are not rewritten by LOCAL fixture success or cleanup.
 
 LOCAL_COMMIT=REQUIRED_FOR_HANDOFF; PUSH=NO; PR=NO; INSTALL=NO; PRODUCTION=NO.
+
+## 04J — one fresh full hierarchy observation per mandatory R4 guard
+
+Authority: [TechLead7 TASK 04J](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6352952961).
+Exact parent: accepted04I `87306d076a07b458e021ca51eefffffb98098f46`,
+tree `85c6f82fb67a7a218f85880a7b80bed7108753ca`.
+Only `execute_r4.guard` changes: bind the result of `leaf.samples()` to a local
+variable, use its last node for the existing policy checks, and pass that SAME
+complete tuple to `guest_sample(...).check()`. Every next invocation obtains a
+new kernel observation. There is no cross-call cache, interval sampling,
+shortened ancestry, reduced VM/row callbacks, new resource limit or timeout.
+The original leading deadline/gate/leaf checks, cancel pipe and exact process
+membership precede that observation. All existing exception classes and result
+mapping remain unchanged. In particular the closed `CoordinatorError` already
+normalizes the internal `canceled` token to `coordinator_unavailable`; the
+coordinator's separate canceled-result mapping must still be tested, not fixed
+by broadening the public error vocabulary in this task.
+
+QA wraps the original `Leaf.samples`, secure directory/read_at operations and
+actual `os.open`/`os.read` calls, without substituting values or skipping any
+check. Aggregate per-ancestor/per-field attempts, successful opens, kernel read
+calls and bytes distinguish absent optional root controls from real reads.
+One bounded final aggregate per T3 records exactly one complete traversal per
+successful VM/row guard. Existing04I CPU/stage/hash observer remains the same;
+these observers add measurement overhead and do not establish physical HDD I/O.
+No per-row/cgroup disk log is emitted during the large measurement.
+
+Native UID995/GID993 tests execute the exact guard body compiled before the UID
+drop, with genuine cgroup2, `/proc`, real gate and pipe FDs. Two independent
+calls prove fresh observations and live membership/deadline/cancel/gate and
+directory-mount rejection. Explicit private bind-mounted counter fixtures
+exercise otherwise unsafe or infeasible states (nonzero swap.current, invalid
+ancestor current/subtree/pressure, OOM counter) via real native file reads.
+They are adversarial filesystem views, NOT a claim of actual swapped memory.
+A separate real, test-owned leaf OOM kills only the disposable validator and
+must not be described as positive R4 release. Full authenticated A/B/C pipeline
+tests independently prove the genuine owner/worker/root handoff, immutable
+two-FD image, three worker digests plus independent root hash, original online
+backup read-view/BUSY controls, actual reaps, zero shmem/swap and double empty.
+Test-finally disposal of a negative is never counted as successful R4 release.
+
+Keep the exact04I dense C fixture and old baseline receipts unchanged. Before
+the single candidate measurement, prove interpreter/kernel/SQLite/compile
+options, source and deterministic image hashes, UID/GID, memory/deadline and
+I/O profile comparability. Measure all196610 rows in an image at least147800064
+bytes at the existing1200s cap. Record elapsed/CPU, each stage, guard/traversal
+counts, actual cgroup reads, proc I/O, OOM/swap and real release. The engineering
+admission target is T3<=900s (25% Lab margin), NOT a runtime timeout change.
+If it is missed, HOLD and report; no extra optimization, original trial or
+deadline change follows automatically. Existing04I1041s baseline need not be
+rerun when comparability is proven. Actual results belong in the immutable
+external handoff, not an invented runbook PASS.
+
+04I's CHECK-negative disposition is end-to-end unchanged-domain rejection,
+not a claim that that fixture must fail at the earlier integrity stage. The
+real A schema remains independently `failed/audit_failed,pt_schema_signature`;
+this guard change does not accept whitespace-collapsed signatures or authorize
+original data access. Original A/B/C remain HOLD pending TechLead decision
+after independent review. Preserve all04H queue/inode/retirement history.
+
+LOCAL_LAB_COMMIT=REQUIRED; PUSH=NO; PR=NO; INSTALL=NO; ORIGINALS=NO;
+MERGE=NO; PRODUCTION=NO. Full independent acceptance belongs to TechLead.
