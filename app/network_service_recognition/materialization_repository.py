@@ -128,7 +128,7 @@ def bundle_identity(bundle):
 class ServiceMaterializationRepository:
     def __init__(self, db_path, *, max_db_bytes=512*1024*1024,
                  clock=lambda: datetime.now(timezone.utc),crash_point=lambda _:None,
-                 visit_delivery_db_path=None,visit_delivery_ttl_days=None):
+                 visit_delivery_db_path=None):
         if type(db_path) is not str or not Path(db_path).is_absolute() or type(max_db_bytes) is not int or not 128*1024*1024 <= max_db_bytes <= 2*1024**3:
             raise MaterializationUnavailable()
         self.db_path,self.max_db_bytes,self.clock,self.crash_point=db_path,max_db_bytes,clock,crash_point
@@ -137,12 +137,9 @@ class ServiceMaterializationRepository:
         self.live_state="initializing"
         if visit_delivery_db_path is not None and (type(visit_delivery_db_path) is not str or not Path(visit_delivery_db_path).is_absolute()):
             raise MaterializationUnavailable()
-        if (visit_delivery_db_path is None)!=(visit_delivery_ttl_days is None) or visit_delivery_ttl_days is not None and (type(visit_delivery_ttl_days) is not int or not 1<=visit_delivery_ttl_days<=365):
-            raise MaterializationUnavailable()
         # No history publication/pruning until both applications are explicitly
-        # configured with an Owner-approved retention policy. Default is inert.
+        # configured for Visit history. Parent Visit owns lifetime; no age TTL.
         self.visit_delivery_db_path=visit_delivery_db_path
-        self.visit_delivery_ttl_days=visit_delivery_ttl_days
 
     def footprint(self):
         try:
@@ -270,12 +267,12 @@ class ServiceMaterializationRepository:
         try:
             with _visit_readonly(self.visit_delivery_db_path) as c:
                 from app.visit_lifecycle.repository import expected_visit_signature,_schema_signature
-                if c.execute('PRAGMA user_version').fetchone()[0]!=4 or _schema_signature(c)!=expected_visit_signature(4):return None
+                if c.execute('PRAGMA user_version').fetchone()[0]!=6 or _schema_signature(c)!=expected_visit_signature(6):return None
                 # Partial integrity check of this one-row checkpoint B-tree,
                 # not a full Visit history scan on every retention tick.
                 if c.execute("PRAGMA quick_check('visit_service_consumer_state')").fetchone()[0]!='ok':return None
-                row=c.execute('SELECT consumer_id,source_stream_id,last_outbox_seq,last_outbox_hash,history_ttl_days FROM visit_service_consumer_state WHERE singleton_id=1').fetchone()
-                return None if row is None or row['history_ttl_days']!=self.visit_delivery_ttl_days else dict(row)
+                row=c.execute('SELECT consumer_id,source_stream_id,last_outbox_seq,last_outbox_hash FROM visit_service_consumer_state WHERE singleton_id=1').fetchone()
+                return None if row is None else dict(row)
         except Exception:
             return None  # Unknown/unavailable/rollback checkpoint never prunes.
 

@@ -8,7 +8,7 @@ from app.analytics.source_gateway import compatible_source_schema_version, SOURC
 from app.analytics.runtime import _check_source
 
 
-@pytest.mark.parametrize('version,accepted',[(1,False),(2,True),(3,True),(4,True),(5,False),(99,False)])
+@pytest.mark.parametrize('version,accepted',[(1,False),(2,True),(3,True),(4,True),(5,True),(6,True),(7,False),(99,False)])
 def test_visit_exact_version_admission_and_runtime_health_match(version,accepted):
     class Source:
         @contextmanager

@@ -11,8 +11,8 @@ from typing import Any
 from app.common.mac import format_mac_colon
 
 
-SCHEMA_VERSION = 4
-COMPATIBLE_VISIT_SCHEMA_VERSIONS = (2, 3, 4)
+SCHEMA_VERSION = 6
+COMPATIBLE_VISIT_SCHEMA_VERSIONS = (2, 3, 4, 5, 6)
 
 
 def compatible_visit_schema_version(value):

@@ -12,7 +12,7 @@ from app.common.mac import format_mac_colon
 
 from .models import VisitLifecycleConfig, VisitStorageError, utc_now, format_utc, protocol_visit_guard
 from .repository import VisitRepository
-from .telemetry import VisitTelemetry
+from .telemetry import VisitTelemetry, VisitServiceLinkageTelemetry
 
 
 MAX_RECONCILIATION_PASS_SECONDS = 20.0
@@ -30,7 +30,6 @@ class VisitLinkReconciler:
         pass_max_duration_seconds: float | None = None,
         protocol_reader=None,
         service_history_path=None,
-        service_history_ttl_days=None,
     ):
         self.config = config
         self.repository = repository
@@ -53,10 +52,8 @@ class VisitLinkReconciler:
         self._thread: threading.Thread | None = None
         self.protocol_reader = protocol_reader
         self._protocol_after = None
-        if (service_history_path is None)!=(service_history_ttl_days is None):raise ValueError('Incomplete Visit history activation policy')
-        if service_history_ttl_days is not None and (type(service_history_ttl_days) is not int or not 1<=service_history_ttl_days<=365):raise ValueError('Invalid Visit history retention')
         self.service_history_path=service_history_path
-        self.service_history_ttl_days=service_history_ttl_days
+        self._service_linkage=VisitServiceLinkageTelemetry(telemetry,monotonic=monotonic)
 
     @property
     def running(self) -> bool:
@@ -235,13 +232,22 @@ class VisitLinkReconciler:
                 page=read_visit_delivery_page(self.service_history_path,cursor,deadline=QueryDeadline(deadline,self._monotonic))
             except Exception as exc:
                 from app.network_service_recognition.materialization_repository import MaterializationConflict
+                self._service_linkage.failed()
                 self.repository.service_delivery_unavailable(now=now,deadline=deadline,conflict=isinstance(exc,MaterializationConflict))
+                self._service_linkage.sample(self.repository,deadline=deadline)
                 raise
-            changed=self.repository.consume_service_delivery(page,cursor,now=now,history_ttl_days=self.service_history_ttl_days,
-                deadline=deadline,cancel_event=self._stop_event,crash_point=crash_point)
+            try:
+                changed=self.repository.consume_service_delivery(page,cursor,now=now,
+                    deadline=deadline,cancel_event=self._stop_event,crash_point=crash_point,
+                    on_committed=self._service_linkage.committed)
+            except BaseException:
+                self._service_linkage.failed()
+                self._service_linkage.sample(self.repository,deadline=deadline)
+                raise
             total+=changed
             after=self.repository.service_consumer_cursor()
             if not changed and after['last_outbox_seq']==(cursor['last_outbox_seq'] if cursor else 0):break
+        self._service_linkage.sample(self.repository,deadline=deadline)
         return total
 
     def run_protocol_once(self, *, now=None, deadline=None):

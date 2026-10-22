@@ -149,7 +149,7 @@ class AdminSqlReadGateway:
             visit = _visit_row(row)
             version = c.execute('PRAGMA user_version').fetchone()[0]
             saved = c.execute('SELECT * FROM visit_network_protocol_summary WHERE visit_id=?',
-                (visit_id,)).fetchone() if version in (3,4) else None
+                (visit_id,)).fetchone() if version in (3,4,5,6) else None
             return project_visit_protocol_summary(visit, None if saved is None else dict(saved))
         return self._read(self._visit_path, 2, deadline, read)
 
@@ -161,7 +161,7 @@ class AdminSqlReadGateway:
             row=c.execute('SELECT * FROM visits WHERE site_id=? AND device_id=? AND visit_id=?',(site_id,device_id,visit_id)).fetchone()
             if row is None:return None
             rows=();consumer=None
-            if c.execute('PRAGMA user_version').fetchone()[0]==4:
+            if c.execute('PRAGMA user_version').fetchone()[0] in (4,5,6):
                 rows=tuple(dict(r) for r in c.execute('SELECT * FROM visit_service_summary WHERE site_id=? AND visit_id=? ORDER BY service_id LIMIT 51',(site_id,visit_id)))
                 saved=c.execute('SELECT * FROM visit_service_consumer_state WHERE singleton_id=1').fetchone()
                 consumer=None if saved is None else dict(saved)

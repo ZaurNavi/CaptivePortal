@@ -28,7 +28,7 @@ START=datetime(2026,10,12,14,tzinfo=timezone.utc)
 SNAPSHOT='40000000-0000-4000-8000-000000000001'
 
 
-def evaluated(host='www.youtube.com',event='2026-10-12T14:10:00.000001Z',seed='one',b=None,at=NOW):
+def evaluated(host='www.youtube.com',event='2026-10-12T14:30:00.000001Z',seed='one',b=None,at=NOW):
     projection,source=synthetic(host,event=event)
     ref=str(uuid.uuid5(uuid.NAMESPACE_URL,'296-lab-'+seed))
     fact=replace(projection.facts[0],edge_id=sha256(seed.encode()).hexdigest(),source_observation_ref=ref)
@@ -41,13 +41,13 @@ def evaluated(host='www.youtube.com',event='2026-10-12T14:10:00.000001Z',seed='o
 
 @pytest.fixture
 def delivery(tmp_path,visit_config,visit_repository,visit_service):
-    repo=ServiceMaterializationRepository(str(tmp_path/'ni04.sqlite3'),visit_delivery_db_path=str(visit_repository.db_path),visit_delivery_ttl_days=20,
+    repo=ServiceMaterializationRepository(str(tmp_path/'ni04.sqlite3'),visit_delivery_db_path=str(visit_repository.db_path),
         clock=lambda:ni_timestamp(NOW,canonical=True)).initialize()
     gen=repo.ensure_generation(bundle(),0,NOW)
     with repo.transaction():repo.connection.execute("UPDATE service_materialization_checkpoints SET backfill_state='complete' WHERE generation_id=?",(gen,))
     repo.promote(gen,NOW,0)
     worker=VisitLinkReconciler(config=visit_config,repository=visit_repository,registry_read_service=None,
-        telemetry=VisitTelemetry(logging.getLogger('test296.delivery')),service_history_path=repo.db_path,service_history_ttl_days=20)
+        telemetry=VisitTelemetry(logging.getLogger('test296.delivery')),service_history_path=repo.db_path)
     yield repo,gen,worker
     repo.close()
 
@@ -216,10 +216,11 @@ def test_closed_A_next_B_exact_boundary_and_late_closure_correction(delivery,vis
     assert summaries(visit_repository,b)[0]['distinct_observation_count']==1
 
 
-def test_future_and_wrong_device_remain_pending_not_another_visit(delivery,visit_repository,visit_service):
+def test_future_fails_closed_and_wrong_device_never_credits_another_visit(delivery,visit_repository,visit_service):
     source,gen,w=delivery;visit=open_visit(visit_service,visit_repository)
     put(source,gen,evaluated(event='2026-10-12T15:19:00.000000Z'))
-    w.run_services_once(now='2026-10-12T15:00:00.000000Z')
+    with pytest.raises(MaterializationConflict):w.run_services_once(now='2026-10-12T15:00:00.000000Z')
+    assert visit_repository.service_consumer_cursor() is None
     assert summaries(visit_repository,visit)==[]
     with visit_repository._connect() as c:
         c.execute('UPDATE visits SET device_id=? WHERE visit_id=?',(str(uuid.uuid4()),visit.visit_id))
@@ -284,13 +285,13 @@ def test_missing_source_records_one_unavailable_transition_not_repeated_writes(d
     assert not any(s.startswith(('UPDATE','INSERT','DELETE','COMMIT')) for s in trace)
 
 
-def test_pending_and_attached_history_expire_only_by_explicit_bounded_policy(delivery,visit_repository,visit_service):
+def test_detached_expires_at_one_hour_and_physically_reclaims_capacity(delivery,visit_repository,visit_service):
     source,gen,w=delivery;put(source,gen,evaluated());w.run_services_once(now=NOW)
     w.run_services_once(now='2026-10-27T00:00:00.000000Z')
-    with visit_repository.read_connection() as c:assert c.execute('SELECT count(*) FROM visit_service_membership').fetchone()[0]==0
-    assert w.service_history_ttl_days==20  # Disposable policy, not a production default.
-    with pytest.raises(ValueError):VisitLinkReconciler(config=w.config,repository=visit_repository,
-        registry_read_service=None,telemetry=w.telemetry,service_history_path=source.db_path)
+    with visit_repository.read_connection() as c:
+        assert c.execute('SELECT count(*) FROM visit_service_membership').fetchone()[0]==0
+    assert visit_repository.service_consumer_cursor()['detached_count']==0
+    assert not hasattr(w,'service_history_ttl_days')
 
 
 @pytest.mark.parametrize('mutation',['hash','stream','sequence-gap','unknown-schema'])
@@ -354,24 +355,25 @@ def test_concurrent_append_and_close_between_source_snapshot_and_visit_write(del
     # The bounded drain may already fetch the second committed source page;
     # it must credit ONLY the in-A fact, never the exact-close boundary fact.
     assert summaries(visit_repository,visit)[0]['distinct_observation_count']==1
-    assert summaries(visit_repository,visit)[0]['last_observed_at']=='2026-10-12T14:10:00.000001Z'
+    assert summaries(visit_repository,visit)[0]['last_observed_at']=='2026-10-12T14:30:00.000001Z'
     w.run_services_once(now=NOW)
     assert summaries(visit_repository,visit)[0]['distinct_observation_count']==1
-    assert summaries(visit_repository,visit)[0]['last_observed_at']=='2026-10-12T14:10:00.000001Z'
+    assert summaries(visit_repository,visit)[0]['last_observed_at']=='2026-10-12T14:30:00.000001Z'
 
 
-def test_explicit_policy_mismatch_and_corrupt_visit_ack_never_prune(delivery,visit_repository,visit_service):
+def test_incompatible_schema_and_corrupt_visit_ack_never_prune(delivery,visit_repository,visit_service):
     source,gen,w=delivery;open_visit(visit_service,visit_repository);put(source,gen,evaluated());w.run_services_once(now=NOW)
-    with visit_repository._connect() as c:c.execute('UPDATE visit_service_consumer_state SET history_ttl_days=21')
+    with visit_repository._connect() as c:c.execute('PRAGMA user_version=99')
     source.retain();assert source.connection.execute('SELECT count(*) FROM ni04_visit_delivery_outbox').fetchone()[0]==3
-    with visit_repository._connect() as c:c.execute("UPDATE visit_service_consumer_state SET history_ttl_days=20,last_outbox_hash='invalid'")
+    with visit_repository._connect() as c:
+        c.execute('PRAGMA user_version=6');c.execute("UPDATE visit_service_consumer_state SET last_outbox_hash='invalid'")
     source.retain();assert source.connection.execute('SELECT count(*) FROM ni04_visit_delivery_outbox').fetchone()[0]==3
 
 
-def test_owner_policy_required_and_default_off_never_enqueues(tmp_path):
+def test_explicit_consumer_path_required_and_default_off_never_enqueues(tmp_path):
     from app.network_service_recognition.materialization_schema import MaterializationUnavailable
-    for value in (None,0,366,True,1.5):
-        with pytest.raises(MaterializationUnavailable):ServiceMaterializationRepository(str(tmp_path/'ni04'),visit_delivery_db_path=str(tmp_path/'visits'),visit_delivery_ttl_days=value)
+    for value in ('relative.sqlite3',0,True,1.5):
+        with pytest.raises(MaterializationUnavailable):ServiceMaterializationRepository(str(tmp_path/'ni04'),visit_delivery_db_path=value)
     repo=ServiceMaterializationRepository(str(tmp_path/'inert.sqlite3'),clock=lambda:ni_timestamp(NOW,canonical=True)).initialize()
     try:
         gen=repo.ensure_generation(bundle(),0,NOW);put(repo,gen,evaluated())
@@ -438,7 +440,7 @@ def test_tomorrow_visit_same_device_has_only_its_own_new_fact(delivery,visit_rep
     at='2026-10-13T15:25:00.000000Z'
     w.run_services_once(now=at)
     assert summaries(visit_repository,b)==[]
-    put(source,gen,evaluated('web.whatsapp.com',event='2026-10-13T14:10:00.000001Z',seed='only-B',at=at),at=at)
+    put(source,gen,evaluated('web.whatsapp.com',event='2026-10-13T14:30:00.000001Z',seed='only-B',at=at),at=at)
     with source.transaction():source.runtime('usable',at,poll=at,commit=at)
     w.run_services_once(now=at)
     assert [(r['service_id'],r['distinct_observation_count']) for r in summaries(visit_repository,b)]==[('service.whatsapp',1)]
@@ -446,10 +448,10 @@ def test_tomorrow_visit_same_device_has_only_its_own_new_fact(delivery,visit_rep
 
 
 @pytest.mark.parametrize('flag,policy,enabled',[
-    (False,None,False),(False,'20',False),('false','20',False),
+    (False,None,False),(False,'true',False),('false','true',False),
     (True,None,False),(True,'',False),(True,'0',False),(True,'366',False),
-    (True,'True',False),(True,'２０',False),(True,'20.0',False),
-    (True,'1',True),('true','20',True),(True,'365',True),
+    (True,'True',True),(True,'２０',False),(True,'20.0',False),
+    (True,'true',True),('true','true',True),(True,'false',False),
 ])
 def test_composition_requires_explicit_bounded_policy_without_starting_workers(
     visit_config,monkeypatch,tmp_path,flag,policy,enabled,
@@ -457,8 +459,9 @@ def test_composition_requires_explicit_bounded_policy_without_starting_workers(
     from app.visit_lifecycle.runtime import create_visit_lifecycle
     import app.network_metadata_projection.config as config_module
     source=tmp_path/'ni04.sqlite3'
-    if policy is None:monkeypatch.delenv('VISIT_SERVICE_HISTORY_RETENTION_DAYS',raising=False)
-    else:monkeypatch.setenv('VISIT_SERVICE_HISTORY_RETENTION_DAYS',policy)
+    if policy is None:monkeypatch.delenv('VISIT_SERVICE_HISTORY_ENABLED',raising=False)
+    else:monkeypatch.setenv('VISIT_SERVICE_HISTORY_ENABLED',policy)
+    monkeypatch.setenv('VISIT_SERVICE_HISTORY_RETENTION_DAYS','1')  # Obsolete: not an activation input.
     # Protocol source failure is independent; it cannot create a second source
     # or prevent the explicit NI04 configuration from being validated.
     def unavailable():raise ValueError('synthetic unavailable protocol source')
@@ -471,6 +474,6 @@ def test_composition_requires_explicit_bounded_policy_without_starting_workers(
         assert runtime.enabled and runtime.available and runtime.webhook_reader.running is False
         assert runtime._reconciler is None and runtime.protocol_reader is None
         assert runtime.service_history_path==(str(source) if enabled else None)
-        assert runtime.service_history_ttl_days==(int(policy) if enabled else None)
+        assert not hasattr(runtime,'service_history_ttl_days')
         assert not source.exists()  # Startup does not create/write the source DB.
     finally:assert runtime.close()
