@@ -1,0 +1,232 @@
+--- a/firewall/net01-clear-hold-review-only.sh
++++ b/firewall/net01-clear-hold-review-only.sh
+@@ -7,8 +7,33 @@
+ GUARD=/usr/local/libexec/captiv-net01/net01-verify.py
+ PROBE=/usr/local/libexec/captiv-net01/net01-quiescent.py
+ MAINT=/usr/local/libexec/captiv-net01/net01-maintenance-state.py
+-exec 9>/run/lock/captiv-net01-firewall.lock
++# Single persistent, root-owned inode. Do not unlink on unlock/rollback.
++NET01_LOCK_DIR=/var/lib/captiv-net01
++NET01_LOCK_FILE="$NET01_LOCK_DIR/net01-firewall.lock"
++if [[ -L "$NET01_LOCK_DIR" || ! -d "$NET01_LOCK_DIR" || \
++      "$(stat -c '%u:%g:%a' -- "$NET01_LOCK_DIR")" != '0:0:700' ]]; then
++  echo 'HOLD: insecure NET01 lock directory' >&2; exit 75
++fi
++# Reject any pre-existing symlink, nonregular file, incorrect owner/mode or hardlink.
++if [[ -L "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock symlink' >&2; exit 75
++fi
++if [[ -e "$NET01_LOCK_FILE" ]]; then
++  if [[ ! -f "$NET01_LOCK_FILE" || \
++        "$(stat -c '%u:%g:%a:%h' -- "$NET01_LOCK_FILE")" != '0:0:600:1' ]]; then
++    echo 'HOLD: insecure NET01 lock file' >&2; exit 75
++  fi
++fi
++# umask 077 above creates mode 0600 on cold start; never remove this file.
++exec 9>"$NET01_LOCK_FILE"
+ flock -n 9 || { echo 'HOLD: NET01 operation busy' >&2; exit 75; }
++# Verify the descriptor still references the canonical root-owned 0600 inode.
++if [[ -L "$NET01_LOCK_FILE" || \
++      "$(stat -Lc '%u:%g:%a:%h:%d:%i' -- /proc/self/fd/9)" != \
++      "$(stat -c '%u:%g:%a:%h:%d:%i' -- "$NET01_LOCK_FILE")" || \
++      ! -f "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock inode/permissions mismatch' >&2; exit 75
++fi
+ # During maintenance, marker keeps startup inhibited while clearing HOLD.
+ /usr/bin/python3 "$MAINT" require || exit 75
+ /usr/bin/python3 "$PROBE" --mode quiescent || exit 75
+--- a/firewall/net01-clear-maintenance-review-only.sh
++++ b/firewall/net01-clear-maintenance-review-only.sh
+@@ -3,8 +3,33 @@
+ set -euo pipefail
+ umask 077
+ (( EUID == 0 )) || exit 75
+-exec 9>/run/lock/captiv-net01-firewall.lock
++# Single persistent, root-owned inode. Do not unlink on unlock/rollback.
++NET01_LOCK_DIR=/var/lib/captiv-net01
++NET01_LOCK_FILE="$NET01_LOCK_DIR/net01-firewall.lock"
++if [[ -L "$NET01_LOCK_DIR" || ! -d "$NET01_LOCK_DIR" || \
++      "$(stat -c '%u:%g:%a' -- "$NET01_LOCK_DIR")" != '0:0:700' ]]; then
++  echo 'HOLD: insecure NET01 lock directory' >&2; exit 75
++fi
++# Reject any pre-existing symlink, nonregular file, incorrect owner/mode or hardlink.
++if [[ -L "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock symlink' >&2; exit 75
++fi
++if [[ -e "$NET01_LOCK_FILE" ]]; then
++  if [[ ! -f "$NET01_LOCK_FILE" || \
++        "$(stat -c '%u:%g:%a:%h' -- "$NET01_LOCK_FILE")" != '0:0:600:1' ]]; then
++    echo 'HOLD: insecure NET01 lock file' >&2; exit 75
++  fi
++fi
++# umask 077 above creates mode 0600 on cold start; never remove this file.
++exec 9>"$NET01_LOCK_FILE"
+ flock -n 9 || exit 75
++# Verify the descriptor still references the canonical root-owned 0600 inode.
++if [[ -L "$NET01_LOCK_FILE" || \
++      "$(stat -Lc '%u:%g:%a:%h:%d:%i' -- /proc/self/fd/9)" != \
++      "$(stat -c '%u:%g:%a:%h:%d:%i' -- "$NET01_LOCK_FILE")" || \
++      ! -f "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock inode/permissions mismatch' >&2; exit 75
++fi
+ ROOT=/usr/local/libexec/captiv-net01
+ /usr/bin/python3 "$ROOT/net01-maintenance-state.py" require
+ /usr/bin/python3 "$ROOT/net01-quiescent.py" --mode quiescent
+--- a/firewall/net01-fw-install.sh
++++ b/firewall/net01-fw-install.sh
+@@ -8,8 +8,33 @@
+ MAINT=/usr/local/libexec/captiv-net01/net01-maintenance-state.py
+ CHAIN=CAPTIV_FLASK_18089
+ OUTCHAIN=CAPTIV_SENSOR_OUT_18089
+-exec 9>/run/lock/captiv-net01-firewall.lock
++# Single persistent, root-owned inode. Do not unlink on unlock/rollback.
++NET01_LOCK_DIR=/var/lib/captiv-net01
++NET01_LOCK_FILE="$NET01_LOCK_DIR/net01-firewall.lock"
++if [[ -L "$NET01_LOCK_DIR" || ! -d "$NET01_LOCK_DIR" || \
++      "$(stat -c '%u:%g:%a' -- "$NET01_LOCK_DIR")" != '0:0:700' ]]; then
++  echo 'HOLD: insecure NET01 lock directory' >&2; exit 75
++fi
++# Reject any pre-existing symlink, nonregular file, incorrect owner/mode or hardlink.
++if [[ -L "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock symlink' >&2; exit 75
++fi
++if [[ -e "$NET01_LOCK_FILE" ]]; then
++  if [[ ! -f "$NET01_LOCK_FILE" || \
++        "$(stat -c '%u:%g:%a:%h' -- "$NET01_LOCK_FILE")" != '0:0:600:1' ]]; then
++    echo 'HOLD: insecure NET01 lock file' >&2; exit 75
++  fi
++fi
++# umask 077 above creates mode 0600 on cold start; never remove this file.
++exec 9>"$NET01_LOCK_FILE"
+ flock -n 9 || { echo 'HOLD: NET01 operation busy' >&2; exit 75; }
++# Verify the descriptor still references the canonical root-owned 0600 inode.
++if [[ -L "$NET01_LOCK_FILE" || \
++      "$(stat -Lc '%u:%g:%a:%h:%d:%i' -- /proc/self/fd/9)" != \
++      "$(stat -c '%u:%g:%a:%h:%d:%i' -- "$NET01_LOCK_FILE")" || \
++      ! -f "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock inode/permissions mismatch' >&2; exit 75
++fi
+ # --maintenance-reinstall is MANUAL ONLY. Never set on systemd ExecStart.
+ if [[ "${1:-}" == '--maintenance-reinstall' && "$#" == 1 ]]; then
+   /usr/bin/python3 "$MAINT" require || exit 75
+--- a/firewall/net01-fw-rollback.sh
++++ b/firewall/net01-fw-rollback.sh
+@@ -8,8 +8,33 @@
+ GUARD=/usr/local/libexec/captiv-net01/net01-verify.py
+ PROBE=/usr/local/libexec/captiv-net01/net01-quiescent.py
+ MAINT=/usr/local/libexec/captiv-net01/net01-maintenance-state.py
+-exec 9>/run/lock/captiv-net01-firewall.lock
++# Single persistent, root-owned inode. Do not unlink on unlock/rollback.
++NET01_LOCK_DIR=/var/lib/captiv-net01
++NET01_LOCK_FILE="$NET01_LOCK_DIR/net01-firewall.lock"
++if [[ -L "$NET01_LOCK_DIR" || ! -d "$NET01_LOCK_DIR" || \
++      "$(stat -c '%u:%g:%a' -- "$NET01_LOCK_DIR")" != '0:0:700' ]]; then
++  echo 'HOLD: insecure NET01 lock directory' >&2; exit 75
++fi
++# Reject any pre-existing symlink, nonregular file, incorrect owner/mode or hardlink.
++if [[ -L "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock symlink' >&2; exit 75
++fi
++if [[ -e "$NET01_LOCK_FILE" ]]; then
++  if [[ ! -f "$NET01_LOCK_FILE" || \
++        "$(stat -c '%u:%g:%a:%h' -- "$NET01_LOCK_FILE")" != '0:0:600:1' ]]; then
++    echo 'HOLD: insecure NET01 lock file' >&2; exit 75
++  fi
++fi
++# umask 077 above creates mode 0600 on cold start; never remove this file.
++exec 9>"$NET01_LOCK_FILE"
+ flock -n 9 || { echo 'HOLD: operation in progress' >&2; exit 75; }
++# Verify the descriptor still references the canonical root-owned 0600 inode.
++if [[ -L "$NET01_LOCK_FILE" || \
++      "$(stat -Lc '%u:%g:%a:%h:%d:%i' -- /proc/self/fd/9)" != \
++      "$(stat -c '%u:%g:%a:%h:%d:%i' -- "$NET01_LOCK_FILE")" || \
++      ! -f "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock inode/permissions mismatch' >&2; exit 75
++fi
+ # MAINTENANCE must have been set BEFORE stop/quiescence by manual admission.
+ /usr/bin/python3 "$MAINT" require || exit 75
+ /usr/bin/python3 "$PROBE" --mode quiescent || exit 75
+--- a/firewall/net01-maintenance-enter.sh
++++ b/firewall/net01-maintenance-enter.sh
+@@ -3,8 +3,33 @@
+ set -euo pipefail
+ umask 077
+ (( EUID == 0 )) || { echo 'HOLD: root required' >&2; exit 75; }
+-exec 9>/run/lock/captiv-net01-firewall.lock
++# Single persistent, root-owned inode. Do not unlink on unlock/rollback.
++NET01_LOCK_DIR=/var/lib/captiv-net01
++NET01_LOCK_FILE="$NET01_LOCK_DIR/net01-firewall.lock"
++if [[ -L "$NET01_LOCK_DIR" || ! -d "$NET01_LOCK_DIR" || \
++      "$(stat -c '%u:%g:%a' -- "$NET01_LOCK_DIR")" != '0:0:700' ]]; then
++  echo 'HOLD: insecure NET01 lock directory' >&2; exit 75
++fi
++# Reject any pre-existing symlink, nonregular file, incorrect owner/mode or hardlink.
++if [[ -L "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock symlink' >&2; exit 75
++fi
++if [[ -e "$NET01_LOCK_FILE" ]]; then
++  if [[ ! -f "$NET01_LOCK_FILE" || \
++        "$(stat -c '%u:%g:%a:%h' -- "$NET01_LOCK_FILE")" != '0:0:600:1' ]]; then
++    echo 'HOLD: insecure NET01 lock file' >&2; exit 75
++  fi
++fi
++# umask 077 above creates mode 0600 on cold start; never remove this file.
++exec 9>"$NET01_LOCK_FILE"
+ flock -n 9 || { echo 'HOLD: NET01 operation in progress' >&2; exit 75; }
++# Verify the descriptor still references the canonical root-owned 0600 inode.
++if [[ -L "$NET01_LOCK_FILE" || \
++      "$(stat -Lc '%u:%g:%a:%h:%d:%i' -- /proc/self/fd/9)" != \
++      "$(stat -c '%u:%g:%a:%h:%d:%i' -- "$NET01_LOCK_FILE")" || \
++      ! -f "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock inode/permissions mismatch' >&2; exit 75
++fi
+ # Barrier FIRST; all start guards and runtime monitor reject MAINTENANCE.
+ /usr/bin/python3 /usr/local/libexec/captiv-net01/net01-maintenance-state.py enter
+ # Service stop attempts are scoped to new NET01 services only. Never reset-failed.
+--- a/firewall/net01-start-admit.sh
++++ b/firewall/net01-start-admit.sh
+@@ -3,7 +3,32 @@
+ set -euo pipefail
+ umask 077
+ (( EUID == 0 )) || { echo 'HOLD: root-only prestart' >&2; exit 75; }
+-exec 9>/run/lock/captiv-net01-firewall.lock
++# Single persistent, root-owned inode. Do not unlink on unlock/rollback.
++NET01_LOCK_DIR=/var/lib/captiv-net01
++NET01_LOCK_FILE="$NET01_LOCK_DIR/net01-firewall.lock"
++if [[ -L "$NET01_LOCK_DIR" || ! -d "$NET01_LOCK_DIR" || \
++      "$(stat -c '%u:%g:%a' -- "$NET01_LOCK_DIR")" != '0:0:700' ]]; then
++  echo 'HOLD: insecure NET01 lock directory' >&2; exit 75
++fi
++# Reject any pre-existing symlink, nonregular file, incorrect owner/mode or hardlink.
++if [[ -L "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock symlink' >&2; exit 75
++fi
++if [[ -e "$NET01_LOCK_FILE" ]]; then
++  if [[ ! -f "$NET01_LOCK_FILE" || \
++        "$(stat -c '%u:%g:%a:%h' -- "$NET01_LOCK_FILE")" != '0:0:600:1' ]]; then
++    echo 'HOLD: insecure NET01 lock file' >&2; exit 75
++  fi
++fi
++# umask 077 above creates mode 0600 on cold start; never remove this file.
++exec 9>"$NET01_LOCK_FILE"
+ flock -n 9 || { echo 'HOLD: NET01 maintenance/admission lock occupied' >&2; exit 75; }
++# Verify the descriptor still references the canonical root-owned 0600 inode.
++if [[ -L "$NET01_LOCK_FILE" || \
++      "$(stat -Lc '%u:%g:%a:%h:%d:%i' -- /proc/self/fd/9)" != \
++      "$(stat -c '%u:%g:%a:%h:%d:%i' -- "$NET01_LOCK_FILE")" || \
++      ! -f "$NET01_LOCK_FILE" ]]; then
++  echo 'HOLD: NET01 lock inode/permissions mismatch' >&2; exit 75
++fi
+ /usr/bin/python3 /usr/local/libexec/captiv-net01/net01-maintenance-state.py absent
+ /usr/bin/python3 /usr/local/libexec/captiv-net01/net01-verify.py --all
+--- a/systemd/captiv-net01-watchdog.service
++++ b/systemd/captiv-net01-watchdog.service
+@@ -25,7 +25,7 @@
+ NoNewPrivileges=yes
+ ProtectHome=yes
+ ProtectSystem=strict
+-ReadWritePaths=/var/lib/captiv-net01 /run/lock/captiv-net01-firewall.lock
++ReadWritePaths=/var/lib/captiv-net01
+ # Docker socket is required ONLY by this root-owned supervisor/guard.
+ # It is never handed to Flask application credentials.
+ 
