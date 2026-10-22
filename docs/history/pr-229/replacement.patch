@@ -1,0 +1,991 @@
+diff --git a/app/admin_web/device_fingerprint_presentation.py b/app/admin_web/device_fingerprint_presentation.py
+index e754abc4500cc7d151d9b7a6a00905db6a01a0b6..3673a13da89be9452c3f17f9c15790321703cc1c 100644
+--- a/app/admin_web/device_fingerprint_presentation.py
++++ b/app/admin_web/device_fingerprint_presentation.py
+@@ -163,3 +163,47 @@ class DeviceFingerprintPresentationService:
+     def get(self, site_id: str, mac: str) -> FingerprintPresentation:
+         canonical = validate_mac(mac)
+         return self.get_many(site_id, (canonical,))[canonical]
++
++
++# Display-only allowlists. Schema validation remains exclusively in the existing
++# evidence registry; these are not alternative evidence validators or classifiers.
++_OBSERVED_FIELDS = {
++    "portal_headers/1": "platform_family mobile_boolean browser_runtime_family webview_or_captive_context model_family os_major platform_source mobile_source runtime_source context_source model_source os_major_source ua_present sec_ch_ua_present sec_ch_ua_platform_present sec_ch_ua_mobile_present",
++    "portal_headers/2": "model_family os_major form_factor_mobile form_factor_tablet form_factor_desktop model_source os_major_source form_factors_source",
++    "dhcp/1": "message_type parameter_request_list option_order vendor_class client_identifier_kind maximum_message_size rapid_commit_requested capport_requested ipv6_only_preferred_requested hostname_present",
++    "tcp_syn/1": "ip_version observed_ttl tcp_window mss window_scale sack_permitted timestamps_present tcp_option_order",
++    "tcp_syn/2": "ip_version observed_ttl ip_option_length_bytes ip_id_zero ip_df ip_reserved_flag ip_ecn_bits tcp_header_length_bytes tcp_window tcp_sequence_zero tcp_ack_number_nonzero tcp_ack_first_octet_lsb_set tcp_urg_pointer_nonzero tcp_fin tcp_rst tcp_push tcp_urg tcp_ns tcp_ece tcp_cwr tcp_payload_present tcp_option_records",
++    "tls_client/1": "ja4 ja4_a ja4_b ja4_c tls_version_family client_alpns ech_extension_present grease_extension_present",
++    "quic_client/1": "ja4 ja4_a ja4_b ja4_c quic_version ech_extension_present grease_extension_present",
++}
++
++
++class ObservedDeviceHintsPresentationService:
++    """Optional bounded observations, never a canonical Fingerprint fallback."""
++
++    def __init__(self, reader) -> None:
++        self._reader = reader
++
++    @staticmethod
++    def unavailable() -> dict[str, Any]:
++        return {"state": "unavailable", "coverage": "bounded_latest_256", "trust": "observed_unverified",
++                "reported_model": None, "reported_os": None, "sources": []}
++
++    def get(self, site_id, mac, *, site_first_seen_at, as_of_utc, deadline) -> dict[str, Any]:
++        from app.device_fingerprint.validation import canonical_json
++        try:
++            if self._reader is None:
++                return self.unavailable()
++            result = self._reader.latest_observed_hints(
++                site_id, mac, site_first_seen_at=site_first_seen_at, as_of_utc=as_of_utc, deadline=deadline)
++            for group in result["sources"]:
++                allowed = _OBSERVED_FIELDS.get(group["schema"], "").split()
++                group["fields"] = {key: group["fields"][key] for key in allowed if key in group["fields"]}
++            # Five exact schema-bounded groups (including all 40 TCP options)
++            # fit below this response cap, independent of retained history size.
++            if len(canonical_json(result).encode("utf-8")) > 65_536:
++                return self.unavailable()
++            deadline.require_remaining()
++            return result
++        except Exception:
++            return self.unavailable()
+diff --git a/app/admin_web/query_service.py b/app/admin_web/query_service.py
+index 00b0b4d56fff6405a4a6cf1a655292b02137237e..2a8456059197e17d7ae1fe8ef903dfcb173c2cab 100644
+--- a/app/admin_web/query_service.py
++++ b/app/admin_web/query_service.py
+@@ -278,10 +278,13 @@ class AdminQueryService:
+         inventory_timezone_name: str | None = None,
+         protocol_intelligence_service: Any | None = None,
+         service_intelligence_service: Any | None = None,
++        observed_device_hints_service: Any | None = None,
+     ):
+         self._config = config
+         self._protocol_intelligence = protocol_intelligence_service
+         self._service_intelligence = service_intelligence_service
++        from .device_fingerprint_presentation import ObservedDeviceHintsPresentationService
++        self._observed_device_hints = observed_device_hints_service or ObservedDeviceHintsPresentationService(None)
+         self._policy = policy
+         self._devices = device_gateway
+         self._reads = read_gateway
+@@ -1517,6 +1520,9 @@ class AdminQueryService:
+                     "recent_visits": list(visits),
+                     "latest_client_observation": observation,
+                     "fingerprint": self._fingerprint.get(site_id, device.canonical_mac).as_dict(),
++                    "observed_device_hints": self._observed_device_hints.get(
++                        site_id, device.canonical_mac, site_first_seen_at=device.site_first_seen_at,
++                        as_of_utc=format_utc(datetime.now(timezone.utc)), deadline=deadline),
+                 }
+             )
+ 
+diff --git a/app/admin_web/runtime.py b/app/admin_web/runtime.py
+index 9e5faf8091e6908add6e4e4e8c77d114be559444..5cebb4720f11c091fa8e573ad5d1fbb0219aa5df 100644
+--- a/app/admin_web/runtime.py
++++ b/app/admin_web/runtime.py
+@@ -370,6 +370,15 @@ def create_admin_web_runtime(
+             # Optional dependency failure never changes existing Admin readiness.
+             logger.error("admin.protocol_intelligence_composition_failed")
+     fingerprint_presentation_service = None
++    observed_device_hints_service = None
++    try:
++        from app.device_fingerprint.read_service import DeviceFingerprintReadService
++        from .device_fingerprint_presentation import ObservedDeviceHintsPresentationService
++        observed_device_hints_service = ObservedDeviceHintsPresentationService(
++            DeviceFingerprintReadService(settings["device_fingerprint_db_path"],
++                                         retention_days=settings["device_fingerprint_retention_days"]))
++    except Exception:
++        logger.error("admin.observed_device_hints_composition_failed")
+     service_intelligence_service = None
+     if config.device_service_intelligence_enabled:
+         try:
+@@ -446,6 +455,7 @@ def create_admin_web_runtime(
+             fingerprint_presentation_service,
+             protocol_intelligence_service,
+             service_intelligence_service,
++            observed_device_hints_service,
+         )
+     evidence_state = "active" if config.traffic_evidence_enabled else "disabled"
+     evidence_aggregator = None
+@@ -551,6 +561,7 @@ def _query_service(
+     fingerprint_presentation_service: Any | None = None,
+     protocol_intelligence_service: Any | None = None,
+     service_intelligence_service: Any | None = None,
++    observed_device_hints_service: Any | None = None,
+ ):
+     """Build 01B only when concrete read boundaries expose local paths."""
+     try:
+@@ -579,6 +590,7 @@ def _query_service(
+             fingerprint_presentation_service=fingerprint_presentation_service,
+             protocol_intelligence_service=protocol_intelligence_service,
+             service_intelligence_service=service_intelligence_service,
++            observed_device_hints_service=observed_device_hints_service,
+             inventory_timezone_name=getattr(getattr(registry_read_service, "service", None), "timezone_name", None),
+             current_state_read_service=current_state_read_service,
+             current_traffic_read_service=getattr(
+diff --git a/app/admin_web/static/admin.js b/app/admin_web/static/admin.js
+index d84d753d77f8b27e8c608e0fda7c3da18127f1c9..d4da4af947433e766428bd2999d9689ddd69c068 100644
+--- a/app/admin_web/static/admin.js
++++ b/app/admin_web/static/admin.js
+@@ -199,6 +199,63 @@
+     return value;
+   }
+ 
++  // DF-RICH-HINTS-01:BEGIN
++  function observedDeviceHintsCard(hints) {
++    const value = hints || {state: "unavailable"};
++    const model = value.reported_model;
++    const os = value.reported_os;
++    const platforms = {android: "Android", ios: "iOS", macos: "macOS", chromeos: "ChromeOS", windows: "Windows", linux: "Linux"};
++    const reportedOS = os ? (os.platform_family && platforms[os.platform_family]
++      ? `${platforms[os.platform_family]} ${os.os_major}`
++      : `OS major: ${os.os_major} (reported, platform not provided)`) : null;
++    const provenance = (field) => field
++      ? `${field.source} · ${field.schema} · ${field.observed_at_utc} UTC · ${field.quality_state}` : null;
++    const result = card("Observed Device Hints / Наблюдаемые сведения", [
++      ["State", value.state === "observed" ? "Observed / unverified"
++        : (value.state === "no_evidence" ? "No evidence in bounded window" : "Unavailable")],
++      ["Reported model", model ? model.value : null], ["Model source / observed at", provenance(model)],
++      ["Reported OS / major", reportedOS], ["OS source / observed at", provenance(os)],
++    ]);
++    result.className += " fingerprint-card";
++    result.append(node("p", "live-detail", "Observed / unverified — device-reported or network-observed, not confirmed identity."));
++    result.append(node("p", "live-detail", "Latest up to 256 retained evidence records for this Site/device; earlier history not searched. Observation timestamps are historical, not a live service status."));
++    const details = node("details", "fingerprint-details");
++    details.append(node("summary", null, "All observed details"));
++    const names = {portal_headers: "Portal / Browser", dhcp: "DHCP", tcp_syn: "TCP SYN", tls_client: "TLS Client", quic_client: "QUIC Client"};
++    const label = (key) => key.replaceAll("_", " ").replace(/\b(ip|tcp|tls|quic|os|mss|ua|ja4|dhcp)\b/g, (word) => word.toUpperCase())
++      .replace(/^./, (first) => first.toUpperCase());
++    const fieldValue = (field) => Array.isArray(field) ? (field.length ? field.map(display).join(", ") : "—") : display(field);
++    const groups = Array.isArray(value.sources) ? value.sources.slice(0, 5) : [];
++    groups.forEach((group) => {
++      const section = node("section");
++      section.append(node("h3", null, names[group.source_kind] || "Observed source"));
++      const state = {observed: "Observed / unverified", not_observed_in_bounded_window: "Not observed in bounded window",
++        unsupported: "Unsupported schema", unavailable: "Unavailable"}[group.state] || "Unavailable";
++      section.append(definitionList([["State", state], ["Source kind", group.source_kind], ["Schema", group.schema],
++        ["Observed at (UTC)", group.observed_at_utc], ["Quality", group.quality_state],
++        ["Origin", group.origin_category === "client_reported" ? "Client reported"
++          : (group.origin_category === "network_observed" ? "Network observed" : null)]]));
++      if (group.state === "observed" && group.fields && typeof group.fields === "object") {
++        const entries = Object.entries(group.fields).filter(([key]) => key !== "tcp_option_records");
++        section.append(definitionList(entries.map(([key, field]) => [label(key), fieldValue(field)])));
++        if (Array.isArray(group.fields.tcp_option_records)) {
++          const options = node("details", "fingerprint-details");
++          const records = group.fields.tcp_option_records.slice(0, 40);
++          options.append(node("summary", null, `TCP option records (${records.length})`));
++          records.forEach((record, index) => {
++            options.append(node("h4", null, `Option ${index + 1}`),
++              definitionList(Object.entries(record).map(([key, field]) => [label(key), fieldValue(field)])));
++          });
++          section.append(options);
++        }
++      }
++      details.append(section);
++    });
++    result.append(details);
++    return result;
++  }
++  // DF-RICH-HINTS-01:END
++
+   function parseVisitFilters(fromValue, toValue, statusValue) {
+     const hasFrom = typeof fromValue === "string" && fromValue !== "";
+     const hasTo = typeof toValue === "string" && toValue !== "";
+@@ -612,6 +669,7 @@
+     const identity = result.identity;
+     content.append(card("Identity", deviceIdentityEntries(identity)));
+     content.append(fingerprintCard(result.fingerprint));
++    content.append(observedDeviceHintsCard(result.observed_device_hints));
+     content.append(card("Latest Site snapshot", deviceDetailEntries(result.latest_snapshot, identity.device_type_key)));
+     content.append(card("Latest client observation", deviceDetailEntries(result.latest_client_observation)));
+     const visits = Array.isArray(result.recent_visits) ? result.recent_visits : [];
+diff --git a/app/device_fingerprint/read_service.py b/app/device_fingerprint/read_service.py
+index ea361e12bbbc416d5a70a6bcc98cc0b0ef620c85..4f4dbca69abc56cc133409b25d48d62b7176f9d8 100644
+--- a/app/device_fingerprint/read_service.py
++++ b/app/device_fingerprint/read_service.py
+@@ -8,10 +8,25 @@ from dataclasses import dataclass
+ from datetime import timedelta
+ from typing import Any
+ 
+-from .models import DeviceFingerprintStorageCorrupt, DeviceFingerprintValidationError
++from .models import DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageUnavailable, DeviceFingerprintValidationError
++from .config import BUSY_TIMEOUT_MS
++from .payload_integrity import verify_persisted_payload
++from .schema_registry import build_production_schema_registry
+ from .repository import DeviceFingerprintRepository, open_read_only
+ from .schema import MAX_INGEST_SEQUENCE
+-from .validation import parse_utc, validate_mac, validate_machine_id, validate_site_id, validate_source_kind, validate_uuid
++from .validation import format_utc, parse_utc, validate_mac, validate_machine_id, validate_site_id, validate_source_kind, validate_uuid
++
++OBSERVED_SOURCE_KINDS = ("portal_headers", "dhcp", "tcp_syn", "tls_client", "quic_client")
++# The existing ingestion contract permits at most 65,536 payload bytes.
++OBSERVED_MAX_PAYLOAD_BYTES = 65_536
++OBSERVED_CANDIDATE_LIMIT = 256
++_OBSERVED_REGISTRY = build_production_schema_registry()
++_OBSERVED_SQL = """SELECT source_kind,feature_schema_version,observed_at,quality_state,
++    CASE WHEN length(CAST(payload_json AS BLOB))<=65536 THEN payload_json ELSE NULL END AS payload_json,
++    payload_sha256
++    FROM device_fingerprint_evidence
++    WHERE site_id=? AND observed_mac=? AND observed_at>=? AND observed_at<?
++    ORDER BY observed_at DESC,evidence_id DESC LIMIT 256"""
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -179,6 +194,106 @@ class DeviceFingerprintReadService:
+         self.db_path = db_path
+         self.retention_days = retention_days
+ 
++    def latest_observed_hints(self, site_id: str, observed_mac: str, *,
++                              site_first_seen_at: str, as_of_utc: str,
++                              deadline: Any) -> dict[str, Any]:
++        """One bounded recent universe, independent of canonical classification.
++
++        The interval is [max(retention cutoff, Site first seen), as_of).
++        Missing groups describe this universe only, never device capabilities.
++        No SQL, parsing or older-record fallback occurs per source group.
++        """
++        site, mac = validate_site_id(site_id), validate_mac(observed_mac)
++        end, first = parse_utc(as_of_utc), parse_utc(site_first_seen_at)
++        if type(self.retention_days) is not int or not 1 <= self.retention_days <= 90:
++            raise DeviceFingerprintValidationError("Invalid evidence retention")
++        start = max(first, end - timedelta(days=self.retention_days))
++        groups: dict[str, dict[str, Any]] = {}
++        model = os = None
++        portal_blocked = False
++
++        def remaining_for_sql() -> None:
++            deadline.require_remaining()
++            # Do not enter the unchanged native busy handler without its full
++            # configured budget. In particular, optional reads never extend a
++            # nearly exhausted core Admin request just to wait for SQLite.
++            if deadline.expires_at - deadline.monotonic() <= BUSY_TIMEOUT_MS / 1000:
++                raise DeviceFingerprintStorageUnavailable("Optional evidence read budget exhausted")
++
++        remaining_for_sql()
++        connection = open_read_only(self.db_path)
++        cursor = None
++        try:
++            remaining_for_sql()
++            connection.set_progress_handler(lambda: int(deadline.expired()), 1000)
++            cursor = connection.execute(_OBSERVED_SQL, (site, mac, format_utc(start), as_of_utc))
++            for row in cursor:
++                deadline.require_remaining()
++                kind = row["source_kind"]
++                if kind not in OBSERVED_SOURCE_KINDS:
++                    raise DeviceFingerprintStorageCorrupt("Invalid observed source")
++                latest = kind not in groups
++                need_portal = kind == "portal_headers" and not portal_blocked and (model is None or os is None)
++                if not latest and not need_portal:
++                    continue
++                group = {"source_kind": kind, "schema": None, "state": "unavailable",
++                         "observed_at_utc": None, "quality_state": None,
++                         "origin_category": "client_reported" if kind in {"portal_headers", "dhcp"} else "network_observed",
++                         "fields": {}}
++                try:
++                    version = row["feature_schema_version"]
++                    if type(version) is not int or not 1 <= version <= 2_147_483_647:
++                        raise DeviceFingerprintValidationError("Invalid observed schema")
++                    parse_utc(row["observed_at"])
++                    if row["quality_state"] not in {"valid", "partial", "degraded"}:
++                        raise DeviceFingerprintValidationError("Invalid observed quality")
++                    group.update(schema=f"{kind}/{version}", observed_at_utc=row["observed_at"],
++                                 quality_state=row["quality_state"])
++                    text = row["payload_json"]
++                    if not isinstance(text, str) or len(text.encode("utf-8")) > OBSERVED_MAX_PAYLOAD_BYTES:
++                        raise DeviceFingerprintValidationError("Oversized observed payload")
++                    verified = verify_persisted_payload(kind, version, text, row["payload_sha256"], _OBSERVED_REGISTRY)
++                    if not verified.schema_supported:
++                        group["state"] = "unsupported"
++                    else:
++                        group.update(state="observed", fields=dict(verified.materialized_payload))
++                except (ValueError, TypeError, RecursionError, DeviceFingerprintValidationError):
++                    pass  # Safe per-source state; never include exception/payload.
++                deadline.require_remaining()
++                if latest:
++                    groups[kind] = group
++                if kind == "portal_headers":
++                    if group["state"] != "observed":
++                        # A corrupt/unsupported candidate blocks the remaining
++                        # Portal field search, rather than silently going older.
++                        portal_blocked = True
++                        model = os = None
++                        groups[kind] = group
++                        continue
++                    fields = group["fields"]
++                    metadata = {key: group[key] for key in ("schema", "observed_at_utc", "quality_state")}
++                    if model is None and fields.get("model_family") is not None:
++                        model = dict(metadata, value=fields["model_family"], source=fields["model_source"])
++                    if os is None and fields.get("os_major") is not None:
++                        os = dict(metadata, os_major=fields["os_major"], source=fields["os_major_source"],
++                                  platform_family=fields.get("platform_family"))
++            deadline.require_remaining()
++        finally:
++            try:
++                if cursor is not None:
++                    cursor.close()
++            finally:
++                connection.close()
++        sources = [groups.get(kind, {"source_kind": kind, "schema": None,
++                    "state": "not_observed_in_bounded_window", "observed_at_utc": None,
++                    "quality_state": None, "fields": {},
++                    "origin_category": "client_reported" if kind in {"portal_headers", "dhcp"} else "network_observed"})
++                   for kind in OBSERVED_SOURCE_KINDS]
++        state = "observed" if any(group["state"] == "observed" for group in sources) else (
++            "unavailable" if groups else "no_evidence")
++        return {"state": state, "coverage": "bounded_latest_256", "trust": "observed_unverified",
++                "reported_model": model, "reported_os": os, "sources": sources}
++
+     def open_snapshot_read(self) -> DeviceFingerprintSnapshotReadSession:
+         connection = open_read_only(self.db_path)
+         try:
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index 4d157b23ec03554437878ea242de1bd5df3a37ee..2e144ce0005049bf6884de79eb83086882c819f5 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -35,6 +35,20 @@ Baseline: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
+ 
+ ## Boundary
+ 
++Device Detail optionally adds `result.observed_device_hints`, independently of
++the unchanged canonical `result.fingerprint`. One read-only indexed query reads
++at most 256 retained rows for the authorized Site/canonical MAC in
++`[max(retention cutoff, site_first_seen_at), pinned UTC as-of)`. The five exact
++schema-validated groups are Portal, DHCP, TCP SYN, TLS and QUIC. Latest corrupt
++or unsupported observations are not replaced with older records; missing
++groups describe only the bounded window. Portal model/OS retain separate
++provenance; the OS platform can come only from the same record as its major.
++The reader admits at most 65,536 bytes per payload, at most 256 validations,
++five groups and a 65,536-byte DTO; TCP v2 retains all admitted 40 option records.
++Optional failures preserve the Device Card. No list enrichment, new endpoint,
++polling, capture, classifier, database mutation or live-service claim is added.
++The collapsed details reuse existing wrapping styles and safe text nodes.
++
+ Admin authentication is separate from guest Portal authentication.
+ 
+ Current UI pages:
+diff --git a/tests/admin_web/test_device_service_intelligence_frontend.py b/tests/admin_web/test_device_service_intelligence_frontend.py
+index f8df8e8dd0321382377c44de237093b620be05ae..94ff737d1a7c1f45571323a61d6dcf18b5da9675 100644
+--- a/tests/admin_web/test_device_service_intelligence_frontend.py
++++ b/tests/admin_web/test_device_service_intelligence_frontend.py
+@@ -84,13 +84,84 @@ def test_real_node_service_intelligence_coordinator():
+     assert "NI04_FRONTEND_PASS" in result.stdout
+ 
+ 
+-def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
+-    import hashlib
+-    import subprocess
++def _without_rich_hints_insertions(candidate):
++    """TL-approved exception: remove only two additive, exact line spans."""
++    begin = b"  // DF-RICH-HINTS-01:BEGIN\n"
++    end = b"  // DF-RICH-HINTS-01:END\n\n"
++    call = b"    content.append(observedDeviceHintsCard(result.observed_device_hints));\n"
++    assert candidate.count(b"// DF-RICH-HINTS-01:BEGIN") == candidate.count(begin) == 1
++    assert candidate.count(b"// DF-RICH-HINTS-01:END") == candidate.count(end) == 1
++    assert candidate.count(b"content.append(observedDeviceHintsCard(result.observed_device_hints));") == candidate.count(call) == 1
++    start, stop, call_start = candidate.index(begin), candidate.index(end), candidate.index(call)
++    assert start < stop and stop + len(end) < call_start
++    assert start == 0 or candidate[start - 1:start] == b"\n"
++    assert candidate[call_start - 1:call_start] == b"\n"
++    # Includes exactly the inserted newlines; no old JS span is masked.
++    return candidate[:start] + candidate[stop + len(end):call_start] + candidate[call_start + len(call):]
++
++
++def _historical_admin_prefixes():
+     source = (ROOT / "app/admin_web/static/admin.js").read_bytes()
+     prefix = source.split(b"/* NI-04: independent bounded Service Intelligence coordinator. */")[0].rstrip()
+     original = subprocess.check_output(["git", "show", "22cdde5d4168de02d142c840028a4d66167e47f7:app/admin_web/static/admin.js"], cwd=ROOT).rstrip()
+-    assert prefix.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n")
++    # Preserve the existing CRLF-only checkout policy, without new normalization.
++    return prefix.replace(b"\r\n", b"\n"), original.replace(b"\r\n", b"\n")
++
++
++@pytest.mark.parametrize("old,new", [
++    (b'  const resolved = {', b'  const resolved = { /* canary */'),
++    (b'  function fingerprintCard(fingerprint)', b'  function fingerprintCard(changed)'),
++    (b'card("Fingerprint Information",', b'card("Changed canonical Fingerprint",'),
++    (b'  function parseVisitFilters(', b'  function changedVisitFilters('),
++    (b'content.append(fingerprintCard(result.fingerprint));', b'content.append(fingerprintCard(null));'),
++    (b'card("Latest Site snapshot",', b'card("Changed Site snapshot",'),
++])
++def test_rich_hints_exception_rejects_every_external_canary_including_canonical_fingerprint(old, new):
++    prefix, original = _historical_admin_prefixes()
++    assert prefix.count(old) == 1
++    assert _without_rich_hints_insertions(prefix) == original
++    with pytest.raises(AssertionError):
++        assert _without_rich_hints_insertions(prefix.replace(old, new, 1)) == original
++
++
++@pytest.mark.parametrize("case", ["missing_begin", "duplicate_begin", "missing_end", "duplicate_end",
++                                  "end_newlines", "wrong_call_indent", "missing_call", "duplicate_call",
++                                  "reversed", "call_before_block"])
++def test_rich_hints_exception_rejects_nonexact_or_nonunique_boundaries(case):
++    prefix, _ = _historical_admin_prefixes()
++    begin = b"  // DF-RICH-HINTS-01:BEGIN\n"
++    end = b"  // DF-RICH-HINTS-01:END\n\n"
++    call = b"    content.append(observedDeviceHintsCard(result.observed_device_hints));\n"
++    changes = {
++        "missing_begin": (begin, b""), "duplicate_begin": (begin, begin * 2),
++        "missing_end": (end, b""), "duplicate_end": (end, end * 2),
++        "end_newlines": (end, end[:-1]), "wrong_call_indent": (call, call[1:]),
++        "missing_call": (call, b""), "duplicate_call": (call, call * 2),
++    }
++    if case == "reversed":
++        changed = prefix.replace(begin, b"TEMP_ANCHOR\n", 1).replace(end, begin, 1).replace(b"TEMP_ANCHOR\n", end, 1)
++    elif case == "call_before_block":
++        changed = prefix.replace(call, b"", 1).replace(begin, call + begin, 1)
++    else:
++        old, new = changes[case]
++        changed = prefix.replace(old, new, 1)
++    with pytest.raises(AssertionError):
++        _without_rich_hints_insertions(changed)
++
++
++def test_rich_hints_exception_is_limited_to_the_approved_additions():
++    prefix, original = _historical_admin_prefixes()
++    assert _without_rich_hints_insertions(prefix) == original
++    changed_addition = prefix.replace(b'card("Observed Device Hints /', b'card("Allowed addition canary /', 1)
++    assert changed_addition != prefix
++    assert _without_rich_hints_insertions(changed_addition) == original
++
++
++def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
++    import hashlib
++    import subprocess
++    prefix, original = _historical_admin_prefixes()
++    assert _without_rich_hints_insertions(prefix) == original
+     for name in ("app/admin_web/static/device_protocol_intelligence.js", "app/network_protocol_intelligence/read_service.py",
+                  "app/network_protocol_intelligence/models.py", "app/network_metadata_projection/read_service.py"):
+         # Recovery freezes the current accepted baseline, including the admitted
+diff --git a/tests/admin_web/test_observed_device_hints.py b/tests/admin_web/test_observed_device_hints.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d5af43ccd9721d88e8537123bf57ce2826f1471
+--- /dev/null
++++ b/tests/admin_web/test_observed_device_hints.py
+@@ -0,0 +1,147 @@
++"""Optional Device Card observations preserve the existing read/ACL boundary."""
++import logging
++import sqlite3
++import time
++from types import SimpleNamespace
++
++import pytest
++
++from app.admin_web.device_fingerprint_presentation import ObservedDeviceHintsPresentationService
++from app.admin_web.models import AdminPrincipal
++from app.admin_web.query_service import AdminQueryForbidden, AdminQueryNotFound
++from app.analytics.source_gateway import QueryDeadline
++from app.device_fingerprint.read_service import DeviceFingerprintReadService
++from tests.device_fingerprint.test_observed_hints import SITE, MAC, FIRST, AS_OF, portal, retained
++from .test_query_service import _service, DEVICE_ID
++
++
++@pytest.mark.parametrize("failure", [OSError("private-path-canary"), sqlite3.OperationalError("locked"),
++                                     sqlite3.DatabaseError("malformed"), PermissionError("secret-canary")])
++def test_A12_failure_is_additive_and_does_not_change_canonical_fingerprint(failure):
++    query, _, _, _ = _service()
++    before = query.device_detail(AdminPrincipal("operator"), SITE, DEVICE_ID).result
++    class Broken:
++        def latest_observed_hints(self, *args, **kwargs):
++            raise failure
++    query._observed_device_hints = ObservedDeviceHintsPresentationService(Broken())
++    result = query.device_detail(AdminPrincipal("operator"), SITE, DEVICE_ID).result
++    assert result == before
++    assert result["observed_device_hints"] == ObservedDeviceHintsPresentationService.unavailable()
++    assert "canary" not in repr(result) and "private-path" not in repr(result)
++
++
++def test_A14_authorized_resolved_identity_only_and_no_list_reads():
++    query, devices, _, _ = _service()
++    calls = []
++    class Reader:
++        def latest_observed_hints(self, site, mac, **kwargs):
++            calls.append((site, mac, kwargs))
++            return dict(state="no_evidence", coverage="bounded_latest_256", trust="observed_unverified",
++                        reported_model=None, reported_os=None, sources=[])
++    query._observed_device_hints = ObservedDeviceHintsPresentationService(Reader())
++    principal = AdminPrincipal("operator")
++    query.list_devices(principal, SITE, limit=100)
++    assert calls == []
++    query.device_detail(principal, SITE, DEVICE_ID)
++    assert len(calls) == 1 and calls[0][:2] == (SITE, MAC)
++    assert calls[0][2]["site_first_seen_at"] == "2026-01-01T00:00:00.000Z"
++    assert calls[0][2]["deadline"] is devices.calls[-1]["deadline"]
++    with pytest.raises(AdminQueryForbidden):
++        query.device_detail(principal, "1123456789abcdef01234567", DEVICE_ID)
++    devices.get_device = lambda **kwargs: None
++    with pytest.raises(AdminQueryNotFound):
++        query.device_detail(principal, SITE, DEVICE_ID)
++    assert len(calls) == 1
++
++
++def test_A12_missing_db_does_not_create_files(tmp_path):
++    path = tmp_path / "absent.sqlite3"
++    service = ObservedDeviceHintsPresentationService(DeviceFingerprintReadService(str(path), retention_days=30))
++    assert service.get(SITE, MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF,
++                       deadline=QueryDeadline.after(3))["state"] == "unavailable"
++    assert list(tmp_path.iterdir()) == []
++
++
++def test_A16_historical_observations_need_no_live_services(retained):
++    path, _, add = retained
++    add(portal())
++    service = ObservedDeviceHintsPresentationService(DeviceFingerprintReadService(str(path), retention_days=30))
++    dto = service.get(SITE, MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF, deadline=QueryDeadline.after(5))
++    assert dto["reported_model"]["observed_at_utc"] == "2026-10-17T10:00:00.000Z"
++    assert dto["trust"] == "observed_unverified"
++    assert set(dto).isdisjoint({"live", "confidence", "classification", "payload_json", "observed_mac"})
++
++
++def test_runtime_uses_only_configured_evidence_path_and_retention(tmp_path):
++    from .test_runtime import create_admin_web_runtime, _device_list_context_sources
++    from .conftest import enabled_settings
++    registry, visits, observations, analytics = _device_list_context_sources(tmp_path)
++    path = str(tmp_path / "configured-evidence.sqlite3")
++    runtime = create_admin_web_runtime(enabled_settings(device_fingerprint_db_path=path,
++        device_fingerprint_retention_days=17), analytics, registry, visits, observations,
++        logging.getLogger("observed-hints-test"))
++    reader = runtime.query_service._observed_device_hints._reader
++    assert reader.db_path == path and reader.retention_days == 17
++    assert not (tmp_path / "configured-evidence.sqlite3").exists()
++
++
++@pytest.mark.parametrize("seconds", [0.03, 2.0])
++def test_A12_real_exclusive_lock_is_optional_and_respects_remaining_deadline(retained, seconds):
++    path, db, add = retained
++    add(portal())
++    db.execute("BEGIN EXCLUSIVE")
++    service = ObservedDeviceHintsPresentationService(DeviceFingerprintReadService(str(path), retention_days=30))
++    deadline = QueryDeadline.after(seconds)
++    started = time.monotonic()
++    try:
++        dto = service.get(SITE, MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF, deadline=deadline)
++    finally:
++        db.rollback()
++    assert dto == service.unavailable()
++    assert time.monotonic() - started < seconds
++    # A rejected optional read left no held reader or changed connection state.
++    db.execute("BEGIN EXCLUSIVE")
++    db.rollback()
++
++
++def test_A12_corrupt_file_fails_soft_without_mutation(tmp_path):
++    path = tmp_path / "corrupt.sqlite3"
++    path.write_bytes(b"synthetic invalid SQLite file")
++    before = path.read_bytes()
++    service = ObservedDeviceHintsPresentationService(DeviceFingerprintReadService(str(path), retention_days=30))
++    assert service.get(SITE, MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF,
++                       deadline=QueryDeadline.after(5)) == service.unavailable()
++    assert path.read_bytes() == before
++
++
++@pytest.mark.parametrize("unavailable", [False, True])
++def test_A12_A14_existing_authenticated_http_device_card_preserves_core(admin_app, unavailable):
++    from .conftest import login
++    runtime = admin_app.extensions["admin_web_runtime"]
++    query = runtime.query_service
++    _, devices, reads, _ = _service()
++    query._devices, query._reads = devices, reads
++    calls = []
++    class Reader:
++        def latest_observed_hints(self, site, mac, **kwargs):
++            calls.append((site, mac))
++            if unavailable:
++                raise PermissionError("private-path-canary")
++            return dict(state="no_evidence", coverage="bounded_latest_256", trust="observed_unverified",
++                        reported_model=None, reported_os=None, sources=[])
++    query._observed_device_hints = ObservedDeviceHintsPresentationService(Reader())
++    client = admin_app.test_client()
++    endpoint = f"/admin/api/v1/sites/{SITE}/devices/{DEVICE_ID}"
++    assert client.get(endpoint, base_url="https://localhost").status_code == 401
++    assert calls == []
++    assert login(client).status_code == 302
++    response = client.get(endpoint, base_url="https://localhost")
++    assert response.status_code == 200
++    result = response.get_json()["result"]
++    assert result["identity"]["canonical_mac"] == MAC
++    assert result["latest_snapshot"] and result["recent_visits"] and result["latest_client_observation"]
++    assert result["fingerprint"]["state"] == "unavailable"
++    assert result["observed_device_hints"]["state"] == ("unavailable" if unavailable else "no_evidence")
++    assert len(calls) == 1 and "canary" not in response.get_data(as_text=True)
++    assert client.get(endpoint.replace(SITE, "1123456789abcdef01234567"), base_url="https://localhost").status_code == 403
++    assert len(calls) == 1
+diff --git a/tests/admin_web/test_observed_device_hints_frontend.py b/tests/admin_web/test_observed_device_hints_frontend.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bdf3cad769fd829b435656902bef94309c06ec3f
+--- /dev/null
++++ b/tests/admin_web/test_observed_device_hints_frontend.py
+@@ -0,0 +1,92 @@
++import json
++import subprocess
++from pathlib import Path
++
++import pytest
++
++from app.admin_web.device_fingerprint_presentation import ObservedDeviceHintsPresentationService
++from app.device_fingerprint.read_service import DeviceFingerprintReadService
++from app.analytics.source_gateway import QueryDeadline
++from tests.device_fingerprint.test_observed_hints import SITE, MAC, FIRST, AS_OF, portal, retained
++from tests.device_fingerprint.test_network_schemas import tcp_v2, tls, quic
++from .test_device_current_context_frontend import _legacy_admin_source, _node
++
++
++@pytest.mark.parametrize("version", [1, 2])
++def test_A01_A02_A05_A13_A16_safe_dom_full_groups_false_zero_40_options(retained, tmp_path, version):
++    path, _, add = retained
++    add(portal(version, **({"os_major": 0} if version == 2 else {})), version=version)
++    add(dict(message_type="discover", parameter_request_list=[1, 3], option_order=[53, 55],
++             vendor_class="<img src=x onerror=alert(1)>", client_identifier_kind="opaque",
++             maximum_message_size=None, rapid_commit_requested=False, capport_requested=True,
++             ipv6_only_preferred_requested=False, hostname_present=False), kind="dhcp")
++    add(tcp_v2(tcp_header_length_bytes=60, tcp_window=0, tcp_option_records=[dict(
++        record_type="nop", kind=1, declared_length=None, available_value_length=0,
++        structure_state="well_formed") for _ in range(40)]), kind="tcp_syn", version=2)
++    add(tls(), kind="tls_client")
++    add(quic(), kind="quic_client")
++    hints = ObservedDeviceHintsPresentationService(DeviceFingerprintReadService(str(path), retention_days=30)).get(
++        SITE, MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF, deadline=QueryDeadline.after(5))
++    program = r'''
++const assert = require("assert");
++class Element {
++  constructor(tag) {this.tag=tag;this.children=[];this.dataset={};this.listeners={};this.className="";this.textContent="";}
++  append(...children) {this.children.push(...children);}
++  replaceChildren(...children) {this.children=children;}
++  addEventListener(name, fn) {this.listeners[name]=fn;}
++  querySelector() {return null;}
++  setAttribute() {}
++  set innerHTML(_) {throw Error("unsafe HTML");}
++}
++const ids=["admin-page","page-content","page-state","state-title","state-message","refresh-button","pagination","load-more-button"];
++const elements=Object.fromEntries(ids.map(id=>[id,new Element(id)]));
++elements["admin-page"].dataset={page:"device",siteId:"0123456789abcdef01234567",apiBase:"/admin/api/v1/sites/0123456789abcdef01234567",deviceId:"10000000-0000-4000-8000-000000000001"};
++global.document={getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag)};
++global.window={location:{pathname:"/admin/device",search:""},addEventListener(){}};
++const hints=JSON.parse(process.argv[2]); let calls=0;
++global.fetch=async()=>{calls++;return {ok:true,status:200,headers:{get:()=>null},json:async()=>({result:{
++ identity:{device_type:"Android",device_type_key:"android"},fingerprint:{state:"no_result"},observed_device_hints:hints,recent_visits:[]}})};};
++'''
++    assertions = r'''
++setImmediate(()=>{
++ const cards=elements["page-content"].children;
++ assert.strictEqual(calls,1);
++ assert.strictEqual(cards[1].children[0].textContent,"Fingerprint Information");
++ const card=cards[2]; assert(card.children[0].textContent.startsWith("Observed Device Hints"));
++ assert(card.className.includes("fingerprint-card"));
++ const walk=(element)=>[element,...element.children.flatMap(walk)];
++ const nodes=walk(card); const text=nodes.map(n=>n.textContent).join("\n");
++ assert(text.includes("Nokia G21"));
++ assert(text.includes("2026-10-17T10:00:00.000Z"));
++ assert(text.includes("earlier history not searched"));
++ assert(text.includes("not a live service status"));
++ assert(text.includes("<img src=x onerror=alert(1)>"));
++ assert(!nodes.some(n=>n.tag==="img"||n.tag==="script"));
++ assert(nodes.some(n=>n.tag==="dd" && n.textContent==="No"));
++ assert(nodes.some(n=>n.tag==="dd" && n.textContent==="0"));
++ assert(nodes.some(n=>n.tag==="dd" && n.textContent==="—"));
++ assert.strictEqual(nodes.filter(n=>n.tag==="h4").length,40);
++ assert.deepStrictEqual(nodes.filter(n=>n.tag==="h3").map(n=>n.textContent),["Portal / Browser","DHCP","TCP SYN","TLS Client","QUIC Client"]);
++ const details=card.children.find(n=>n.tag==="details");
++ assert.strictEqual(details.children[0].tag,"summary");
++ assert.strictEqual(details.children[0].textContent,"All observed details");
++ assert(!details.open);
++ if(hints.reported_os.schema==="portal_headers/2") {
++  assert(text.includes("OS major: 0 (reported, platform not provided)")); assert(!text.includes("Android 0"));
++ } else assert(text.includes("Android 13"));
++});
++'''
++    script = tmp_path / "observed-hints-dom.cjs"
++    script.write_text(program + _legacy_admin_source() + assertions, encoding="utf-8")
++    completed = subprocess.run([_node(), str(script), json.dumps(hints)], capture_output=True, text=True, timeout=20)
++    assert completed.returncode == 0, completed.stdout + completed.stderr
++
++
++def test_existing_wrapping_and_native_details_need_no_css_changes():
++    root = Path(__file__).parents[2]
++    css = (root / "app/admin_web/static/admin.css").read_text(encoding="utf-8")
++    assert ".fingerprint-details dd { overflow-wrap: anywhere; }" in css
++    source = (root / "app/admin_web/static/admin.js").read_text(encoding="utf-8")
++    block = source.split("  // DF-RICH-HINTS-01:BEGIN\n")[1].split("  // DF-RICH-HINTS-01:END\n")[0]
++    assert "innerHTML" not in block and "fetch(" not in block and "setInterval" not in block
++    assert 'node("details", "fingerprint-details")' in block
+diff --git a/tests/device_fingerprint/test_observed_hints.py b/tests/device_fingerprint/test_observed_hints.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb0807225f84666ab9f827804f52209267cfd214
+--- /dev/null
++++ b/tests/device_fingerprint/test_observed_hints.py
+@@ -0,0 +1,277 @@
++"""Synthetic retained observations: no capture, classification or real device data."""
++import hashlib
++import sqlite3
++from datetime import datetime, timezone
++
++import pytest
++
++from app.analytics.source_gateway import AnalyticsQueryDeadlineExceeded, QueryDeadline
++from app.device_fingerprint.read_service import DeviceFingerprintReadService
++from app.device_fingerprint.schema import SCHEMA_SQL
++from app.device_fingerprint.validation import canonical_json
++
++SITE = "0123456789abcdef01234567"
++MAC = "02:00:00:00:00:01"
++AS_OF = "2026-10-18T00:00:00.000Z"
++FIRST = "2026-10-01T00:00:00.000Z"
++
++
++def portal(version=1, **changes):
++    if version == 2:
++        value = dict(model_family="Nokia G21", os_major=13, form_factor_mobile=True,
++                     form_factor_tablet=False, form_factor_desktop=False,
++                     model_source="sec_ch_ua_model", os_major_source="sec_ch_ua_platform_version",
++                     form_factors_source="sec_ch_ua_form_factors")
++    else:
++        value = dict(platform_family="android", mobile_boolean=True,
++                     browser_runtime_family="chromium", webview_or_captive_context=None,
++                     model_family="Nokia G21", os_major=13, platform_source="user_agent",
++                     mobile_source="user_agent", runtime_source="user_agent", context_source=None,
++                     model_source="user_agent", os_major_source="user_agent", ua_present=True,
++                     sec_ch_ua_present=False, sec_ch_ua_platform_present=False, sec_ch_ua_mobile_present=False)
++    return value | changes
++
++
++@pytest.fixture
++def retained(tmp_path):
++    path = tmp_path / "synthetic.sqlite3"
++    db = sqlite3.connect(path)
++    db.executescript(SCHEMA_SQL)
++    sequence = 0
++
++    def add(payload=None, *, kind="portal_headers", version=1,
++            at="2026-10-17T10:00:00.000Z", site=SITE, mac=MAC,
++            raw=None, digest=None, quality="valid"):
++        nonlocal sequence
++        sequence += 1
++        identity = f"{sequence:08x}-1111-4111-8111-111111111111"
++        text = raw if raw is not None else canonical_json(payload if payload is not None else portal())
++        sha = digest or hashlib.sha256(text.encode()).hexdigest()
++        db.execute("INSERT INTO device_fingerprint_evidence VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++                   (identity, "synthetic", identity, kind, None, "synthetic", "1", version,
++                    None, site, "synthetic", at, mac, None, "P1", quality, text, sha, at, sequence))
++        db.commit()
++    yield path, db, add
++    db.close()
++
++
++def read(path, **kwargs):
++    return DeviceFingerprintReadService(str(path), retention_days=30).latest_observed_hints(
++        SITE, MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF,
++        deadline=QueryDeadline.after(5), **kwargs)
++
++
++@pytest.mark.parametrize("version", [1, 2])
++def test_A01_A02_exact_portal_and_no_platform_synthesis(retained, version):
++    path, _, add = retained
++    add(portal(version), version=version)
++    hints = read(path)
++    assert hints["reported_model"]["value"] == "Nokia G21"
++    assert hints["reported_os"]["os_major"] == 13
++    assert hints["reported_os"]["platform_family"] == ("android" if version == 1 else None)
++    assert hints["sources"][0]["fields"] == portal(version)
++
++
++def test_A03_independent_values_keep_record_provenance(retained):
++    path, _, add = retained
++    add(portal(), at="2026-10-16T00:00:00.000Z")
++    add(portal(2, model_family=None, model_source=None), version=2)
++    hints = read(path)
++    assert hints["reported_model"]["observed_at_utc"] == "2026-10-16T00:00:00.000Z"
++    assert hints["reported_model"]["schema"] == "portal_headers/1"
++    assert hints["reported_os"]["schema"] == "portal_headers/2"
++    assert hints["reported_os"]["platform_family"] is None
++
++
++@pytest.mark.parametrize("raw,version", [('{"x":1,"x":2}', 1), ('{bad', 1),
++                                         (' {}', 1), ('{}', 999), ('{}', 1)])
++def test_A10_A11_latest_bad_or_unsupported_never_uses_older_portal(retained, raw, version):
++    path, _, add = retained
++    add(portal(), at="2026-10-16T00:00:00.000Z")
++    add(raw=raw, version=version)
++    hints = read(path)
++    assert hints["reported_model"] is None and hints["reported_os"] is None
++    assert hints["sources"][0]["state"] == ("unsupported" if version == 999 else "unavailable")
++
++
++def test_A08_A09_identity_retention_asof_and_total_cap(retained):
++    path, _, add = retained
++    add(portal(), site="1123456789abcdef01234567")
++    add(portal(), mac="02:00:00:00:00:02")
++    add(portal(), at="2026-09-30T23:59:59.999Z")
++    add(portal(), at=AS_OF)
++    assert read(path)["state"] == "no_evidence"
++    add(portal(), at=FIRST)
++    assert read(path)["state"] == "observed"
++    for number in range(257):
++        add(portal(model_family=f"Synthetic {number}"))
++    result = read(path)
++    assert result["reported_model"]["value"] == "Synthetic 256"
++    assert len(result["sources"]) == 5
++
++
++def test_A15_one_indexed_read_no_writes_and_hard_256(retained, monkeypatch):
++    from app.device_fingerprint import read_service
++    path, _, add = retained
++    for _ in range(257):
++        add(portal())
++    statements, connections = [], []
++    real_open = read_service.open_read_only
++
++    def traced(path):
++        connection = real_open(path)
++        connection.set_trace_callback(statements.append)
++        connections.append(connection)
++        return connection
++    monkeypatch.setattr(read_service, "open_read_only", traced)
++    before = path.read_bytes()
++    result = read(path)
++    assert result["state"] == "observed"
++    assert len(connections) == 1
++    selects = [sql for sql in statements if sql.startswith("SELECT")]
++    assert len(selects) == 1 and "LIMIT 256" in selects[0]
++    assert not any(sql.startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "BEGIN")) for sql in statements)
++    assert path.read_bytes() == before
++    with sqlite3.connect(path) as plan_db:
++        plan = plan_db.execute("EXPLAIN QUERY PLAN " + selects[0]).fetchall()
++    assert "idx_df_evidence_site_mac_time" in repr(plan)
++    assert "TEMP B-TREE" not in repr(plan)
++    with pytest.raises(sqlite3.ProgrammingError):
++        connections[0].execute("SELECT 1")
++
++
++def test_A12_deadline_is_checked_before_connection(retained, monkeypatch):
++    from app.device_fingerprint import read_service
++    path, _, _ = retained
++    monkeypatch.setattr(read_service, "open_read_only", lambda _: pytest.fail("must not open"))
++    reader = DeviceFingerprintReadService(str(path), retention_days=30)
++    with pytest.raises(AnalyticsQueryDeadlineExceeded):
++        reader.latest_observed_hints(SITE, MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF,
++                                     deadline=QueryDeadline.after(0))
++
++
++def test_A10_bad_hash_size_and_unsupported_independent_sources(retained):
++    from tests.device_fingerprint.test_network_schemas import tls, quic
++    path, _, add = retained
++    add(portal(), digest="a" * 64)
++    add(tls(), kind="tls_client")
++    add(quic(), kind="quic_client", version=999)
++    hints = read(path)
++    assert hints["state"] == "observed"
++    assert [group["state"] for group in hints["sources"]] == [
++        "unavailable", "not_observed_in_bounded_window", "not_observed_in_bounded_window", "observed", "unsupported"]
++    add(raw='{"oversized":"' + "a" * 65536 + '"}')
++    assert read(path)["sources"][0]["state"] == "unavailable"
++
++
++@pytest.mark.parametrize("tcp_version", [1, 2])
++def test_A04_A05_A06_A07_full_five_groups_exact_fields(retained, tcp_version):
++    from tests.device_fingerprint.test_network_schemas import tls, quic, tcp_v2
++    path, _, add = retained
++    dhcp = dict(message_type="discover", parameter_request_list=[1, 3, 6], option_order=[53, 55],
++                vendor_class="Synthetic", client_identifier_kind="opaque", maximum_message_size=None,
++                rapid_commit_requested=False, capport_requested=True, ipv6_only_preferred_requested=False,
++                hostname_present=True)
++    tcp = (dict(ip_version=4, observed_ttl=0, tcp_window=0, mss=0, window_scale=0,
++                sack_permitted=False, timestamps_present=False, tcp_option_order=[]) if tcp_version == 1
++           else tcp_v2(tcp_header_length_bytes=60, tcp_option_records=[dict(
++               record_type="nop", kind=1, declared_length=None, available_value_length=0,
++               structure_state="well_formed") for _ in range(40)]))
++    payloads = [portal(), dhcp, tcp, tls(), quic()]
++    kinds = ["portal_headers", "dhcp", "tcp_syn", "tls_client", "quic_client"]
++    for kind, payload in zip(kinds, payloads):
++        add(payload, kind=kind, version=tcp_version if kind == "tcp_syn" else 1, quality="degraded")
++    hints = read(path)
++    assert [group["source_kind"] for group in hints["sources"]] == kinds
++    for group, payload in zip(hints["sources"], payloads):
++        assert group["fields"] == payload
++        assert group["quality_state"] == "degraded"
++        assert group["observed_at_utc"] == "2026-10-17T10:00:00.000Z"
++    assert [group["origin_category"] for group in hints["sources"]] == [
++        "client_reported", "client_reported", "network_observed", "network_observed", "network_observed"]
++    assert len(canonical_json(hints).encode()) < 65536
++
++
++def test_A09_cap_excludes_257th_field_and_source(retained, monkeypatch):
++    from app.device_fingerprint import read_service
++    from tests.device_fingerprint.test_network_schemas import tls
++    path, _, add = retained
++    add(tls(), kind="tls_client", at="2026-10-16T00:00:00.000Z")
++    add(portal(), at="2026-10-16T01:00:00.000Z")
++    for _ in range(256):
++        add(portal(2, model_family=None, model_source=None), version=2)
++    calls = []
++    real_verify = read_service.verify_persisted_payload
++    def counted(*args):
++        calls.append(len(args[2].encode()))
++        return real_verify(*args)
++    monkeypatch.setattr(read_service, "verify_persisted_payload", counted)
++    hints = read(path)
++    assert len(calls) == 256 and sum(calls) <= 256 * 65536
++    assert hints["reported_model"] is None
++    assert hints["sources"][3]["state"] == "not_observed_in_bounded_window"
++
++
++def test_A08_retention_and_first_seen_lower_bound_is_inclusive(retained):
++    path, _, add = retained
++    add(portal(), at="2026-09-17T23:59:59.999Z")
++    reader = DeviceFingerprintReadService(str(path), retention_days=30)
++    kwargs = dict(site_first_seen_at="2026-01-01T00:00:00.000Z", as_of_utc=AS_OF,
++                  deadline=QueryDeadline.after(5))
++    assert reader.latest_observed_hints(SITE, MAC, **kwargs)["state"] == "no_evidence"
++    add(portal(), at="2026-09-18T00:00:00.000Z")
++    assert reader.latest_observed_hints(SITE, MAC, **kwargs)["reported_model"]["value"] == "Nokia G21"
++
++
++def test_A12_materialization_checks_deadline_and_closes_connection(retained, monkeypatch):
++    from app.device_fingerprint import read_service
++    path, _, add = retained
++    add(portal())
++    clock = [0.0]
++    deadline = QueryDeadline.after(2, monotonic=lambda: clock[0])
++    original = read_service.verify_persisted_payload
++    def expiry(*args):
++        verified = original(*args)
++        clock[0] = 3.0
++        return verified
++    monkeypatch.setattr(read_service, "verify_persisted_payload", expiry)
++    with pytest.raises(AnalyticsQueryDeadlineExceeded):
++        DeviceFingerprintReadService(str(path), retention_days=30).latest_observed_hints(
++            SITE, MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF, deadline=deadline)
++
++
++@pytest.mark.parametrize("version", [1, 2])
++def test_A03_portal_search_stops_at_corrupt_or_unsupported_candidate(retained, version):
++    path, _, add = retained
++    add(portal(), at="2026-10-15T00:00:00.000Z")
++    add(raw="{}", version=999 if version == 2 else 1, at="2026-10-16T00:00:00.000Z")
++    add(portal(2, model_family=None, model_source=None), version=2)
++    hints = read(path)
++    assert hints["sources"][0]["state"] == ("unsupported" if version == 2 else "unavailable")
++    assert hints["reported_model"] is hints["reported_os"] is None
++
++
++@pytest.mark.parametrize("changes", [{"site_id": "bad"}, {"observed_mac": "bad"},
++                                     {"site_first_seen_at": "bad"}, {"as_of_utc": "bad"}])
++def test_A08_invalid_identity_and_time_fail_before_sql(retained, monkeypatch, changes):
++    from app.device_fingerprint import read_service
++    from app.device_fingerprint.models import DeviceFingerprintValidationError
++    path, _, _ = retained
++    monkeypatch.setattr(read_service, "open_read_only", lambda _: pytest.fail("invalid boundary must not open DB"))
++    kwargs = dict(site_id=SITE, observed_mac=MAC, site_first_seen_at=FIRST, as_of_utc=AS_OF,
++                  deadline=QueryDeadline.after(5)) | changes
++    with pytest.raises(DeviceFingerprintValidationError):
++        DeviceFingerprintReadService(str(path), retention_days=30).latest_observed_hints(**kwargs)
++
++
++def test_A15_checkpointed_wal_read_must_not_create_new_sidecars(retained):
++    """Strict TASK no-DB/WAL-creation requirement; existing RO helper conflicts."""
++    path, db, _ = retained
++    assert db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
++    db.close()  # Normal shutdown checkpoints and removes both sidecars.
++    before_files = {item.name for item in path.parent.iterdir()}
++    before_bytes = path.read_bytes()
++    assert before_files == {path.name}
++    assert read(path)["state"] == "no_evidence"
++    assert path.read_bytes() == before_bytes
++    assert {item.name for item in path.parent.iterdir()} == before_files

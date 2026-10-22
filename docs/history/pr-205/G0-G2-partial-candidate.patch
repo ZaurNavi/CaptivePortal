@@ -1,0 +1,1580 @@
+diff --git a/app/network_metadata_projection/cli.py b/app/network_metadata_projection/cli.py
+index 2185fd2b167a94e55379e9a2f7641d3486a430f5..7fa4523d3901be79e65d8625af8a4e41883ef23f 100644
+--- a/app/network_metadata_projection/cli.py
++++ b/app/network_metadata_projection/cli.py
+@@ -17,7 +17,9 @@ from .telemetry import ProjectionTelemetry
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description="Independent NI-02B projection worker")
+     parser.add_argument("command", choices=("run",))
+-    parser.parse_args(argv)
++    parser.add_argument("--install-service-recognition-extension", action="store_true",
++                        help="Owner-authorized one-time extension install after acquiring the writer lock")
++    args = parser.parse_args(argv)
+     repo = None
+     try:
+         config = projection_config_from_env()
+@@ -27,7 +29,7 @@ def main(argv=None):
+         if Path(config.db_path).resolve() == Path(attribution_config.db_path).resolve():
+             raise ValueError
+         identity = capture_loaded_artifact_identity("network-metadata-projection.service")
+-        repo = ProjectionRepository(config)
++        repo = ProjectionRepository(config, install_service_recognition_extension=args.install_service_recognition_extension)
+         service = NetworkMetadataProjectionService(config, repo,
+             NetworkMetadataProjectionSourceReadService(config.source_db_path), NetworkAttributionReadService(attribution_config),
+             RegistryAdapter(config.registry_db_path), identity, telemetry=ProjectionTelemetry())
+diff --git a/app/network_metadata_projection/repository.py b/app/network_metadata_projection/repository.py
+index 5445de5a7f207b92c3b53ffde951cb9ae4d469c1..a97d96f109c00f404ae99003b912aaae19c8ae5e 100644
+--- a/app/network_metadata_projection/repository.py
++++ b/app/network_metadata_projection/repository.py
+@@ -13,11 +13,15 @@ from .models import (ALGORITHM, PROJECTION_TRANSACTION_HEADROOM_BYTES, Projectio
+                      ProjectionCapacity, ProjectionConflict, RUNTIME_STATES)
+ from .schema import TABLES, create_schema, validate_schema
+ from .validation import timestamp, semantic_digest
++from .service_extension import append_candidate, maintain_authoritative_change
+ 
+ 
+ class ProjectionRepository:
+     def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None,
+-                 monotonic=time.monotonic):
++                 monotonic=time.monotonic, install_service_recognition_extension=False):
++        if type(install_service_recognition_extension) is not bool:
++            raise ProjectionUnavailable()
++        self._install_service_recognition_extension = install_service_recognition_extension
+         self.config, self.clock, self.crash_point = config, clock, crash_point
+         self.connection = self._writer_fd = None
+         self._retention_authorized = False
+@@ -32,6 +36,7 @@ class ProjectionRepository:
+         # Process-local observed authority read state, never inferred from a
+         # successful NI-01 poll or restored optimistically after restart.
+         self.attribution_read_state = None
++        self.service_recognition_extension_present = False
+ 
+     def _count_success(self, **counts):
+         if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
+@@ -80,9 +85,13 @@ class ProjectionRepository:
+             if objects == 0 and self.connection.execute("PRAGMA user_version").fetchone()[0] == 0:
+                 with self.transaction():
+                     create_schema(self.connection, timestamp(self.clock()))
+-            validate_schema(self.connection, integrity=True)
++            self.service_recognition_extension_present = (
++                validate_schema(self.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1")
+             row = self.connection.execute("SELECT runtime_state,safe_reason FROM projection_runtime_state").fetchone()
+             self.live_state, self.live_reason = row
++            if self._install_service_recognition_extension:
++                from .service_extension import install_service_recognition_extension
++                install_service_recognition_extension(self)
+             return self
+         except (sqlite3.Error, OSError, ProjectionUnavailable):
+             self.close()
+@@ -232,6 +241,9 @@ class ProjectionRepository:
+                 previous_state=None if old is None else old["binding_state"], new_state=state, device_id=device_id,
+                 evaluated_at=now, registry_schema_version=1 if evaluation.state != "registry_unavailable" else None,
+                 registry_record_updated_at=evaluation.record_updated_at, safe_reason=evaluation.reason, projection_run_id=run_id))
++        if self.service_recognition_extension_present:
++            maintain_authoritative_change(self.connection, old, site=site, mac=mac, state=state,
++                                          device=device_id, evaluated_at=now)
+ 
+     def runtime(self, state, reason=None, *, observation=None, **times):
+         if state not in RUNTIME_STATES or not set(times) <= {"last_source_poll_at", "last_projection_commit_at", "last_registry_reconcile_at", "last_retention_at"}:
+@@ -299,6 +311,8 @@ class ProjectionRepository:
+                             raise ProjectionConflict("edge_semantic_conflict")
+                         continue
+                     self.insert("device_network_metadata_edges", edge)
++                    if self.service_recognition_extension_present:
++                        append_candidate(self.connection, edge, now)
+                     site, mac = edge["site_id"], edge["client_mac"]
+                     if self.binding(site, mac) is None:
+                         self._registry_binding(site, mac, evaluations[(site, mac)], run_id, now, edge_at=edge["event_at"])
+diff --git a/app/network_metadata_projection/schema.py b/app/network_metadata_projection/schema.py
+index 39b97e83e19c4174d28ef84cf66c734ec90719ad..05e5cf82e2193354786c82e52dc11745c6567357 100644
+--- a/app/network_metadata_projection/schema.py
++++ b/app/network_metadata_projection/schema.py
+@@ -1,5 +1,6 @@
+-"""Exact nine-table SQLite V1; no migrations or permissive schema repair."""
++"""Exact Core V1 with an optional, separately versioned Service extension."""
+ import sqlite3
++from functools import lru_cache
+ from .models import ALGORITHM, ATTRIBUTION_STATES, RUNTIME_STATES, ProjectionUnavailable
+ from .validation import timestamp
+ from app.network_metadata.validation import ni_timestamp
+@@ -84,22 +85,55 @@ def signature(connection):
+         "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
+ 
+ 
++@lru_cache(maxsize=1)
++def _expected_signatures():
++    from .service_extension import create_extension_objects
++    with sqlite3.connect(":memory:") as reference:
++        create_schema(reference, "2000-01-01T00:00:00.000000Z")
++        core = signature(reference)
++        create_extension_objects(reference)
++        extension = tuple(row for row in signature(reference) if row not in core)
++    return core, extension
++
++
++def validate_core_schema_v1(connection):
++    expected, _ = _expected_signatures()
++    names = {row[1] for row in expected}
++    actual = tuple(row for row in signature(connection) if row[1] in names)
++    rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
++    runtime = connection.execute("SELECT * FROM projection_runtime_state").fetchall()
++    if (actual != expected or connection.execute("PRAGMA user_version").fetchone()[0] != 1
++            or len(rows) != 1 or tuple(rows[0])[:4] != (1, 1, 1, ALGORITHM)
++            or len(runtime) != 1 or runtime[0][0] != 1
++            or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
++            or connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"):
++        raise ValueError
++    ni_timestamp(rows[0][4], canonical=True)
++
++
++def validate_service_recognition_extension_v1(connection):
++    from .service_extension import validate_extension_metadata
++    _, expected = _expected_signatures()
++    names = {row[1] for row in expected}
++    actual = tuple(row for row in signature(connection) if row[1] in names)
++    if not actual:
++        return False
++    if actual != expected:
++        raise ValueError
++    validate_extension_metadata(connection)
++    return True
++
++
+ def validate_schema(connection, *, integrity=False):
+     try:
+-        with sqlite3.connect(":memory:") as reference:
+-            create_schema(reference, "2000-01-01T00:00:00.000000Z")
+-            expected = signature(reference)
+-        rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
+-        runtime = connection.execute("SELECT * FROM projection_runtime_state").fetchall()
+-        if (connection.execute("PRAGMA user_version").fetchone()[0] != 1 or signature(connection) != expected
+-                or len(rows) != 1 or tuple(rows[0])[:4] != (1, 1, 1, ALGORITHM)
+-                or len(runtime) != 1 or runtime[0][0] != 1
+-                or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
+-                or connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"):
++        validate_core_schema_v1(connection)
++        present = validate_service_recognition_extension_v1(connection)
++        core, extension = _expected_signatures()
++        if signature(connection) != tuple(sorted(core + (extension if present else ()))):
+             raise ValueError
+-        ni_timestamp(rows[0][4], canonical=True)
+         if integrity and (connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
+                           or connection.execute("PRAGMA foreign_key_check").fetchone() is not None):
+             raise ValueError
++        return "CORE_PLUS_EXTENSION_V1" if present else "CORE_ONLY"
+     except Exception:
+         raise ProjectionUnavailable() from None
+diff --git a/app/network_metadata_projection/service_delivery_read_service.py b/app/network_metadata_projection/service_delivery_read_service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f3bf616f3133973a1f2cde18fb28b17e4fbd7ff
+--- /dev/null
++++ b/app/network_metadata_projection/service_delivery_read_service.py
+@@ -0,0 +1,319 @@
++"""Bounded protected NI-04 delivery/identity interfaces; upstream read-only."""
++from dataclasses import dataclass
++from app.device_fingerprint.validation import validate_site_id
++from app.network_attribution.validation import canonical_mac
++from app.network_metadata.validation import canonical_uuid, digest, integer, ip, ni_timestamp, text
++from app.network_metadata.canonical import observation_uuid, source_event_identity
++from .models import ProjectionUnavailable, ProjectionValidationError
++from .read_service import DeviceNetworkMetadataReadService
++from .recognition_read_service import RecognitionProjectionEdgeFactV1
++from .validation import edge_id, semantic_digest, read_window
++from .effective_runtime_state import effective_runtime_state
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class RecognitionIdentityV1:
++    site_id: str
++    client_mac: str
++    device_id: str | None
++    binding_state: str
++    registry_binding_change_seq: int | None
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class RecognitionFeedEntryV1:
++    feed_seq: int
++    committed_at_utc: str
++    fact: RecognitionProjectionEdgeFactV1
++    identity: RecognitionIdentityV1
++
++
++@dataclass(frozen=True, slots=True)
++class RecognitionFeedBoundsV1:
++    min_retained_feed_seq: int | None
++    max_feed_seq: int | None
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class AuthoritativeBindingChangeV1:
++    change_seq: int
++    site_id: str
++    client_mac: str
++    device_id: str
++    evaluated_at_utc: str
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class RecognitionDeviceCoverageV1:
++    projection_runtime_state: str
++    projection_safe_reason: str | None
++    identity_binding_state: str
++    bound_device_id: str | None
++    device_linked_pending_count: int
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class RecognitionCandidateV1:
++    fact: RecognitionProjectionEdgeFactV1
++    identity: RecognitionIdentityV1
++
++
++_IDENTITY_JOIN = (
++    " LEFT JOIN projection_site_mac_bindings b ON b.site_id=e.site_id AND b.client_mac=e.client_mac"
++    " LEFT JOIN projection_registry_identities r ON r.device_id=b.device_id"
++    " LEFT JOIN projection_registry_binding_change_index c ON c.site_id=b.site_id AND c.client_mac=b.client_mac")
++_IDENTITY_COLUMNS = (
++    "b.binding_state AS joined_binding_state,b.device_id AS joined_device_id,"
++    "c.change_seq AS joined_change_seq,c.device_id AS change_device_id,r.client_mac AS registry_mac")
++
++
++class ServiceRecognitionDeliveryReadService(DeviceNetworkMetadataReadService):
++    @staticmethod
++    def _cursor(after, limit, maximum):
++        try:
++            integer(after)
++            integer(limit, 1, maximum)
++        except Exception:
++            raise ProjectionValidationError() from None
++
++    @staticmethod
++    def _require_extension(connection):
++        if connection.execute("SELECT 1 FROM projection_service_recognition_extension_meta WHERE singleton_id=1").fetchone() is None:
++            raise ProjectionUnavailable()
++
++    @staticmethod
++    def _identity(site, mac, row):
++        validate_site_id(site)
++        if canonical_mac(mac) != mac:
++            raise ValueError
++        state, device, change = row["joined_binding_state"], row["joined_device_id"], row["joined_change_seq"]
++        if state not in {"authoritative", "not_yet_registry_resolved", "registry_unavailable"}:
++            raise ValueError
++        if state == "authoritative":
++            canonical_uuid(device)
++            integer(change, 1)
++            if row["registry_mac"] != mac or row["change_device_id"] != device:
++                raise ValueError
++        elif device is not None or change is not None:
++            raise ValueError
++        return RecognitionIdentityV1(site, mac, device, state, change)
++
++    @classmethod
++    def _candidate(cls, row):
++        metadata = {"delivery_seq", "delivery_time", "joined_binding_state", "joined_device_id",
++                    "joined_change_seq", "change_device_id", "registry_mac"}
++        edge = {key: value for key, value in dict(row).items() if key not in metadata}
++        if (edge["device_endpoint_role"] != "src" or edge["direction"] != "outbound"
++                or edge["peer_scope"] != "external" or edge["source_event_family"] not in {"dns", "tls", "quic"}
++                or edge["attribution_state"] != "resolved" or edge["attribution_source"] != "trusted_dhcp_v4"
++                or edge["network_scope_state"] != "within_intended_scope"
++                or edge["projection_contract_version"] != 1):
++            raise ValueError
++        canonical_uuid(edge["source_generation_id"], 4)
++        canonical_uuid(edge["source_observation_ref"], 5)
++        integer(edge["record_start_byte_offset"])
++        event_identity = source_event_identity(edge["source_generation_id"], edge["record_start_byte_offset"])
++        if (edge["source_event_identity"] != event_identity
++                or edge["source_observation_ref"] != observation_uuid(edge["source_event_family"], event_identity)
++                or edge["edge_id"] != edge_id(edge["source_observation_ref"], "src")
++                or edge["edge_semantic_digest"] != semantic_digest(edge)):
++            raise ValueError
++        for key in ("event_at", "source_ingested_at", "projected_at"):
++            ni_timestamp(edge[key], canonical=True)
++        canonical_uuid(edge["attribution_binding_id"], 4)
++        instant = ni_timestamp(edge["event_at"], canonical=True)
++        if not ni_timestamp(edge["attribution_valid_from"]) <= instant < ni_timestamp(edge["attribution_valid_until"]):
++            raise ValueError
++        digest(edge["capture_scope_binding_digest"])
++        for key in ("capture_source_id", "network_scope_id"):
++            text(edge[key], 128, controls=True)
++        for prefix in ("device", "peer"):
++            address, port = edge[prefix + "_ip"], edge[prefix + "_port"]
++            if address is not None and ip(address) != address:
++                raise ValueError
++            if port is not None:
++                integer(port, 0, 65535)
++        if edge["device_ip"] is None or edge["transport_protocol"] not in {None, "TCP", "UDP"}:
++            raise ValueError
++        identity = cls._identity(edge["site_id"], edge["client_mac"], row)
++        fact = RecognitionProjectionEdgeFactV1(**{key: edge[key] for key in RecognitionProjectionEdgeFactV1.__dataclass_fields__})
++        return fact, identity
++
++    def recognition_feed_bounds(self, *, deadline):
++        with self._snapshot(deadline=deadline) as connection:
++            self._require_extension(connection)
++            first = connection.execute("SELECT feed_seq FROM projection_service_recognition_feed ORDER BY feed_seq LIMIT 1").fetchone()
++            sequence = connection.execute("SELECT seq FROM sqlite_sequence WHERE name='projection_service_recognition_feed'").fetchone()
++            floor, high = first[0] if first else None, sequence[0] if sequence else None
++            try:
++                for value in (floor, high):
++                    if value is not None:
++                        integer(value, 1)
++                if floor is not None and (high is None or floor > high):
++                    raise ValueError
++            except Exception:
++                raise ProjectionUnavailable() from None
++            # Lifetime committed highwater remains observable even after all
++            # retained feed rows cascade away. Never reset a consumer to zero.
++            return RecognitionFeedBoundsV1(floor, high)
++
++    def read_service_recognition_feed(self, after_feed_seq, *, limit=256, deadline):
++        self._cursor(after_feed_seq, limit, 256)
++        with self._snapshot(deadline=deadline) as connection:
++            self._require_extension(connection)
++            rows = connection.execute(
++                "SELECT e.*,f.feed_seq AS delivery_seq,f.committed_at_utc AS delivery_time," + _IDENTITY_COLUMNS +
++                " FROM projection_service_recognition_feed f LEFT JOIN device_network_metadata_edges e ON e.edge_id=f.edge_id" +
++                _IDENTITY_JOIN + " WHERE f.feed_seq>? ORDER BY f.feed_seq LIMIT ?", (after_feed_seq, limit)).fetchall()
++            try:
++                values = []
++                for row in rows:
++                    deadline.require_remaining()
++                    integer(row["delivery_seq"], after_feed_seq + 1)
++                    ni_timestamp(row["delivery_time"], canonical=True)
++                    fact, identity = self._candidate(row)
++                    values.append(RecognitionFeedEntryV1(row["delivery_seq"], row["delivery_time"], fact, identity))
++                return tuple(values)
++            except Exception:
++                raise ProjectionUnavailable() from None
++
++    def read_authoritative_binding_changes(self, after_change_seq, *, limit=128, deadline):
++        self._cursor(after_change_seq, limit, 128)
++        with self._snapshot(deadline=deadline) as connection:
++            self._require_extension(connection)
++            rows = connection.execute(
++                "SELECT c.*,b.binding_state AS current_state,b.device_id AS current_device_id,"
++                "r.client_mac AS registry_mac FROM projection_registry_binding_change_index c "
++                "LEFT JOIN projection_site_mac_bindings b ON b.site_id=c.site_id AND b.client_mac=c.client_mac "
++                "LEFT JOIN projection_registry_identities r ON r.device_id=b.device_id "
++                "WHERE c.change_seq>? ORDER BY c.change_seq LIMIT ?", (after_change_seq, limit)).fetchall()
++            try:
++                values = []
++                for row in rows:
++                    deadline.require_remaining()
++                    integer(row["change_seq"], after_change_seq + 1)
++                    validate_site_id(row["site_id"])
++                    canonical_uuid(row["device_id"])
++                    if (canonical_mac(row["client_mac"]) != row["client_mac"]
++                            or row["binding_state"] != "authoritative" or row["current_state"] != "authoritative"
++                            or row["current_device_id"] != row["device_id"] or row["registry_mac"] != row["client_mac"]):
++                        raise ValueError
++                    ni_timestamp(row["evaluated_at_utc"], canonical=True)
++                    values.append(AuthoritativeBindingChangeV1(row["change_seq"], row["site_id"], row["client_mac"],
++                                                              row["device_id"], row["evaluated_at_utc"]))
++                return tuple(values)
++            except Exception:
++                raise ProjectionUnavailable() from None
++
++    @staticmethod
++    def _requested_identity(site_id, client_mac, device_id=None):
++        try:
++            validate_site_id(site_id)
++            if canonical_mac(client_mac) != client_mac:
++                raise ValueError
++            if device_id is not None:
++                canonical_uuid(device_id)
++        except Exception:
++            raise ProjectionValidationError() from None
++
++    @classmethod
++    def _current_identity(cls, connection, site, mac):
++        row = connection.execute(
++            "SELECT b.binding_state AS joined_binding_state,b.device_id AS joined_device_id,"
++            "c.change_seq AS joined_change_seq,c.device_id AS change_device_id,r.client_mac AS registry_mac "
++            "FROM projection_site_mac_bindings b "
++            "LEFT JOIN projection_registry_binding_change_index c ON c.site_id=b.site_id AND c.client_mac=b.client_mac "
++            "LEFT JOIN projection_registry_identities r ON r.device_id=b.device_id "
++            "WHERE b.site_id=? AND b.client_mac=?", (site, mac)).fetchone()
++        if row is None:
++            return RecognitionIdentityV1(site, mac, None, "absent", None)
++        try:
++            return cls._identity(site, mac, row)
++        except Exception:
++            raise ProjectionUnavailable() from None
++
++    def read_current_identity(self, site_id, client_mac, *, deadline):
++        self._requested_identity(site_id, client_mac)
++        with self._snapshot(deadline=deadline) as connection:
++            self._require_extension(connection)
++            return self._current_identity(connection, site_id, client_mac)
++
++    def read_recognition_device_coverage(self, site_id, device_id, client_mac, from_utc, to_utc, *, deadline):
++        self._requested_identity(site_id, client_mac, device_id)
++        read_window(site_id, from_utc, to_utc, 1, None)
++        if (ni_timestamp(to_utc, canonical=True) - ni_timestamp(from_utc, canonical=True)).total_seconds() != 86400:
++            raise ProjectionValidationError()
++        with self._snapshot(deadline=deadline) as connection:
++            self._require_extension(connection)
++            identity = self._current_identity(connection, site_id, client_mac)
++            if identity.binding_state == "authoritative" and identity.device_id != device_id:
++                raise ProjectionUnavailable()
++            runtime = connection.execute(
++                "SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
++            if runtime is None:
++                raise ProjectionUnavailable()
++            state, reason = effective_runtime_state(runtime, enabled=self.idle_write_reduction_enabled,
++                                                    evaluated_at_utc=self.clock())
++            pending = 0
++            if identity.binding_state == "authoritative":
++                pending = connection.execute(
++                    "SELECT count(DISTINCT p.observation_id) "
++                    "FROM device_network_metadata_edges e INDEXED BY idx_projection_mac_event "
++                    "JOIN projection_pending_attribution p ON p.observation_id=e.source_observation_ref AND p.site_id=e.site_id "
++                    "WHERE e.site_id=? AND e.client_mac=? AND e.event_at>=? AND e.event_at<? "
++                    "AND p.event_at>=? AND p.event_at<?",
++                    (site_id, client_mac, from_utc, to_utc, from_utc, to_utc)).fetchone()[0]
++            return RecognitionDeviceCoverageV1(state, reason, identity.binding_state, identity.device_id, pending)
++
++    def read_candidate_sites(self, after_site_id=None, *, limit=128, deadline):
++        self._cursor(0, limit, 128)
++        if after_site_id is not None:
++            try:
++                validate_site_id(after_site_id)
++            except Exception:
++                raise ProjectionValidationError() from None
++        with self._snapshot(deadline=deadline) as connection:
++            self._require_extension(connection)
++            rows = connection.execute(
++                "SELECT DISTINCT site_id FROM projection_site_mac_bindings WHERE site_id>? ORDER BY site_id LIMIT ?",
++                (after_site_id or "", limit)).fetchall()
++            try:
++                for row in rows:
++                    validate_site_id(row[0])
++            except Exception:
++                raise ProjectionUnavailable() from None
++            return tuple(row[0] for row in rows)
++
++    def read_candidate_page(self, site_id, from_utc, to_utc, *, client_mac=None, cursor=None, limit=128, deadline):
++        read_window(site_id, from_utc, to_utc, limit, cursor)
++        self._cursor(0, limit, 128)
++        if (ni_timestamp(to_utc, canonical=True) - ni_timestamp(from_utc, canonical=True)).total_seconds() > 86400:
++            raise ProjectionValidationError()
++        if client_mac is not None:
++            self._requested_identity(site_id, client_mac)
++        index = "idx_projection_mac_event" if client_mac is not None else "idx_projection_site_event"
++        predicates, params = ["e.site_id=?"], [site_id]
++        if client_mac is not None:
++            predicates.append("e.client_mac=?")
++            params.append(client_mac)
++        predicates.extend(["e.event_at>=?", "e.event_at<?", "e.device_endpoint_role='src'",
++                           "e.direction='outbound'", "e.peer_scope='external'"])
++        params.extend((from_utc, to_utc))
++        if cursor is not None:
++            predicates.append("(e.event_at,e.edge_id)>(?,?)")
++            params.extend(cursor)
++        with self._snapshot(deadline=deadline) as connection:
++            self._require_extension(connection)
++            rows = connection.execute(
++                "SELECT e.*," + _IDENTITY_COLUMNS + " FROM device_network_metadata_edges e INDEXED BY " + index +
++                _IDENTITY_JOIN + " WHERE " + " AND ".join(predicates) +
++                " ORDER BY e.event_at,e.edge_id LIMIT ?", (*params, limit)).fetchall()
++            try:
++                result = []
++                for row in rows:
++                    deadline.require_remaining()
++                    fact, identity = self._candidate(row)
++                    result.append(RecognitionCandidateV1(fact, identity))
++                return tuple(result)
++            except Exception:
++                raise ProjectionUnavailable() from None
+diff --git a/app/network_metadata_projection/service_extension.py b/app/network_metadata_projection/service_extension.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b245186b04d1acc546f37b5666e47de622c631c0
+--- /dev/null
++++ b/app/network_metadata_projection/service_extension.py
+@@ -0,0 +1,84 @@
++"""Closed optional Service Recognition Extension V1; Core V1 stays unchanged."""
++from app.network_metadata.validation import ni_timestamp
++from .models import ProjectionUnavailable
++
++TABLES = {
++    "projection_service_recognition_extension_meta":
++        "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), "
++        "extension_contract_version INTEGER NOT NULL CHECK(extension_contract_version=1), "
++        "installed_at_utc TEXT NOT NULL",
++    "projection_service_recognition_feed":
++        "feed_seq INTEGER PRIMARY KEY AUTOINCREMENT, edge_id TEXT NOT NULL UNIQUE, "
++        "committed_at_utc TEXT NOT NULL, FOREIGN KEY(edge_id) "
++        "REFERENCES device_network_metadata_edges(edge_id) ON DELETE CASCADE",
++    "projection_registry_binding_change_index":
++        "change_seq INTEGER PRIMARY KEY AUTOINCREMENT, site_id TEXT NOT NULL, client_mac TEXT NOT NULL, "
++        "binding_state TEXT NOT NULL CHECK(binding_state='authoritative'), device_id TEXT NOT NULL, "
++        "evaluated_at_utc TEXT NOT NULL, UNIQUE(site_id,client_mac), "
++        "FOREIGN KEY(site_id,client_mac) REFERENCES projection_site_mac_bindings(site_id,client_mac) ON DELETE CASCADE",
++}
++
++
++def create_extension_objects(connection):
++    """Internal DDL primitive; installation owner must hold the writer lock."""
++    for name, ddl in TABLES.items():
++        connection.execute(f"CREATE TABLE {name} ({ddl})")
++
++
++def validate_extension_metadata(connection):
++    rows = connection.execute("SELECT * FROM projection_service_recognition_extension_meta").fetchall()
++    if len(rows) != 1 or tuple(rows[0])[:2] != (1, 1):
++        raise ProjectionUnavailable()
++    ni_timestamp(rows[0][2], canonical=True)
++
++
++def append_candidate(connection, edge, committed_at):
++    if (edge["device_endpoint_role"] == "src" and edge["direction"] == "outbound"
++            and edge["peer_scope"] == "external" and edge["source_event_family"] in {"dns", "tls", "quic"}):
++        connection.execute(
++            "INSERT INTO projection_service_recognition_feed(edge_id,committed_at_utc) VALUES(?,?)",
++            (edge["edge_id"], committed_at))
++
++
++def maintain_authoritative_change(connection, old, *, site, mac, state, device, evaluated_at):
++    if state != "authoritative":
++        connection.execute(
++            "DELETE FROM projection_registry_binding_change_index WHERE site_id=? AND client_mac=?", (site, mac))
++    elif old is None or old["binding_state"] != "authoritative" or old["device_id"] != device:
++        connection.execute(
++            "DELETE FROM projection_registry_binding_change_index WHERE site_id=? AND client_mac=?", (site, mac))
++        connection.execute(
++            "INSERT INTO projection_registry_binding_change_index"
++            "(site_id,client_mac,binding_state,device_id,evaluated_at_utc) VALUES(?,?,'authoritative',?,?)",
++            (site, mac, device, evaluated_at))
++
++
++def install_service_recognition_extension(repository):
++    """Explicit one-time install by the already locked NI-02B writer only."""
++    from .schema import validate_schema
++    from .validation import timestamp
++    connection = repository.connection
++    if connection is None or repository._writer_fd is None or connection.in_transaction:
++        raise ProjectionUnavailable()
++    if validate_schema(connection, integrity=True) == "CORE_PLUS_EXTENSION_V1":
++        repository.service_recognition_extension_present = True
++        return False
++    with repository.transaction():
++        for name, ddl in TABLES.items():
++            connection.execute(f"CREATE TABLE {name} ({ddl})")
++            repository.crash_point("extension_created_" + name)
++        connection.execute(
++            "INSERT INTO projection_registry_binding_change_index"
++            "(site_id,client_mac,binding_state,device_id,evaluated_at_utc) "
++            "SELECT site_id,client_mac,binding_state,device_id,last_evaluated_at "
++            "FROM projection_site_mac_bindings WHERE binding_state='authoritative' "
++            "ORDER BY site_id,client_mac")
++        repository.crash_point("extension_seeded_bindings")
++        connection.execute("INSERT INTO projection_service_recognition_extension_meta VALUES(1,1,?)",
++                           (timestamp(repository.clock()),))
++        repository.crash_point("extension_inserted_metadata")
++        if validate_schema(connection, integrity=True) != "CORE_PLUS_EXTENSION_V1":
++            raise ProjectionUnavailable()
++        repository.crash_point("extension_validated")
++    repository.service_recognition_extension_present = True
++    return True
+diff --git a/app/network_service_recognition/binding_replay.py b/app/network_service_recognition/binding_replay.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..34b09f2bd7d319cfa7cb9959e6a17cfb8b26551f
+--- /dev/null
++++ b/app/network_service_recognition/binding_replay.py
+@@ -0,0 +1,83 @@
++"""B1 consumer contract: deterministic jobs + cursor in one owned transaction."""
++from datetime import timedelta
++from hashlib import sha256
++from app.network_metadata.validation import canonical_uuid, integer, ni_timestamp, ni_format_utc
++from app.network_attribution.validation import canonical_mac
++from app.device_fingerprint.validation import validate_site_id
++from .canonical import canonical_json
++
++
++class BindingReplayConflict(RuntimeError):
++    def __init__(self):
++        super().__init__("binding_replay_lineage_conflict")
++
++
++def replay_identity(generation_id, change):
++    canonical_uuid(generation_id)
++    integer(change.change_seq, 1)
++    validate_site_id(change.site_id)
++    canonical_uuid(change.device_id)
++    if canonical_mac(change.client_mac) != change.client_mac:
++        raise BindingReplayConflict()
++    frozen = dict(generation_id=generation_id, binding_change_seq=change.change_seq,
++                  site_id=change.site_id, client_mac=change.client_mac, device_id=change.device_id)
++    return sha256(canonical_json(frozen)).hexdigest(), frozen
++
++
++def enqueue_binding_changes(repository, generation_id, after_change_seq, changes, evaluated_at_utc):
++    """The repository supplies its capacity-checked single-writer transaction."""
++    canonical_uuid(generation_id)
++    integer(after_change_seq)
++    at = ni_timestamp(evaluated_at_utc, canonical=True)
++    if type(changes) is not tuple or len(changes) > 128:
++        raise BindingReplayConflict()
++    if not changes:
++        return False
++    from_utc, to_utc = ni_format_utc(at - timedelta(days=1)), ni_format_utc(at)
++    jobs = [replay_identity(generation_id, change) for change in changes]
++    sequences = [frozen["binding_change_seq"] for _, frozen in jobs]
++    if sequences != sorted(set(sequences)) or sequences[0] <= after_change_seq:
++        raise BindingReplayConflict()
++    with repository.transaction():
++        connection = repository.connection
++        checkpoint = connection.execute(
++            "SELECT last_binding_change_seq FROM service_materialization_checkpoints WHERE generation_id=?",
++            (generation_id,)).fetchone()
++        if checkpoint is None or checkpoint[0] != after_change_seq:
++            raise BindingReplayConflict()
++        for job_id, frozen in jobs:
++            row = connection.execute(
++                "SELECT job_id,generation_id,binding_change_seq,site_id,client_mac,device_id "
++                "FROM service_binding_replay_jobs WHERE job_id=? OR (generation_id=? AND binding_change_seq=?)",
++                (job_id, generation_id, frozen["binding_change_seq"])).fetchone()
++            if row is not None:
++                if tuple(row) != (job_id, *frozen.values()):
++                    raise BindingReplayConflict()
++            else:
++                connection.execute(
++                    "INSERT INTO service_binding_replay_jobs"
++                    "(job_id,generation_id,binding_change_seq,site_id,client_mac,device_id,"
++                    "from_utc,to_utc,cursor_event_at,cursor_edge_id,state) "
++                    "VALUES(?,?,?,?,?,?,?,?,NULL,NULL,'pending')",
++                    (job_id, *frozen.values(), from_utc, to_utc))
++            repository.crash_point("binding_job_enqueued")
++        connection.execute(
++            "UPDATE service_materialization_checkpoints SET last_binding_change_seq=?,updated_at_utc=? "
++            "WHERE generation_id=? AND last_binding_change_seq=?",
++            (sequences[-1], evaluated_at_utc, generation_id, after_change_seq))
++    return True
++
++
++def read_targeted_replay_page(reader, job, *, deadline):
++    """Replay can read only the exact Site+MAC persisted in its durable job."""
++    validate_site_id(job["site_id"])
++    canonical_uuid(job["device_id"])
++    if canonical_mac(job["client_mac"]) != job["client_mac"]:
++        raise BindingReplayConflict()
++    cursor = None
++    if job["cursor_event_at"] is not None or job["cursor_edge_id"] is not None:
++        if job["cursor_event_at"] is None or job["cursor_edge_id"] is None:
++            raise BindingReplayConflict()
++        cursor = (job["cursor_event_at"], job["cursor_edge_id"])
++    return reader.read_candidate_page(job["site_id"], job["from_utc"], job["to_utc"],
++        client_mac=job["client_mac"], cursor=cursor, limit=128, deadline=deadline)
+diff --git a/deploy/network-metadata-projection/network-metadata-projection.service b/deploy/network-metadata-projection/network-metadata-projection.service
+index c63467bedbdcbdcf3ef9b3f8ba26cc41f91fe67c..c217bc3ddb554d5cf8f2b4a3f40dc6c2ee7ccbd3 100644
+--- a/deploy/network-metadata-projection/network-metadata-projection.service
++++ b/deploy/network-metadata-projection/network-metadata-projection.service
+@@ -14,6 +14,7 @@ EnvironmentFile=-/etc/captive-portal/network-metadata-projection.env
+ ExecStart=/usr/bin/python3 -m app.network_metadata_projection.cli run
+ Restart=on-failure
+ RestartSec=30
++TimeoutStartSec=180
+ TimeoutStopSec=20
+ NoNewPrivileges=yes
+ PrivateTmp=yes
+diff --git a/docs/network-service-materialization.md b/docs/network-service-materialization.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..3494a579b05b30635e1ca713bfc791267374f585
+--- /dev/null
++++ b/docs/network-service-materialization.md
+@@ -0,0 +1,79 @@
++# NI-04 Background Materialized Service Intelligence
++
++Authority: Architecture Contract v1 + v1.1 Addendum and Implementation TASK v1.
++Production rollout, migration, mode changes, merge and deployment require separate Owner authorization.
++NI-05 and NI-06 remain HOLD.
++
++## Baseline and verification ownership
++
++Implementation baseline: b1442efc434716d35e21b9e3124c3b9cd2222fbe.
++Baseline tree: 1ea6a2d452a5c8147d2a9cdce6c5dcecd9900575.
++Implementation uses a dedicated native Git worktree and feature branch.
++No other worktree is modified.
++
++G0 code inventory identifies these projection DB consumers:
++
++- network-metadata-projection single writer: ProjectionRepository and CLI.
++- CaptivePortal/Admin NI-02B read boundary: DeviceNetworkMetadataReadService.
++- NI-03 Protocol Intelligence through that read boundary.
++- NI-04 legacy V2 through DeviceNetworkMetadataRecognitionReadService.
++
++All share app/network_metadata_projection/schema.py validation.
++Every declared consumer must run an accepted bridge-compatible binary before extension installation.
++Unknown external consumers require an operator inventory and HOLD before production migration.
++
++Coder runs only targeted unit/integration tests, architectural acceptance cases,
++directly affected regressions and scoped laboratory load checks.
++Full Project/Central/entire-repository regression gates are performed by Tech Lead after handoff.
++Their pending status does not block development or the targeted-test PR handoff.
++
++## G1 compatibility bridge
++
++The validator accepts exactly CORE_ONLY or CORE_PLUS_EXTENSION_V1.
++Core table/index/trigger DDL, metadata and user_version=1 stay unchanged.
++An unknown application object, changed Core object, incomplete extension or missing
++extension metadata fails closed. Only SQLite-owned sqlite_% objects are excluded.
++
++The bridge does not install an extension automatically.
++If the complete extension is present, every newly committed eligible src/outbound/external
++DNS/TLS/QUIC edge produces exactly one feed row in its existing writer transaction.
++Authoritative Registry establishment updates the change index in that same transaction;
++periodic revalidation and safe-reason-only changes allocate no sequence.
++Existing Core monotonic identity behavior is preserved.
++
++Extension maintenance is independent of NI-04 publication mode.
++An installed extension must continue receiving feed/index upkeep while publication is off.
++The existing b1442efc baseline is NOT a post-migration rollback target.
++The G1 bridge commit is a proposed rollback floor until independently accepted by Tech Lead.
++NI04_MAT_COMPAT_BASE_SHA must be recorded from that accepted commit before production migration.
++
++Proposed compatibility bridge commit: 36e2b462a39533c32954215e40d9097167591237.
++Its exact tree is 2541384db1c6a0c4a8b307c54fc1c966ed6c4152.
++This source identity is a candidate for Tech Lead acceptance; it is not an authorization to deploy.
++
++G1 Coder targeted verification: 329 PASS / 0 FAIL / 0 SKIP.
++Command: python -m pytest -q -rs tests/network_metadata_projection
++tests/network_protocol_intelligence tests/network_service_recognition/test_protected_readers.py.
++Environment: native Ubuntu 22.04 Git worktree, qualified Python 3.10.12 Lab virtualenv.
++Changed-Python compileall and git diff --check: PASS.
++The 21 new bridge cases include atomic edge/feed/checkpoint crash behavior,
++legacy read-consumer compatibility, unchanged Core DDL, closed object rejection,
++off-mode upkeep, idempotency, retention cascade and old-baseline incompatibility.
++
++## Release safety boundary
++
++Before any production operation, an operator must record current source/DB identities,
++obtain a verified recoverable backup/snapshot, and confirm no NI-04 backfill is running.
++Roll out the accepted bridge with publication off and installer disabled.
++Restart and verify projection readers first, then the bridge writer, against Core-only DB.
++Only after every declared consumer reports the bridge identity may the Owner authorize
++one-time extension installation by the locked NI-02B writer.
++
++The operator must confirm TimeoutStartSec >=180s and adequate disk-I/O startup budget.
++Restart NI-02B alone for installation; no worker, shadow comparison or backfill runs concurrently.
++Complete schema validation, quick_check and resumed Core checkpoint progress are mandatory.
++Only then may a separately authorized shadow-to-serve sequence begin.
++
++After migration, rollback uses the accepted bridge or a later extension-aware release.
++Never restore b1442efc code against the migrated DB, drop the extension, edit sqlite_schema
++or sqlite_sequence, reset source checkpoints or purge evidence to satisfy an old validator.
+diff --git a/scripts/ni04_materialization_preflight.py b/scripts/ni04_materialization_preflight.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fd7a2409106969a2440d41c5e1c99ffca2892447
+--- /dev/null
++++ b/scripts/ni04_materialization_preflight.py
+@@ -0,0 +1,46 @@
++"""Read-only operator evidence check; never authorizes or performs migration."""
++import argparse
++import json
++import re
++from pathlib import Path
++
++
++def validate_preflight(value):
++    keys = {"schema_version", "accepted_compatibility_bridge_sha", "declared_consumers",
++            "consumer_commit_shas", "backup_verified", "backfill_running", "timeout_start_seconds"}
++    if type(value) is not dict or set(value) != keys or type(value["schema_version"]) is not int or value["schema_version"] != 1:
++        raise ValueError("invalid_preflight")
++    bridge = value["accepted_compatibility_bridge_sha"]
++    if type(bridge) is not str or re.fullmatch("[0-9a-f]{40}", bridge) is None:
++        raise ValueError("invalid_preflight")
++    if bridge == "b1442efc434716d35e21b9e3124c3b9cd2222fbe":
++        raise ValueError("old_binary_not_rollback_compatible")
++    consumers, reports = value["declared_consumers"], value["consumer_commit_shas"]
++    if (type(consumers) is not list or not consumers or len(consumers) > 128
++            or any(type(item) is not str or re.fullmatch("[a-z][a-z0-9_]{0,63}", item) is None for item in consumers)
++            or len(set(consumers)) != len(consumers)
++            or not {"captive_portal_admin", "network_metadata_projection"} <= set(consumers)
++            or type(reports) is not dict or set(reports) != set(consumers)
++            or any(type(sha) is not str or sha != bridge for sha in reports.values())):
++        raise ValueError("consumer_bridge_rollout_incomplete")
++    if (value["backup_verified"] is not True or value["backfill_running"] is not False
++            or type(value["timeout_start_seconds"]) is not int or not 180 <= value["timeout_start_seconds"] <= 86400):
++        raise ValueError("migration_operational_preconditions_incomplete")
++    return True
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description="Check operator-supplied NI-04 migration preconditions; no DB access")
++    parser.add_argument("evidence", type=Path)
++    args = parser.parse_args(argv)
++    try:
++        validate_preflight(json.loads(args.evidence.read_text(encoding="utf-8")))
++    except Exception:
++        print("NI04_MIGRATION_PREFLIGHT=HOLD")
++        return 1
++    print("NI04_MIGRATION_PREFLIGHT=INPUTS_VALIDATED / OWNER_AUTHORIZATION_STILL_REQUIRED")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/network_metadata_projection/service_delivery_load.py b/tests/network_metadata_projection/service_delivery_load.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1fc3bada851af25b67023c3941e206a586ae416
+--- /dev/null
++++ b/tests/network_metadata_projection/service_delivery_load.py
+@@ -0,0 +1,127 @@
++"""Scoped synthetic G2 load driver; never opens deployment paths or providers."""
++import argparse
++import hashlib
++import json
++from pathlib import Path
++import platform
++import sqlite3
++import statistics
++import subprocess
++import sys
++import tempfile
++import time
++
++
++def percentile(values, fraction):
++    ordered = sorted(values)
++    return ordered[min(len(ordered) - 1, int(len(ordered) * fraction))]
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--repository", type=Path, required=True)
++    parser.add_argument("--extension", action="store_true")
++    parser.add_argument("--batches", type=int, default=60)
++    parser.add_argument("--lab-temp", type=Path, required=True)
++    args = parser.parse_args(argv)
++    root = args.repository.resolve()
++    if not (root / ".git").exists() or not 20 <= args.batches <= 200 or not args.lab_temp.is_dir():
++        raise ValueError("invalid_lab_configuration")
++    sys.path.insert(0, str(root))
++    from tests.network_metadata_projection.support import (
++        source_record, Clock, Source, Attribution, Registry, IDENTITY, MAC, OTHER_MAC, GENERATION)
++    from app.network_metadata_projection.repository import ProjectionRepository
++    from app.network_metadata_projection.models import ProjectionConfig, RegistryEvaluation
++    from app.network_metadata_projection.service import NetworkMetadataProjectionService
++    from app.network_metadata.canonical import observation_uuid, source_event_identity
++    if Path(sys.modules[ProjectionRepository.__module__].__file__).resolve().parent.parent.parent != root:
++        raise ValueError("repository_import_origin_mismatch")
++    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
++    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
++    commits, elapsed, projected = [], 0.0, 0
++    with tempfile.TemporaryDirectory(prefix="ni04mat-g2-load-", dir=args.lab_temp) as disposable:
++        config = ProjectionConfig(True, str(Path(disposable) / "projection.sqlite3"), max_db_bytes=536870912)
++        clock = Clock()
++        repo = ProjectionRepository(config, clock=clock).initialize()
++        try:
++            if args.extension:
++                from app.network_metadata_projection.service_extension import install_service_recognition_extension
++                install_service_recognition_extension(repo)
++            source, attribution, registry = Source(), Attribution(), Registry()
++            attribution.states["203.0.113.93"] = "endpoint_absent"
++            registry.values = {
++                MAC: RegistryEvaluation("authoritative", "10000000-0000-4000-8000-000000000001"),
++                OTHER_MAC: RegistryEvaluation("authoritative", "10000000-0000-4000-8000-000000000002"),
++            }
++            service = NetworkMetadataProjectionService(config, repo, source, attribution, registry, IDENTITY)
++            service.run_id = repo.create_run(IDENTITY)
++            original = repo.commit_dispositions
++            measured = [False]
++            def timed(*values, **kwargs):
++                start = time.perf_counter()
++                result = original(*values, **kwargs)
++                if measured[0]:
++                    commits.append(time.perf_counter() - start)
++                return result
++            repo.commit_dispositions = timed
++            total_expected = total_eligible = 0
++            for batch in range(args.batches + 3):
++                rows = []
++                for ordinal in range(256):
++                    offset = batch * 256 + ordinal
++                    category = offset % 100
++                    family = "dns" if category < 65 else "tls" if category < 85 else "quic"
++                    external = family != "dns"
++                    rows.append(source_record(offset, source_event_family=family,
++                        observation_id=observation_uuid(family, source_event_identity(GENERATION, offset)),
++                        dst_ip="203.0.113.93" if external else "10.73.0.8",
++                        dst_port=443 if external else 53, transport_protocol="TCP" if family == "tls" else "UDP"))
++                    total_expected += 1 if external else 2
++                    total_eligible += int(external)
++                source.records = rows
++                measured[0] = batch >= 3
++                before = repo.connection.execute("SELECT count(*) FROM device_network_metadata_edges").fetchone()[0]
++                start = time.perf_counter()
++                outcomes = service.poll()
++                duration = time.perf_counter() - start
++                after = repo.connection.execute("SELECT count(*) FROM device_network_metadata_edges").fetchone()[0]
++                if not outcomes or repo.live_state != "usable" or after - before != sum(item.emitted_edge_count for item in outcomes):
++                    raise RuntimeError("lab_projection_disposition_failed")
++                if measured[0]:
++                    elapsed += duration
++                    projected += after - before
++                clock.advance(seconds=1)
++            actual = repo.connection.execute("SELECT count(*) FROM device_network_metadata_edges").fetchone()[0]
++            if actual != total_expected:
++                raise RuntimeError("lab_edge_count_mismatch")
++            if args.extension:
++                actual_feed = repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0]
++                if actual_feed != total_eligible:
++                    raise RuntimeError("lab_feed_count_mismatch")
++            else:
++                actual_feed = None
++            checkpoint = repo.checkpoint(GENERATION)
++            if checkpoint["last_record_start_byte_offset"] != (args.batches + 3) * 256 - 1:
++                raise RuntimeError("lab_checkpoint_mismatch")
++            result = dict(
++                profile="synthetic_mixed_approximately_65pct_local_dns_20pct_outbound_tls_15pct_outbound_quic",
++                batch_observations=256, warmup_batches=3, measured_batches=args.batches,
++                extension_present=args.extension, repository_head=head, repository_tree=tree,
++                worktree_clean=not subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip(),
++                python=platform.python_version(), sqlite=sqlite3.sqlite_version,
++                platform=platform.platform(), projected_edges=projected,
++                measured_poll_seconds=elapsed, projected_edges_per_second=projected / elapsed,
++                batch_commit_p95_ms=percentile(commits, .95) * 1000,
++                batch_commit_p99_ms=percentile(commits, .99) * 1000,
++                batch_commit_median_ms=statistics.median(commits) * 1000,
++                committed_feed_rows=actual_feed,
++                repository_source_sha256=hashlib.sha256(Path(sys.modules[ProjectionRepository.__module__].__file__).read_bytes()).hexdigest(),
++            )
++        finally:
++            repo.close()
++    print(json.dumps(result, sort_keys=True))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/network_metadata_projection/test_service_delivery.py b/tests/network_metadata_projection/test_service_delivery.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..afbfe6670e9c7017aa2406f4e325b61983472999
+--- /dev/null
++++ b/tests/network_metadata_projection/test_service_delivery.py
+@@ -0,0 +1,313 @@
++"""G2 migration/feed/index: exact cursor authority, no upstream reinterpretation."""
++from dataclasses import replace
++from datetime import timedelta
++from pathlib import Path
++from types import SimpleNamespace
++import runpy
++
++import pytest
++
++from app.analytics.source_gateway import QueryDeadline
++from app.network_metadata.validation import ni_format_utc
++from app.network_metadata_projection.models import ProjectionUnavailable, ProjectionValidationError, RegistryEvaluation
++from app.device_fingerprint.validation import format_utc
++from app.network_metadata_projection.repository import ProjectionRepository
++from app.network_metadata_projection.schema import signature, validate_schema
++from app.network_metadata_projection.service_extension import (
++    TABLES, install_service_recognition_extension, maintain_authoritative_change)
++from app.network_metadata_projection.service_delivery_read_service import ServiceRecognitionDeliveryReadService
++from .support import stack, source_record, SITE, MAC, OTHER_MAC
++from .test_service_extension_bridge import DEVICE
++from .test_projection import edges
++
++
++@pytest.fixture
++def state(tmp_path):
++    value = stack(tmp_path, [source_record(dst_ip="203.0.113.93")])
++    value.attribution.states["203.0.113.93"] = "endpoint_absent"
++    value.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
++    try:
++        yield value
++    finally:
++        value.repo.close()
++
++
++def reader(state):
++    return ServiceRecognitionDeliveryReadService(state.config.db_path)
++
++
++def feed(state, after=0, **kwargs):
++    return reader(state).read_service_recognition_feed(after, deadline=QueryDeadline.after(5), **kwargs)
++
++
++def changes(state, after=0, **kwargs):
++    return reader(state).read_authoritative_binding_changes(after, deadline=QueryDeadline.after(5), **kwargs)
++
++
++def test_G2_R1_QA01_seed_with_empty_audit_history(state):
++    state.service.poll()
++    with state.repo.transaction(retention=True):
++        state.repo.connection.execute("DELETE FROM projection_registry_binding_events")
++    assert install_service_recognition_extension(state.repo) is True
++    row, = changes(state)
++    assert (row.site_id, row.client_mac, row.device_id) == (SITE, MAC, DEVICE)
++    # Existing edges are supplied by backfill, not mislabeled as new live events.
++    assert feed(state) == ()
++    assert reader(state).recognition_feed_bounds(deadline=QueryDeadline.after(5)).max_feed_seq is None
++
++
++@pytest.mark.parametrize("point", [
++    *("extension_created_" + name for name in TABLES),
++    "extension_seeded_bindings", "extension_inserted_metadata", "extension_validated", "before_commit",
++])
++def test_G2_R2_QA04_install_crash_before_commit_is_exact_core_only(state, point):
++    state.service.poll()
++    original = signature(state.repo.connection)
++    class Crash(BaseException):
++        pass
++    def crash(stage):
++        if stage == point:
++            raise Crash()
++    state.repo.crash_point = crash
++    with pytest.raises(Crash):
++        install_service_recognition_extension(state.repo)
++    assert signature(state.repo.connection) == original
++    assert validate_schema(state.repo.connection, integrity=True) == "CORE_ONLY"
++    state.repo.crash_point = lambda _: None
++    assert install_service_recognition_extension(state.repo) is True
++
++
++def test_G2_R2_QA05_QA12_postcommit_crash_and_restart_idempotency(state):
++    class Crash(BaseException):
++        pass
++    state.repo.crash_point = lambda stage: (_ for _ in ()).throw(Crash()) if stage == "after_commit" else None
++    with pytest.raises(Crash):
++        install_service_recognition_extension(state.repo)
++    state.repo.close()
++    state.repo = ProjectionRepository(state.config, clock=state.clock,
++                                     install_service_recognition_extension=True).initialize()
++    state.service.repository = state.repo
++    assert validate_schema(state.repo.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1"
++    before = tuple(state.repo.connection.iterdump())
++    assert install_service_recognition_extension(state.repo) is False
++    assert tuple(state.repo.connection.iterdump()) == before
++
++
++def test_G2_installer_requires_acquired_single_writer_lock(state):
++    with pytest.raises(ProjectionUnavailable):
++        install_service_recognition_extension(SimpleNamespace(connection=state.repo.connection, _writer_fd=None))
++    other = ProjectionRepository(state.config, install_service_recognition_extension=True)
++    with pytest.raises(ProjectionUnavailable):
++        other.initialize()
++    assert validate_schema(state.repo.connection) == "CORE_ONLY"
++
++
++def test_G2_default_off_and_explicit_startup_install(state):
++    state.repo.close()
++    state.repo = ProjectionRepository(state.config, clock=state.clock,
++                                     install_service_recognition_extension=True).initialize()
++    assert state.repo.service_recognition_extension_present is True
++    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 1
++
++
++def test_G2_feed_exact_provenance_readonly_and_monotonic(state):
++    install_service_recognition_extension(state.repo)
++    state.service.poll()
++    before = tuple(state.repo.connection.iterdump())
++    row, = feed(state)
++    assert row.feed_seq == 1
++    assert row.fact.edge_id == edges(state)[0]["edge_id"]
++    assert row.identity.device_id == DEVICE and row.identity.registry_binding_change_seq == 1
++    assert row.identity.site_id == SITE and row.identity.client_mac == MAC
++    assert feed(state, 1) == ()
++    assert reader(state).recognition_feed_bounds(deadline=QueryDeadline.after(5)).min_retained_feed_seq == 1
++    assert tuple(state.repo.connection.iterdump()) == before
++    assert "203.0." not in repr(row)
++
++
++@pytest.mark.parametrize("limit", [0, 257, True, -1])
++def test_G2_feed_bounds_reject_without_open(state, limit):
++    with pytest.raises(ProjectionValidationError):
++        feed(state, limit=limit)
++
++
++@pytest.mark.parametrize("after", [-1, True, "1"])
++def test_G2_cursor_type_reject_without_open(state, after):
++    with pytest.raises(ProjectionValidationError):
++        feed(state, after)
++
++
++def test_G2_R1_QA02_QA03_audit_retention_id_reuse_does_not_change_cursor(state):
++    install_service_recognition_extension(state.repo)
++    state.service.poll()
++    first, = changes(state)
++    old_audit_id = state.repo.connection.execute("SELECT binding_event_id FROM projection_registry_binding_events").fetchone()[0]
++    with state.repo.transaction(retention=True):
++        state.repo.connection.execute("DELETE FROM projection_registry_binding_events")
++    state.registry.values[MAC] = RegistryEvaluation("registry_unavailable", reason="registry_unavailable")
++    state.service.reconcile()
++    assert state.repo.connection.execute("SELECT binding_event_id FROM projection_registry_binding_events").fetchone()[0] == old_audit_id
++    assert changes(state) == (first,)
++
++
++def test_G2_R1_QA04_change_and_feed_sequences_survive_retention_recreation(state):
++    install_service_recognition_extension(state.repo)
++    state.service.poll()
++    first_feed, = feed(state)
++    first_change, = changes(state)
++    state.clock.advance(days=14)
++    state.service.retain()
++    bounds = reader(state).recognition_feed_bounds(deadline=QueryDeadline.after(5))
++    assert bounds.min_retained_feed_seq is None and bounds.max_feed_seq == first_feed.feed_seq
++    state.source.records = [source_record(100, dst_ip="203.0.113.93",
++        event_at=ni_format_utc(state.clock.value - timedelta(seconds=10)),
++        ingested_at=ni_format_utc(state.clock.value - timedelta(seconds=10)))]
++    original = state.attribution.resolve_ipv4
++    def resolve(*args):
++        value = original(*args)
++        if value.state == "resolved":
++            value = replace(value, valid_from=format_utc(state.clock.value - timedelta(minutes=1)),
++                            valid_until=format_utc(state.clock.value + timedelta(minutes=1)))
++        return value
++    state.attribution.resolve_ipv4 = resolve
++    state.service.poll()
++    second_feed, = feed(state)
++    second_change, = changes(state)
++    assert second_feed.feed_seq > first_feed.feed_seq
++    assert second_change.change_seq > first_change.change_seq
++
++
++def test_G2_late_binding_allocates_one_targeted_change(state):
++    state.registry.values.clear()
++    install_service_recognition_extension(state.repo)
++    state.service.poll()
++    assert feed(state)[0].identity.device_id is None and changes(state) == ()
++    state.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
++    state.service.reconcile()
++    change, = changes(state)
++    assert (change.site_id, change.client_mac, change.device_id) == (SITE, MAC, DEVICE)
++    assert feed(state)[0].identity.device_id == DEVICE
++    state.clock.advance(seconds=30)
++    state.service.reconcile()
++    assert changes(state) == (change,)
++
++
++def test_G2_obsolete_authoritative_index_fails_closed_and_cleanup_has_no_new_sequence(state):
++    install_service_recognition_extension(state.repo)
++    state.service.poll()
++    first, = changes(state)
++    old = dict(state.repo.binding(SITE, MAC))
++    with state.repo.transaction():
++        # Simulates an actual Core state transition; does not alter its existing
++        # monotonic Registry outage algorithm.
++        state.repo.connection.execute(
++            "UPDATE projection_site_mac_bindings SET binding_state='not_yet_registry_resolved',"
++            "device_id=NULL,authoritative_bound_at=NULL WHERE site_id=? AND client_mac=?", (SITE, MAC))
++    with pytest.raises(ProjectionUnavailable):
++        changes(state)
++    with state.repo.transaction():
++        maintain_authoritative_change(state.repo.connection, old, site=SITE, mac=MAC,
++                                      state="not_yet_registry_resolved", device=None,
++                                      evaluated_at="2026-10-09T12:01:00.000000Z")
++    assert changes(state) == ()
++    assert state.repo.connection.execute(
++        "SELECT seq FROM sqlite_sequence WHERE name='projection_registry_binding_change_index'").fetchone()[0] == first.change_seq
++
++
++@pytest.mark.parametrize("consumer_missing,budget,backup,backfill", [
++    (True, 180, True, False), (False, 179, True, False),
++    (False, 180, False, False), (False, 180, True, True),
++])
++def test_G2_R2_QA10_migration_preflight_refuses_incomplete_rollout(consumer_missing, budget, backup, backfill):
++    validate = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/ni04_materialization_preflight.py"))["validate_preflight"]
++    sha = "36e2b462a39533c32954215e40d9097167591237"
++    evidence = dict(schema_version=1, accepted_compatibility_bridge_sha=sha,
++        declared_consumers=["captive_portal_admin", "network_metadata_projection"],
++        consumer_commit_shas={"captive_portal_admin": sha, "network_metadata_projection": sha},
++        timeout_start_seconds=budget, backup_verified=backup, backfill_running=backfill)
++    if consumer_missing:
++        evidence["consumer_commit_shas"]["captive_portal_admin"] = "b1442efc434716d35e21b9e3124c3b9cd2222fbe"
++    with pytest.raises(ValueError):
++        validate(evidence)
++
++
++def test_G2_R2_QA11_slow_install_fixture_within_declared_startup_budget(state):
++    original = state.repo.crash_point
++    points = []
++    def slow(stage):
++        if stage.startswith("extension_"):
++            state.clock.advance(seconds=20)
++            points.append(stage)
++        original(stage)
++    state.repo.crash_point = slow
++    assert install_service_recognition_extension(state.repo)
++    assert len(points) == 6 and 20 * len(points) < 180
++    assert validate_schema(state.repo.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1"
++
++
++def test_G2_feed_query_uses_primary_key_search(state):
++    install_service_recognition_extension(state.repo)
++    state.service.poll()
++    queries = []
++    original = reader(state)
++    snapshot = original._snapshot
++    from contextlib import contextmanager
++    @contextmanager
++    def traced(**kwargs):
++        with snapshot(**kwargs) as connection:
++            connection.set_trace_callback(queries.append)
++            yield connection
++    original._snapshot = traced
++    original.read_service_recognition_feed(0, deadline=QueryDeadline.after(5))
++    query, = [q for q in queries if q.startswith("SELECT e.*,f.feed_seq")]
++    plan = state.repo.connection.execute("EXPLAIN QUERY PLAN " + query).fetchall()
++    details = " ".join(row[3] for row in plan)
++    assert "SEARCH f USING INTEGER PRIMARY KEY" in details
++    assert "SCAN e" not in details and "SCAN f" not in details
++
++
++def test_G2_coverage_only_and_bounded_replay_share_exact_identity(state):
++    install_service_recognition_extension(state.repo)
++    state.attribution.states["203.0.113.93"] = "unavailable"
++    state.service.poll()
++    api = reader(state)
++    first, last = "2026-10-08T13:00:00.000000Z", "2026-10-09T13:00:00.000000Z"
++    before = tuple(state.repo.connection.iterdump())
++    coverage = api.read_recognition_device_coverage(SITE, DEVICE, MAC, first, last, deadline=QueryDeadline.after(5))
++    assert coverage.identity_binding_state == "authoritative"
++    assert coverage.projection_safe_reason == "pending_attribution"
++    assert coverage.device_linked_pending_count == 1
++    assert not hasattr(coverage, "facts")
++    page = api.read_candidate_page(SITE, first, last, client_mac=MAC, limit=1, deadline=QueryDeadline.after(5))
++    assert len(page) == 1 and page[0].identity.device_id == DEVICE
++    cursor = (page[0].fact.event_at, page[0].fact.edge_id)
++    assert api.read_candidate_page(SITE, first, last, client_mac=MAC, cursor=cursor, deadline=QueryDeadline.after(5)) == ()
++    assert api.read_candidate_sites(deadline=QueryDeadline.after(5)) == (SITE,)
++    assert api.read_current_identity(SITE, MAC, deadline=QueryDeadline.after(5)).device_id == DEVICE
++    assert tuple(state.repo.connection.iterdump()) == before
++    with pytest.raises(ProjectionUnavailable):
++        api.read_recognition_device_coverage(SITE, "10000000-0000-4000-8000-000000000002",
++            MAC, first, last, deadline=QueryDeadline.after(5))
++    assert api.read_candidate_page("f" * 24, first, last, deadline=QueryDeadline.after(5)) == ()
++
++
++def test_G2_fail_closed_when_current_change_index_is_inconsistent(state):
++    install_service_recognition_extension(state.repo)
++    state.service.poll()
++    state.repo.connection.execute("UPDATE projection_registry_binding_change_index SET device_id=?", (OTHER_MAC,))
++    with pytest.raises(ProjectionUnavailable):
++        feed(state)
++    with pytest.raises(ProjectionUnavailable):
++        changes(state)
++
++
++def test_G2_preflight_complete_and_old_baseline_forbidden():
++    validate = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/ni04_materialization_preflight.py"))["validate_preflight"]
++    sha = "36e2b462a39533c32954215e40d9097167591237"
++    value = dict(schema_version=1, accepted_compatibility_bridge_sha=sha,
++        declared_consumers=["captive_portal_admin", "network_metadata_projection"],
++        consumer_commit_shas={"captive_portal_admin": sha, "network_metadata_projection": sha},
++        timeout_start_seconds=180, backup_verified=True, backfill_running=False)
++    assert validate(value)
++    with pytest.raises(ValueError):
++        validate(dict(value, accepted_compatibility_bridge_sha="b1442efc434716d35e21b9e3124c3b9cd2222fbe"))
+diff --git a/tests/network_metadata_projection/test_service_extension_bridge.py b/tests/network_metadata_projection/test_service_extension_bridge.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f0297024d9040545f14cb72e7208128382838a4
+--- /dev/null
++++ b/tests/network_metadata_projection/test_service_extension_bridge.py
+@@ -0,0 +1,186 @@
++"""G1 compatibility bridge: optional extension, exact core, unconditional upkeep."""
++import sqlite3
++import subprocess
++from pathlib import Path
++from dataclasses import replace
++
++import pytest
++
++from app.network_metadata_projection.repository import ProjectionRepository
++from app.network_metadata_projection.models import RegistryEvaluation, ProjectionUnavailable
++from app.network_metadata_projection.schema import validate_schema, signature, _expected_signatures
++from app.network_metadata_projection.service_extension import TABLES, create_extension_objects
++from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
++from app.network_metadata_projection.recognition_read_service import DeviceNetworkMetadataRecognitionReadService
++from app.analytics.source_gateway import QueryDeadline
++from .support import stack, source_record, SITE, MAC, OTHER_MAC
++from .test_projection import edges
++
++DEVICE = "10000000-0000-4000-8000-000000000001"
++BASE = "b1442efc434716d35e21b9e3124c3b9cd2222fbe"
++
++
++def install_fixture(state):
++    """Disposable migrated fixture only; no production installer exists in G1."""
++    with state.repo.transaction():
++        create_extension_objects(state.repo.connection)
++        state.repo.connection.execute(
++            "INSERT INTO projection_registry_binding_change_index"
++            "(site_id,client_mac,binding_state,device_id,evaluated_at_utc) "
++            "SELECT site_id,client_mac,binding_state,device_id,last_evaluated_at "
++            "FROM projection_site_mac_bindings WHERE binding_state='authoritative' ORDER BY site_id,client_mac")
++        state.repo.connection.execute(
++            "INSERT INTO projection_service_recognition_extension_meta VALUES(1,1,?)",
++            ("2026-10-09T12:00:30.000000Z",))
++        assert validate_schema(state.repo.connection) == "CORE_PLUS_EXTENSION_V1"
++    state.repo.close()
++    state.repo = ProjectionRepository(state.config, clock=state.clock).initialize()
++    state.service.repository = state.repo
++
++
++@pytest.fixture
++def state(tmp_path):
++    value = stack(tmp_path, [source_record(dst_ip="203.0.113.93")])
++    value.attribution.states["203.0.113.93"] = "endpoint_absent"
++    value.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
++    try:
++        yield value
++    finally:
++        value.repo.close()
++
++
++def test_G1_R2_QA01_core_only_default_no_installer(state):
++    assert validate_schema(state.repo.connection) == "CORE_ONLY"
++    assert state.repo.service_recognition_extension_present is False
++    state.service.poll()
++    assert len(edges(state)) == 1
++    assert not any(name in TABLES for _, name, _ in signature(state.repo.connection))
++    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 1
++
++
++def test_G1_R2_QA02_R2_QA09_core_plus_extension_off_upkeep(state):
++    install_fixture(state)
++    assert state.repo.service_recognition_extension_present is True
++    state.service.poll()
++    rows = state.repo.connection.execute("SELECT * FROM projection_service_recognition_feed").fetchall()
++    assert len(rows) == 1 and rows[0]["edge_id"] == edges(state)[0]["edge_id"]
++    changes = state.repo.connection.execute("SELECT * FROM projection_registry_binding_change_index").fetchall()
++    assert len(changes) == 1 and changes[0]["device_id"] == DEVICE
++    assert validate_schema(state.repo.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1"
++    assert tuple(row for row in signature(state.repo.connection) if row[1] not in TABLES) == _expected_signatures()[0]
++
++
++def test_G1_R2_QA03_old_baseline_is_not_rollback_floor(state):
++    install_fixture(state)
++    root = Path(__file__).resolve().parents[2]
++    source = subprocess.check_output(["git", "show", BASE + ":app/network_metadata_projection/schema.py"], cwd=root)
++    namespace = {"__package__": "app.network_metadata_projection", "__name__": "old_projection_schema"}
++    exec(compile(source, "accepted_old_schema.py", "exec"), namespace)
++    with pytest.raises(ProjectionUnavailable):
++        namespace["validate_schema"](state.repo.connection)
++
++
++@pytest.mark.parametrize("damage", [
++    "CREATE TABLE alien(value TEXT)",
++    "CREATE INDEX alien_index ON projection_pending_attribution(site_id)",
++    "DROP INDEX idx_projection_mac_event",
++    "DROP TRIGGER immutable_device_network_metadata_edges",
++    "DELETE FROM projection_service_recognition_extension_meta",
++    "PRAGMA user_version=2",
++])
++def test_G1_R2_QA06_QA07_QA08_closed_object_and_metadata_validation(state, damage):
++    install_fixture(state)
++    state.repo.connection.execute(damage)
++    with pytest.raises(ProjectionUnavailable):
++        validate_schema(state.repo.connection)
++
++
++@pytest.mark.parametrize("name", list(TABLES))
++def test_G1_partial_extension_never_repaired(state, name):
++    state.repo.connection.execute(f"CREATE TABLE {name} ({TABLES[name]})")
++    before = signature(state.repo.connection)
++    with pytest.raises(ProjectionUnavailable):
++        validate_schema(state.repo.connection)
++    assert signature(state.repo.connection) == before
++
++
++@pytest.mark.parametrize("point,committed", [("before_commit", False), ("after_commit", True)])
++def test_G1_edge_feed_checkpoint_atomicity(state, point, committed):
++    install_fixture(state)
++    class Crash(BaseException):
++        pass
++    def crash(stage):
++        if stage == point:
++            raise Crash()
++    state.repo.crash_point = crash
++    with pytest.raises(Crash):
++        state.service.poll()
++    assert bool(edges(state)) == committed
++    assert bool(state.repo.connection.execute("SELECT * FROM projection_service_recognition_feed").fetchall()) == committed
++    assert bool(state.repo.connection.execute("SELECT * FROM projection_source_checkpoints").fetchall()) == committed
++    state.repo.crash_point = lambda _: None
++    state.service.poll()
++    assert len(edges(state)) == 1
++    assert state.repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0] == 1
++
++
++def test_G1_idempotent_edge_replay_has_no_second_outbox(state):
++    install_fixture(state)
++    state.service.poll()
++    original = edges(state)
++    prepared = state.service.prepare(state.source.records[0])
++    state.repo.commit_dispositions([prepared], {}, state.service.run_id)
++    assert edges(state) == original
++    assert state.repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0] == 1
++
++
++def test_G1_legacy_projection_consumers_read_extension_without_semantic_change(state):
++    install_fixture(state)
++    state.service.poll()
++    reader = DeviceNetworkMetadataReadService(state.config.db_path)
++    first, last = "2026-10-08T13:00:00.000000Z", "2026-10-09T13:00:00.000000Z"
++    snapshot = reader.read_protocol_evidence_snapshot(
++        SITE, DEVICE, MAC, first, last, max_rows=20000, deadline=QueryDeadline.after(5))
++    assert snapshot["binding_state"] == "authoritative" and len(snapshot["facts"]) == 1
++    assert reader.list_edges_by_device(SITE, DEVICE, first, last)["items"][0]["device_id"] == DEVICE
++    assert reader.get_status()["store_state"] == "available"
++    recognition = DeviceNetworkMetadataRecognitionReadService(state.config.db_path).read_service_recognition_snapshot(
++        SITE, DEVICE, MAC, first, last, max_rows=5000, deadline=QueryDeadline.after(5))
++    assert recognition.schema_version == 2 and len(recognition.facts) == 1
++    assert recognition.bound_device_id == DEVICE
++
++
++def test_G1_R1_QA08_safe_reason_and_periodic_revalidation_do_not_allocate_sequence(state):
++    install_fixture(state)
++    state.service.poll()
++    original = tuple(state.repo.connection.execute("SELECT * FROM projection_registry_binding_change_index").fetchone())
++    state.clock.advance(seconds=30)
++    state.service.reconcile()
++    assert tuple(state.repo.connection.execute("SELECT * FROM projection_registry_binding_change_index").fetchone()) == original
++    state.registry.values[MAC] = RegistryEvaluation("registry_unavailable", reason="registry_unavailable")
++    state.service.reconcile()
++    # Existing monotonic Core identity rule remains authoritative during outage.
++    assert state.repo.binding(SITE, MAC)["binding_state"] == "authoritative"
++    assert tuple(state.repo.connection.execute("SELECT * FROM projection_registry_binding_change_index").fetchone()) == original
++
++
++def test_G1_retention_cascades_feed_and_binding_index(state):
++    install_fixture(state)
++    state.service.poll()
++    state.clock.advance(days=14)
++    state.service.retain()
++    assert state.repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0] == 0
++    assert state.repo.connection.execute("SELECT count(*) FROM projection_registry_binding_change_index").fetchone()[0] == 0
++
++
++@pytest.mark.parametrize("changes", [
++    {"src_ip": "203.0.113.93", "dst_ip": "10.73.0.7"},
++    {"dst_ip": "10.73.0.8"},
++    {"dst_ip": None, "dst_port": None},
++])
++def test_G1_ineligible_edges_never_enter_feed(state, changes):
++    state.source.records = [replace(state.source.records[0], **changes)]
++    install_fixture(state)
++    state.service.poll()
++    assert edges(state)
++    assert state.repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0] == 0
+diff --git a/tests/network_service_recognition/test_binding_replay_contract.py b/tests/network_service_recognition/test_binding_replay_contract.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..137d2653df0a72f6f7128c15138d31d225bb33af
+--- /dev/null
++++ b/tests/network_service_recognition/test_binding_replay_contract.py
+@@ -0,0 +1,111 @@
++"""G2 B1 consumer atomics; real SQLite, minimal disposable queue/checkpoint fixture."""
++from contextlib import contextmanager
++from types import SimpleNamespace
++import sqlite3
++
++import pytest
++
++from app.network_service_recognition.binding_replay import (
++    enqueue_binding_changes, read_targeted_replay_page, BindingReplayConflict)
++
++GENERATION = "10000000-0000-4000-8000-000000000010"
++DEVICE = "10000000-0000-4000-8000-000000000001"
++SITE, MAC = "6a64f17630da7c70d232187a", "02:AA:BB:CC:DD:01"
++AT = "2026-10-13T12:00:00.000000Z"
++
++
++class QueueFixture:
++    """Only B1's two SQL contracts; full store/startup validation belongs to G3."""
++    def __init__(self):
++        self.connection = sqlite3.connect(":memory:", isolation_level=None)
++        self.connection.row_factory = sqlite3.Row
++        self.crash_point = lambda _: None
++        self.connection.execute(
++            "CREATE TABLE service_materialization_checkpoints("
++            "generation_id TEXT PRIMARY KEY,last_binding_change_seq INTEGER NOT NULL,updated_at_utc TEXT NOT NULL)")
++        self.connection.execute(
++            "CREATE TABLE service_binding_replay_jobs(job_id TEXT PRIMARY KEY,generation_id TEXT NOT NULL,"
++            "binding_change_seq INTEGER NOT NULL,site_id TEXT NOT NULL,client_mac TEXT NOT NULL,device_id TEXT NOT NULL,"
++            "from_utc TEXT NOT NULL,to_utc TEXT NOT NULL,cursor_event_at TEXT,cursor_edge_id TEXT,state TEXT NOT NULL,"
++            "UNIQUE(generation_id,binding_change_seq))")
++        self.connection.execute("INSERT INTO service_materialization_checkpoints VALUES(?,0,?)", (GENERATION, AT))
++    @contextmanager
++    def transaction(self):
++        self.connection.execute("BEGIN IMMEDIATE")
++        try:
++            yield
++            self.crash_point("before_commit")
++            self.connection.execute("COMMIT")
++            self.crash_point("after_commit")
++        except BaseException:
++            if self.connection.in_transaction:
++                self.connection.execute("ROLLBACK")
++            raise
++
++
++@pytest.fixture
++def queue():
++    value = QueueFixture()
++    try:
++        yield value
++    finally:
++        value.connection.close()
++
++
++def change(sequence=1, **kwargs):
++    return SimpleNamespace(change_seq=sequence, site_id=SITE, client_mac=MAC, device_id=DEVICE, **kwargs)
++
++
++@pytest.mark.parametrize("point,committed", [
++    ("binding_job_enqueued", False), ("before_commit", False), ("after_commit", True),
++])
++def test_R1_QA05_QA06_enqueue_and_cursor_crash_atomicity(queue, point, committed):
++    class Crash(BaseException):
++        pass
++    def crash(stage):
++        if stage == point:
++            raise Crash()
++    queue.crash_point = crash
++    with pytest.raises(Crash):
++        enqueue_binding_changes(queue, GENERATION, 0, (change(),), AT)
++    assert queue.connection.execute("SELECT count(*) FROM service_binding_replay_jobs").fetchone()[0] == int(committed)
++    cursor = queue.connection.execute("SELECT last_binding_change_seq FROM service_materialization_checkpoints").fetchone()[0]
++    assert cursor == int(committed)
++    queue.crash_point = lambda _: None
++    if not committed:
++        assert enqueue_binding_changes(queue, GENERATION, 0, (change(),), AT)
++    else:
++        # A restarted consumer reads after the durable cursor; no duplicate page.
++        assert enqueue_binding_changes(queue, GENERATION, cursor, (), AT) is False
++    assert queue.connection.execute("SELECT count(*) FROM service_binding_replay_jobs").fetchone()[0] == 1
++
++
++def test_R1_QA07_exact_mac_replay_never_queries_another_device(queue):
++    enqueue_binding_changes(queue, GENERATION, 0, (change(),), AT)
++    job = queue.connection.execute("SELECT * FROM service_binding_replay_jobs").fetchone()
++    calls = []
++    class Reader:
++        def read_candidate_page(self, site, first, last, **kwargs):
++            calls.append((site, kwargs["client_mac"], kwargs["limit"]))
++            assert site == SITE and kwargs["client_mac"] == MAC and kwargs["limit"] == 128
++            return ()
++    assert read_targeted_replay_page(Reader(), job, deadline=object()) == ()
++    assert calls == [(SITE, MAC, 128)]
++    assert all(mac != "02:AA:BB:CC:DD:02" for _, mac, _ in calls)
++
++
++def test_deterministic_job_identity_and_cursor_cas(queue):
++    enqueue_binding_changes(queue, GENERATION, 0, (change(),), AT)
++    before = tuple(queue.connection.iterdump())
++    with pytest.raises(BindingReplayConflict):
++        enqueue_binding_changes(queue, GENERATION, 0, (change(),), AT)
++    assert tuple(queue.connection.iterdump()) == before
++    assert enqueue_binding_changes(queue, GENERATION, 1, (change(2),), AT)
++    assert queue.connection.execute("SELECT count(*) FROM service_binding_replay_jobs").fetchone()[0] == 2
++
++
++@pytest.mark.parametrize("rows", [(change(2), change(1)), (change(), change()), tuple(change(i + 1) for i in range(129))])
++def test_invalid_page_cannot_advance_checkpoint(queue, rows):
++    with pytest.raises(BindingReplayConflict):
++        enqueue_binding_changes(queue, GENERATION, 0, rows, AT)
++    assert queue.connection.execute("SELECT last_binding_change_seq FROM service_materialization_checkpoints").fetchone()[0] == 0
