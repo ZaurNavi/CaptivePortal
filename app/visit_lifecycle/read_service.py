@@ -264,10 +264,7 @@ def project_visit_service_history(visit, rows, consumer, *, evaluated_now):
         if consumer is None:return result
         canonical_uuid(consumer['consumer_id']);canonical_uuid(consumer['source_stream_id'])
         digest(consumer['last_outbox_hash']);integer(consumer['last_outbox_seq'])
-        ttl=consumer['history_ttl_days'];integer(ttl,1,365)
         result['evaluated_at']=_time(max((r['updated_at'] for r in rows),default=consumer['updated_at']),'updated_at')
-        if visit.closed_at is not None and datetime.fromisoformat(visit.closed_at.replace('Z','+00:00'))+timedelta(days=ttl)<=datetime.fromisoformat(evaluated_now.replace('Z','+00:00')):
-            result['partial_reason']='history_expired';return result
         if consumer['status'] not in {'processing','incomplete','unavailable'}:raise ValueError()
         result['partial_reason']='backfill_limited';result['truncated']=len(rows)>50
         lower=datetime.fromisoformat(visit.started_at.replace('Z','+00:00'))

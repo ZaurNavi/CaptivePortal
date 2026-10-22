@@ -111,7 +111,7 @@ def test_visit_close_race_rejects_stale_source_result(visit_config,visit_reposit
     assert repo.saved_protocol_summary(visit) is None
 
 
-@pytest.mark.parametrize('version',[2,3,4])
+@pytest.mark.parametrize('version',[2,3,4,5,6])
 def test_exact_migration_and_recovery_backup_each_supported_stage(visit_config,visit_repository,visit_service,tmp_path,version):
     repo=visit_repository;visit=begin(visit_service,repo)
     if version in (2,3):
@@ -120,6 +120,21 @@ def test_exact_migration_and_recovery_backup_each_supported_stage(visit_config,v
                 c.execute('DROP TABLE '+table)
             if version==2:c.execute('DROP TABLE visit_network_protocol_summary')
             c.execute('PRAGMA user_version='+str(version))
+    if version==4:
+        with repo._connect() as c:
+            c.execute('DROP INDEX idx_visit_service_detached_expiry')
+            c.execute('DROP INDEX idx_visit_service_review')
+            c.execute('ALTER TABLE visit_service_membership DROP COLUMN pending_since')
+            c.execute('ALTER TABLE visit_service_membership DROP COLUMN linkage_attached_at')
+            c.execute('DROP TABLE visit_service_consumer_state')
+            from app.visit_lifecycle.repository import SERVICE_HISTORY_DDL
+            c.execute(SERVICE_HISTORY_DDL[-1]);c.execute('PRAGMA user_version=4')
+    if version==5:
+        with repo._connect() as c:
+            c.execute('ALTER TABLE visit_service_consumer_state DROP COLUMN first_credit_floor_utc')
+            c.execute('DROP INDEX idx_visit_service_detached_expiry')
+            c.execute("CREATE INDEX idx_visit_service_detached_expiry ON visit_service_membership(pending_since,fact_key) WHERE visit_id IS NULL AND status<>'expired'")
+            c.execute('PRAGMA user_version=5')
     destination=tmp_path/('backup-'+str(version)+'.sqlite3')
     result=backup_database(db_path=str(repo.db_path),backup_to=str(destination))
     assert result['source_schema_version']==result['backup_schema_version']==version
@@ -128,7 +143,7 @@ def test_exact_migration_and_recovery_backup_each_supported_stage(visit_config,v
         assert c.execute('SELECT device_id FROM visits WHERE visit_id=?',(visit.visit_id,)).fetchone()[0]==DEVICE
     assert repo.initialize() is False
     with repo._connect(readonly=True) as c:
-        assert c.execute('PRAGMA user_version').fetchone()[0]==4
+        assert c.execute('PRAGMA user_version').fetchone()[0]==6
     assert repo.get_visit('site-a',visit.visit_id).device_id==DEVICE
 
 

@@ -67,7 +67,6 @@ class VisitLifecycleRuntime:
         telemetry: VisitTelemetry,
         protocol_reader=None,
         service_history_path=None,
-        service_history_ttl_days=None,
     ):
         self.config = config
         self.repository = repository
@@ -88,7 +87,6 @@ class VisitLifecycleRuntime:
         self._started_emitted = False
         self.protocol_reader = protocol_reader
         self.service_history_path=service_history_path
-        self.service_history_ttl_days=service_history_ttl_days
         self.webhook_reader = VisitLifecycleWebhookReader(
             config=config,
             repository=repository,
@@ -147,7 +145,6 @@ class VisitLifecycleRuntime:
                 telemetry=self.telemetry,
                 protocol_reader=self.protocol_reader,
                 service_history_path=self.service_history_path,
-                service_history_ttl_days=self.service_history_ttl_days,
             )
             self._reconciler = reconciler
         started = reconciler.start()
@@ -249,7 +246,7 @@ def create_visit_lifecycle(
         )
         return UNAVAILABLE_VISIT_LIFECYCLE_RUNTIME
     protocol_reader = None
-    service_history_path=service_history_ttl_days=None
+    service_history_path=None
     try:
         from .config import _strict_bool
         network_enabled=_strict_bool(settings.get('web_admin_device_protocol_intelligence_enabled',False),
@@ -268,12 +265,11 @@ def create_visit_lifecycle(
         try:
             import os
             from pathlib import Path
-            policy=os.environ.get('VISIT_SERVICE_HISTORY_RETENTION_DAYS')
-            if policy is not None:
-                if not policy.isascii() or not policy.isdecimal() or not 1<=int(policy)<=365:raise ValueError()
+            enabled=_strict_bool(os.environ.get('VISIT_SERVICE_HISTORY_ENABLED','false'),'VISIT_SERVICE_HISTORY_ENABLED')
+            if enabled:
                 source_path=settings.get('network_service_materialization_db_path')
                 if not isinstance(source_path,str) or not Path(source_path).is_absolute():raise ValueError()
-                service_history_path,service_history_ttl_days=source_path,int(policy)
+                service_history_path=source_path
         except Exception:
             telemetry.emit('visit.runtime_unavailable','warning',stage='service_history_policy')
     return VisitLifecycleRuntime(
@@ -282,5 +278,4 @@ def create_visit_lifecycle(
         telemetry=telemetry,
         protocol_reader=protocol_reader,
         service_history_path=service_history_path,
-        service_history_ttl_days=service_history_ttl_days,
     )
