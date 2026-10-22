@@ -1,0 +1,178 @@
+TASK-TRAFFIC-02-PERF-01 — Historical Network Traffic production deadline remediation
+
+Статус: IMPLEMENTATION AUTHORIZED.
+
+Exact baseline:
+bf918a567aa53458810332c99cedd39e9b7b2f18
+
+Production code сейчас находится на этом же commit/tree, но:
+WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=false
+
+History был активирован в production и откатан только feature flag после intermittent 503.
+
+Причина подтверждена production evidence.
+
+Observed production behavior:
+
+History requests: 503 → 200 → 503 → 200.
+UI fail-local behavior корректное: последний успешный график сохраняется и показывается History unavailable.
+shared Admin deadline = 10s.
+timeout увеличивать запрещено.
+
+Live read-only profile на production observations.sqlite3 (~252.6 MB):
+
+24h:
+
+7.49s
+7.87s
+7.80s
+8.29s
+p50 ~7.83s
+max ~8.29s
+
+7d:
+
+9.23s
+11.25s DEADLINE
+diagnostic 20s retry PASS ~11.09s
+8.83s
+8.85s
+p50 ~9.04s
+max ~11.25s
+
+Production cardinality:
+
+candidate_cycles_all_history = 42,360
+24h relevant cycles = 2,438
+24h AP rows = 4,876
+7d relevant cycles = 17,846
+7d AP rows = 35,692
+
+EXPLAIN для 24h и 7d начинается одинаково:
+
+MATERIALIZE cycle_aggregates
+SEARCH c USING INDEX idx_cycles_site_kind_started
+(site_id=? AND kind=? AND started_at<?)
+SEARCH a USING INDEX sqlite_autoindex_ap_observations_1
+(cycle_id=?)
+USE TEMP B-TREE FOR GROUP BY
+USE TEMP B-TREE FOR count(DISTINCT)
+
+Root-cause direction:
+Historical Traffic candidate/validation aggregation сейчас охватывает накопленную AP history до evaluated_at, а продуктовый from_utc применяется позже. Поэтому стоимость query растёт вместе с общей history DB, а не только с requested window.
+
+Задача:
+оптимизировать существующий Historical Traffic READ path так, чтобы тяжёлая cycle/AP validation + aggregation была bounded requested historical window настолько рано, насколько это возможно, без изменения семантики результата.
+
+Обязательные invariants:
+
+НЕ менять:
+WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=10;
+AdminQueryExecutionControls contract;
+product ranges 24h/7d;
+bucket ownership;
+24h=300s / 288 buckets;
+7d=900s / 672 buckets;
+source selection wired primary / lan fallback;
+one source family per Site bucket;
+coverage/gap/quality semantics;
+Site isolation;
+response DTO;
+History UI;
+coordinator;
+feature flags semantics.
+НЕ добавлять:
+cache;
+rollup;
+new collector;
+Omada polling;
+Traffic DB;
+new dependency;
+schema migration/index без отдельного доказательства, что bounded-query fix недостаточен.
+Candidate bounding не должен терять boundary cases.
+
+Особенно:
+
+cycle, started before from_utc but finished inside [from_utc,to_utc), должен остаться учитываемым;
+completed/success candidate с finished_at NULL, который текущий integrity contract считает failure внутри requested window через started_at, нельзя молча потерять;
+malformed/integrity evidence нельзя отфильтровать так рано, чтобы query стал «быстрее» ценой ослабления fail-closed validation;
+to/evaluated_at semantics сохранить;
+[from,to) contract сохранить.
+До и после оптимизации результаты должны быть semantic-equivalent:
+status;
+bucket count/boundaries;
+Download/Upload;
+selected_source;
+selection_reason;
+complete/partial/none;
+coverage counters;
+quality counters;
+watermark;
+gap count;
+source transitions.
+
+Допустима только разница, вызванная намеренно разным evaluated_at в тесте; при одинаковом captured evaluated_at результат должен быть детерминированно одинаковым.
+
+Предпочтительная область изменения:
+
+app/analytics/source_gateway.py
+focused Historical Traffic tests, необходимые для доказательства fix.
+
+Расширять scope только если технически обязательно и отдельно указать почему.
+
+Обязательные focused tests:
+
+24h bounded candidate behavior;
+7d bounded candidate behavior;
+cycle started before range but finished inside range;
+finished_at NULL integrity case in requested range;
+cycles полностью до from_utc не влияют на result;
+cycles после to_utc не влияют;
+exact semantic equivalence representative complete/partial/none buckets;
+source transition equivalence;
+quality/integrity counters equivalence;
+deadline interruption остаётся рабочим;
+explain/capacity evidence доказывает, что запрос больше не выполняет тяжёлую AP aggregation по всей historical DB.
+
+Performance acceptance:
+
+На production-size immutable snapshot или эквивалентной копии текущей production DB:
+
+24h:
+
+минимум 5 последовательных runs;
+0 deadline;
+max < 9s;
+желательно p95 <= 7.5s.
+
+7d:
+
+минимум 5 последовательных runs;
+0 deadline;
+max < 9s;
+желательно p95 <= 7.5s.
+
+Главный критерий — устойчивый запас под существующим 10s deadline, а не единичный PASS на 9.9s.
+
+Также вернуть cardinality/EXPLAIN evidence до/после, чтобы было видно, что стоимость запроса стала зависеть от requested range, а не всей накопленной AP history.
+
+Не выполнять:
+
+production deploy;
+production activation;
+изменение env;
+изменение timeout;
+schema/index changes;
+merge.
+
+Deliverable:
+
+patch against exact baseline;
+candidate tree SHA;
+changed-file list;
+focused test results;
+performance evidence 24h/7d;
+before/after EXPLAIN/cardinality;
+statement, что semantic contract не изменён.
+
+После handoff Owner + Assistant Tech Lead повторят Central Lab и live production-size acceptance.
