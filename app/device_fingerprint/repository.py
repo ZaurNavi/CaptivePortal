@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from app.operations_verification import startup_check
 import sqlite3
 import stat
 import threading
@@ -63,6 +64,8 @@ class DeviceFingerprintRepository:
         self._connection: sqlite3.Connection | None = None
         self._access_lock = threading.RLock()
 
+    @startup_check('fingerprint_evidence',lambda self:self.db_path,
+        ('schema_version','schema_signature'),failures=(DeviceFingerprintStorageCorrupt,))
     def initialize(self) -> None:
         path = _existing_file_target(
             Path(self.db_path),

@@ -1,5 +1,6 @@
 """Single NI-04 writer: checked immutable facts and atomic consumer progress."""
 import os
+from app.operations_verification import startup_check, checked
 import sqlite3
 import uuid
 from dataclasses import asdict
@@ -58,6 +59,8 @@ class ServiceMaterializationRepository:
         except OSError:
             raise MaterializationUnavailable() from None
 
+    @startup_check('network_service_intelligence',lambda self:self.db_path,
+        ('schema_version','schema_signature','quick_check','foreign_key_check'))
     def initialize(self):
         try:
             self._writer_fd=os.open(self.db_path+".writer.lock",os.O_CREAT|os.O_RDWR,0o640)
@@ -72,7 +75,7 @@ class ServiceMaterializationRepository:
                 probe=sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=.5)
                 try:
                     probe.execute("PRAGMA foreign_keys=ON")
-                    validate_schema(probe,integrity=True)
+                    checked(validate_schema,probe,integrity=True)
                 finally:
                     probe.close()
             self.connection=sqlite3.connect(self.db_path,isolation_level=None,timeout=.5)
@@ -83,7 +86,7 @@ class ServiceMaterializationRepository:
             if self.connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()[0]==0 and self.connection.execute("PRAGMA user_version").fetchone()[0]==0:
                 with self.transaction():
                     create_schema(self.connection,ni_format_utc(self.clock()))
-            validate_schema(self.connection,integrity=True)
+            checked(validate_schema,self.connection,integrity=True)
             self.live_state=self.connection.execute("SELECT runtime_state FROM service_materialization_runtime").fetchone()[0]
             return self
         except BaseException:

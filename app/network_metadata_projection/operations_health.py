@@ -17,6 +17,7 @@ from app.device_fingerprint_sensor import operations_metadata as m
 from app.operations_health import NI02_UNIT, validate
 
 SCHEMA = "captivprod.ops.ni02b-health.v1"
+SCHEMA_V2 = "captivprod.ops.ni02b-health.v2"
 PROVENANCE = "source_self_reported_shared_uid"
 REPORT = "health.json"
 DIRECTORY = "/run/captiveportal-operations/ni02b"
@@ -66,9 +67,10 @@ def decode(raw):
         return value
     def invalid(value):raise m.MetadataUnavailable()
     value = json.loads(raw.decode('utf-8'),object_pairs_hook=pairs,parse_constant=invalid)
+    v2=type(value) is dict and value.get('schema_version')==SCHEMA_V2
     m.require(type(value) is dict and set(value) == {'schema_version','producer_unit','producer','epoch','sequence',
-        'sample_time_utc','sample_boottime_ns','provenance','application_health','source_confirmed_at','writer_committed_at','pending_observed_at'})
-    m.require(value['schema_version'] == SCHEMA and value['producer_unit'] == NI02_UNIT and value['provenance'] == PROVENANCE)
+        'sample_time_utc','sample_boottime_ns','provenance','application_health','source_confirmed_at','writer_committed_at','pending_observed_at'} | ({'store_checks'} if v2 else set()))
+    m.require(value['schema_version'] in {SCHEMA,SCHEMA_V2} and value['producer_unit'] == NI02_UNIT and value['provenance'] == PROVENANCE)
     producer = value['producer']
     m.require(type(producer) is dict and set(producer) == {'boot_id','pid','start_ticks'})
     m.require(type(producer['boot_id']) is str and str(uuid.UUID(producer['boot_id'])) == producer['boot_id'])
@@ -76,6 +78,9 @@ def decode(raw):
     m.require(type(value['epoch']) is str and str(uuid.UUID(value['epoch'])) == value['epoch'])
     m.require(m.integer(value['sequence'],minimum=1) and m.integer(value['sample_boottime_ns'],2**63-1))
     sampled = m.parse_stamp(value['sample_time_utc'])
+    if v2:
+        from app.operations_verification import validate_checks
+        validate_checks(value['store_checks'],NI02_UNIT,sampled)
     health = validate(value['application_health'],NI02_UNIT)
     ages = {}
     for key in ('source_confirmed_at','writer_committed_at','pending_observed_at'):
@@ -92,10 +97,11 @@ def decode(raw):
 
 class HealthPublisher:
     def __init__(self, *, enabled=None, channel=configured_channel, monotonic=time.monotonic,
-                 now=lambda:datetime.now(timezone.utc), boottime=m.boot_ns, identity=m.process_identity):
+                 now=lambda:datetime.now(timezone.utc), boottime=m.boot_ns, identity=m.process_identity,db_path=None):
         self.enabled = os.environ.get('WEB_ADMIN_DB_SERVICES_ENABLED','false') == 'true' if enabled is None else enabled is True
         self.channel, self.monotonic, self.now, self.boottime, self.identity = channel, monotonic, now, boottime, identity
         self.last_attempt, self.sequence, self.epoch = None, 0, str(uuid.uuid4())
+        self.db_path=db_path
         self.lock = threading.Lock()
 
     def publish(self, health, times, cancel):
@@ -110,6 +116,9 @@ class HealthPublisher:
             value = dict(schema_version=SCHEMA,producer_unit=NI02_UNIT,producer=self.identity(os.getpid(),channel.uid),
                 epoch=self.epoch,sequence=self.sequence,sample_time_utc=m.stamp(self.now()),sample_boottime_ns=self.boottime(),
                 provenance=PROVENANCE,application_health=health,**times)
+            from app.operations_verification import snapshot
+            checks=snapshot(NI02_UNIT,refresh=True,paths={'network_metadata_projection':self.db_path})
+            if checks['checks']:value.update(schema_version=SCHEMA_V2,store_checks=checks)
             raw = json.dumps(value,allow_nan=False,ensure_ascii=True,separators=(',',':')).encode('ascii');decode(raw)
             try:
                 info = os.stat(REPORT,dir_fd=folder,follow_symlinks=False);channel.validate_file(info)
@@ -160,6 +169,10 @@ class HealthReader:
             m.require(value['sample_boottime_ns'] >= producer['start_ticks']*1_000_000_000//os.sysconf('SC_CLK_TCK'))
             sampled = m.parse_stamp(value['sample_time_utc'])
             m.require(sampled >= datetime.fromisoformat(service['started_at_utc'].replace('Z','+00:00')))
+            checks=value.get('store_checks')
+            if checks is not None:
+                start=datetime.fromisoformat(service['started_at_utc'].replace('Z','+00:00'))
+                m.require(all(row['checked_at_utc'] is None or m.parse_stamp(row['checked_at_utc'])>=start for row in checks['checks'].values()))
             age=(now-sampled).total_seconds();boot_age=(self.boottime()-value['sample_boottime_ns'])/1e9
             m.require(age >= 0 and boot_age >= 0 and abs(age-boot_age) <= 5)
             sha=hashlib.sha256(raw).digest()
@@ -168,10 +181,12 @@ class HealthReader:
                     and sampled >= self.last[4] and value['sample_boottime_ns'] >= self.last[5])
                 if value['sequence'] == self.last[2]:m.require(sha == self.last[3])
             m.require(monotonic() < deadline and not (cancel and cancel.is_set()))
-            if max(age,boot_age) > m.TTL:return dict(status='stale',reason='report_stale')
+            if max(age,boot_age) > m.TTL:return dict(status='stale',reason='report_stale',
+                **({'checks':checks,'producer':producer} if checks is not None else {}))
             self.last=producer,value['epoch'],value['sequence'],sha,sampled,value['sample_boottime_ns']
             return dict(status='fresh',health=value['application_health'],observed_at=value['sample_time_utc'],
-                age=max(age,boot_age),producer=producer,expires_boottime_ns=value['sample_boottime_ns']+int(m.TTL*1e9))
+                age=max(age,boot_age),producer=producer,expires_boottime_ns=value['sample_boottime_ns']+int(m.TTL*1e9),
+                **({'checks':checks} if checks is not None else {}))
         except Exception:return dict(status='unknown',reason='report_unavailable')
         finally:
             if fd is not None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from app.operations_verification import startup_check
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -281,6 +282,8 @@ class VisitorRegistryRepository:
         self.db_path = Path(config.db_path)
         self.busy_timeout_ms = max(1, int(busy_timeout_ms))
 
+    @startup_check('visitor_registry',lambda self:self.db_path,
+        ('schema_version','schema_signature','quick_check'),failures=(RegistrySchemaError,))
     def initialize(self, now_utc: str) -> bool:
         ensure_registry_parent(self.config)
         existed = registry_database_exists(self.db_path)

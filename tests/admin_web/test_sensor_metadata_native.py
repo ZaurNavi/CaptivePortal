@@ -113,6 +113,8 @@ def channel(request):
         raw_source = (ROOT / 'app/device_fingerprint_sensor/operations_metadata.py').read_bytes()
         module.write_bytes(raw_source); module.chmod(0o644)
         assert module.read_bytes() == raw_source
+        checks = code / 'app/operations_verification.py'
+        checks.write_bytes((ROOT / 'app/operations_verification.py').read_bytes()); checks.chmod(0o644)
         variant = getattr(request, 'param', None)
         if variant is not None:
             common = code / 'app/operations_health.py'

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from app.operations_verification import startup_check
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -56,6 +57,7 @@ class SensorSpool:
             except Exception:
                 pass  # Notification is never capacity/SQLite authority.
 
+    @startup_check('sensor_spool',lambda self:self.path,('schema_version','quick_check'),failures=(SensorSpoolError,))
     def initialize(self) -> None:
         with self._lock:
             self.next_possible_stale_at_utc = _UNKNOWN

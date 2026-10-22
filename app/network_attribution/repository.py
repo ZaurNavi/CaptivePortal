@@ -1,6 +1,7 @@
 """Sensor-owned single writer, atomic facts/intervals and separate coverage."""
 
 import os
+from app.operations_verification import startup_check, checked
 import sqlite3
 import threading
 import uuid
@@ -58,6 +59,8 @@ class NetworkAttributionRepository:
             import fcntl
             fcntl.flock(self._writer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+    @startup_check('network_attribution',lambda self:self.config.db_path,
+        ('schema_version','schema_signature','quick_check','foreign_key_check'))
     def initialize(self):
         if not self.config.enabled:
             raise NetworkAttributionStorageUnavailable("attribution_disabled")
@@ -68,7 +71,7 @@ class NetworkAttributionRepository:
                 probe = sqlite3.connect(Path(self.config.db_path).resolve().as_uri() + "?mode=ro", uri=True)
                 try:
                     probe.execute("PRAGMA foreign_keys=ON")
-                    validate_schema(probe)
+                    checked(validate_schema,probe)
                 finally:
                     probe.close()
             self.connection = sqlite3.connect(self.config.db_path, timeout=.5,
@@ -87,7 +90,7 @@ class NetworkAttributionRepository:
             if objects == 0 and self.connection.execute("PRAGMA user_version").fetchone()[0] == 0:
                 with self.transaction():
                     create_schema(self.connection)
-            validate_schema(self.connection)
+            checked(validate_schema,self.connection)
             return self
         except (sqlite3.Error, OSError, NetworkAttributionStorageUnavailable):
             self.close()

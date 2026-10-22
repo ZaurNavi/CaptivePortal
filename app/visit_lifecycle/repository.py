@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from app.operations_verification import startup_check
 import sqlite3
 import stat
 import threading
@@ -745,6 +746,8 @@ class VisitRepository:
             write_coordinator or PriorityWriteCoordinator()
         )
 
+    @startup_check('visits',lambda self:self.db_path,
+        ('schema_version','schema_signature','quick_check','foreign_key_check'),failures=(VisitSchemaError,))
     def initialize(self) -> bool:
         self._ensure_parent()
         existed = self._database_exists()

@@ -1,5 +1,6 @@
 """Single writer, atomic dispositions, monotonic Registry joins and hard cap."""
 import os
+from app.operations_verification import startup_check, checked
 import sqlite3
 import time
 import uuid
@@ -67,6 +68,8 @@ class ProjectionRepository:
             import fcntl
             fcntl.flock(self._writer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+    @startup_check('network_metadata_projection',lambda self:self.config.db_path,
+        ('schema_version','schema_signature','quick_check','foreign_key_check'))
     def initialize(self):
         if not self.config.enabled:
             raise ProjectionUnavailable("projection_disabled")
@@ -77,7 +80,7 @@ class ProjectionRepository:
                 probe = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=.5)
                 try:
                     probe.execute("PRAGMA foreign_keys=ON")
-                    validate_schema(probe, integrity=True)
+                    checked(validate_schema,probe,integrity=True)
                 finally:
                     probe.close()
             self.connection = sqlite3.connect(self.config.db_path, isolation_level=None, timeout=.5)
@@ -101,7 +104,7 @@ class ProjectionRepository:
                 with self.transaction():
                     self._pin_scope_admission()
             self.service_recognition_extension_present = (
-                validate_schema(self.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1")
+                checked(validate_schema,self.connection,integrity=True) == "CORE_PLUS_EXTENSION_V1")
             row = self.connection.execute("SELECT runtime_state,safe_reason FROM projection_runtime_state").fetchone()
             self.live_state, self.live_reason = row
             if self._install_service_recognition_extension:
