@@ -49,7 +49,7 @@ const tick=async()=>{await new Promise(resolve=>setImmediate(resolve));};
     if(scenario!=="fallback"){
       assert(text(ids.get("ops-services")).includes("Health observed"));
       assert(text(ids.get("ops-services")).includes("Source-native ready; dependencies confirmed"));
-      assert(text(ids.get("ops-summary")).includes(scenario.startsWith("check-") ? "Historical owner startup checks shown separately" : "No SQLite attestation collected"));
+      assert(text(ids.get("ops-summary")).includes("Historical owner startup checks, not continuous SQLite integrity monitoring."));
       assert(text(ids.get("ops-databases")).includes("DELETE journal (not included in main + WAL + SHM)"));
       if(scenario.startsWith("check-")){
         const expected={"check-passed":"Startup check passed","check-failed":"Startup check failed","check-stale":"Previously checked · stale evidence","check-settings":"Not applicable · Settings disabled"}[scenario];

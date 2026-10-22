@@ -173,23 +173,47 @@ def not_attested():
     return dict(status='not_attested',scope=None,as_of=None,source='none')
 
 
-def project(db_id, record, current_id, *, intent, source_current, stale=False):
+def project(db_id, record, current_id, *, intent, source_current, stale=False, binding_current=True):
     """Public historical proof, independent of file-presence/app-health axes."""
+    # Record presence means OwnerChecks already bound the producer incarnation.
+    # TTL is a separate axis: never infer the original result from its scope.
+    extra = dict(last_result=record['row']['status'] if record is not None else None, binding='unknown')
+    if record is not None and binding_current and current_id is not None and record['row']['checked_store_id'] is not None:
+        extra['binding'] = 'matched' if record['row']['checked_store_id']==current_id else 'changed'
     if db_id=='settings' and intent=='optional_disabled':
-        return dict(status='not_applicable',scope=None,as_of=None,source='none',freshness='not_applicable',reason='configured_disabled')
-    if record is None:return not_attested()
+        return dict(status='not_applicable',scope=None,as_of=None,source='none',freshness='not_applicable',reason='configured_disabled',**extra)
+    if record is None:return dict(not_attested(),**extra)
     row=record['row'];status=row['status'];reason=row['reason']
-    if status=='not_run':return dict(status='not_attested',scope=None,as_of=None,source='none',freshness='unknown',reason='check_not_run')
+    if status=='not_run':return dict(status='not_attested',scope=None,as_of=None,source='none',freshness='unknown',reason='check_not_run',**extra)
     same=current_id is not None and row['checked_store_id']==current_id
     if not same or not source_current or stale:
         status='stale' if row['checked_at_utc'] is not None else 'unknown'
         reason='store_changed' if not same else 'source_stale'
     if status=='unknown':reason='startup_unavailable'
     return dict(status=status,scope=row['scope'] or None,as_of=row['checked_at_utc'],source=OWNERS[db_id],
-        freshness='current_report' if same and source_current and not stale else 'stale',reason=reason)
+        freshness='current_report' if same and source_current and not stale else 'stale',reason=reason,**extra)
 
 
 def validate_public(value,db_id):
+    if type(value) is not dict:raise ValueError('invalid public check')
+    extended = bool({'last_result','binding'} & set(value))
+    if extended:
+        if not {'last_result','binding'} <= set(value):raise ValueError('partial check binding')
+        original={key:item for key,item in value.items() if key not in {'last_result','binding'}}
+        validate_public(original,db_id)
+        result,binding=value['last_result'],value['binding']
+        if (result is not None and (type(result) is not str or result not in {'passed','failed','unknown','not_run'})
+                or type(binding) is not str or binding not in {'matched','changed','unknown'}):raise ValueError('invalid check binding')
+        status=value['status']
+        if status in {'passed','failed'} and (result!=status or binding!='matched'):raise ValueError('inconsistent current check')
+        if status=='stale' and (result not in {'passed','failed','unknown'} or value['reason']=='store_changed' and binding=='matched'):raise ValueError('inconsistent historical check')
+        if status=='unknown' and result!='unknown':raise ValueError('inconsistent unknown check')
+        if result is None and binding!='unknown':raise ValueError('invented missing binding')
+        if status=='not_attested':
+            if original==not_attested():
+                if result is not None or binding!='unknown':raise ValueError('invented missing binding')
+            elif result!='not_run':raise ValueError('invented check result')
+        return value
     if value==not_attested():return value  # Backward compatible v2 producer.
     if type(value) is not dict or set(value)!={'status','scope','as_of','source','freshness','reason'}:raise ValueError('invalid public check')
     if value['status'] not in {'passed','failed','unknown','stale','not_applicable','not_attested'}:raise ValueError('invalid public state')

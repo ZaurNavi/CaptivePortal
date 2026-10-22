@@ -179,7 +179,7 @@ def test_projection_revokes_current_pass_for_source_or_store_change(fault):
 
 
 def test_missing_checks_and_disabled_settings_do_not_create_false_FAILURE():
-    assert v.project('visits',None,None,intent='expected',source_current=False)==v.not_attested()
+    assert v.project('visits',None,None,intent='expected',source_current=False)==dict(v.not_attested(),last_result=None,binding='unknown')
     value=v.project('settings',None,None,intent='optional_disabled',source_current=False)
     assert value['status']=='not_applicable';v.validate_public(value,'settings')
 
