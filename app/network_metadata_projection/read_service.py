@@ -122,6 +122,68 @@ class DeviceNetworkMetadataReadService:
         item.pop("transport_protocol")
         return asdict(DeviceNetworkMetadataEdgeV1(**item))
 
+    def read_visit_protocol_snapshot(self, site_id, device_id, client_mac, started_at, ended_at,
+                                     *, evaluated_at, deadline):
+        """Three bounded index seeks over one REAL Visit interval, never 24h.
+
+        For the existing Visit background loop ONLY. This is not a complete
+        history attestation: NI02 retention/gaps cannot prove a negative. A
+        future record is excluded by end <= actual evaluation time, not by
+        interpreting later legitimate visits as corruption. No raw endpoint,
+        domain or event payload is read. The caller must validate the Visit's
+        own immutable Device link and recheck its guard before the Visit write.
+        """
+        try:
+            validate_site_id(site_id)
+            canonical_uuid(device_id)
+            if canonical_mac(client_mac) != client_mac:
+                raise ValueError
+            start = ni_timestamp(started_at, canonical=True)
+            end = ni_timestamp(ended_at, canonical=True)
+            now = ni_timestamp(evaluated_at, canonical=True)
+            if not start < end <= now:
+                raise ValueError
+        except Exception:
+            raise ProjectionValidationError() from None
+        with self._snapshot(deadline=deadline) as connection:
+            # The metadata validator accepts old V2 for other consumers; this
+            # specialized read must not fall back to a non-indexed edge scan.
+            if connection.execute("SELECT 1 FROM sqlite_schema WHERE type='index' AND name=?",
+                    ("idx_projection_mac_family_event_latest",)).fetchone() is None:
+                raise ProjectionUnavailable()
+            state = self._runtime_state(connection)
+            binding = connection.execute(
+                "SELECT binding_state,device_id,authoritative_bound_at FROM projection_site_mac_bindings "
+                "WHERE site_id=? AND client_mac=?", (site_id, client_mac)).fetchone()
+            result = dict(runtime_state=state, binding_state=binding[0] if binding else None,
+                bound_device_id=binding[1] if binding else None, binding_confirmed_at=binding[2] if binding else None,
+                facts=(), historical_completeness_claimed=False)
+            if binding is None or binding[0] in {"not_yet_registry_resolved", "registry_unavailable"}:
+                return result
+            if binding[0] != "authoritative" or binding[1] != device_id:
+                raise ProjectionUnavailable()
+            if ni_timestamp(binding[2], canonical=True) > now:
+                raise ProjectionUnavailable()
+            facts = []
+            for family in ("dns", "tls", "quic"):
+                deadline.require_remaining()
+                row = connection.execute(
+                    "SELECT edge_id,event_at,source_event_family FROM device_network_metadata_edges "
+                    "INDEXED BY idx_projection_mac_family_event_latest "
+                    "WHERE site_id=? AND client_mac=? AND source_event_family=? AND event_at>=? AND event_at<? "
+                    "ORDER BY event_at DESC,edge_id LIMIT 1",
+                    (site_id, client_mac, family, started_at, ended_at)).fetchone()
+                if row is not None:
+                    # Stored text remains untrusted even behind a valid index.
+                    from app.network_metadata.validation import digest
+                    digest(row['edge_id'])
+                    event_at = ni_timestamp(row['event_at'], canonical=True)
+                    if row['source_event_family'] != family or not start <= event_at < end or event_at > now:
+                        raise ProjectionUnavailable()
+                    facts.append(dict(row))
+            result['facts'] = tuple(facts)
+            return result
+
     def _list(self, site_id, from_utc, to_utc, limit, cursor, predicate, identity):
         read_window(site_id, from_utc, to_utc, limit, cursor)
         parameters = [site_id, identity, from_utc, to_utc]

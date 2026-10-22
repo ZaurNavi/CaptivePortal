@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .models import (
+    protocol_visit_guard,
     OfflineEvidence,
     OfflineProcessingOutcome,
     ReaderCheckpoint,
@@ -720,6 +721,83 @@ def _schema_sql_v2() -> str:
     )
 
 
+PROTOCOL_SUMMARY_DDL = """CREATE TABLE visit_network_protocol_summary (
+    visit_id TEXT PRIMARY KEY REFERENCES visits(visit_id) ON DELETE CASCADE,
+    summary_version INTEGER NOT NULL CHECK(summary_version=1),
+    site_id TEXT NOT NULL, client_mac TEXT NOT NULL, device_id TEXT,
+    visit_guard TEXT NOT NULL, visit_started_at TEXT NOT NULL, snapshot_id TEXT, binding_confirmed_at TEXT,
+    dns_at TEXT, dns_edge TEXT, tls_at TEXT, tls_edge TEXT, quic_at TEXT, quic_edge TEXT,
+    summary_state TEXT NOT NULL CHECK(summary_state IN ('pending','partial','active','unavailable','finalized')),
+    source_coverage TEXT NOT NULL CHECK(source_coverage IN ('unknown','bounded_partial','unavailable')),
+    attribution_coverage TEXT NOT NULL CHECK(attribution_coverage IN ('unknown','current_available','limited')),
+    partial_reason TEXT NOT NULL CHECK(partial_reason IN ('identity_unconfirmed','source_unavailable',
+        'no_confirmed_observation','late_unresolved','bounded_source','grace_elapsed_partial')),
+    evaluated_at TEXT NOT NULL, finalized_at TEXT,
+    CHECK((dns_at IS NULL)=(dns_edge IS NULL)), CHECK((tls_at IS NULL)=(tls_edge IS NULL)),
+    CHECK((quic_at IS NULL)=(quic_edge IS NULL)),
+    CHECK((summary_state='finalized')=(finalized_at IS NOT NULL)))"""
+
+
+def _schema_sql_v3():
+    return _schema_sql_v2().replace('        PRAGMA user_version = 2;\n        COMMIT;',
+        PROTOCOL_SUMMARY_DDL + ';\n        PRAGMA user_version = 3;\n        COMMIT;')
+
+
+SERVICE_HISTORY_DDL = (
+    """CREATE TABLE visit_service_membership (
+        fact_key TEXT PRIMARY KEY,site_id TEXT NOT NULL,device_id TEXT NOT NULL,client_mac TEXT NOT NULL,
+        edge_id TEXT NOT NULL,service_id TEXT NOT NULL,observed_at TEXT NOT NULL,
+        generation_id TEXT NOT NULL,source_ref TEXT NOT NULL,source_observation_id TEXT NOT NULL,
+        binding_seq INTEGER NOT NULL CHECK(binding_seq>0),taxonomy_id TEXT NOT NULL,taxonomy_version INTEGER NOT NULL,
+        taxonomy_digest TEXT NOT NULL,ruleset_id TEXT NOT NULL,ruleset_version INTEGER NOT NULL,ruleset_digest TEXT NOT NULL,
+        rule_id TEXT NOT NULL,service_label TEXT NOT NULL,organization_id TEXT NOT NULL,organization_label TEXT NOT NULL,category_id TEXT NOT NULL,
+        visit_id TEXT REFERENCES visits(visit_id) ON DELETE CASCADE,visit_guard TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending','provisional','confirmed','ambiguous','invalidated','expired')),
+        reason TEXT NOT NULL CHECK(reason IN ('identity_pending','unique_visit','visit_revision','lineage_pending','binding_changed','conflicting_fact','future_event','no_visit','sealed_visit','pending_expired')),
+        created_at TEXT NOT NULL,updated_at TEXT NOT NULL,last_outbox_seq INTEGER NOT NULL CHECK(last_outbox_seq>0),
+        finalized_at TEXT,CHECK((visit_id IS NULL)=(visit_guard IS NULL)),UNIQUE(site_id,edge_id,service_id))""",
+    'CREATE INDEX idx_visit_service_match ON visit_service_membership(site_id,device_id,client_mac,observed_at,fact_key)',
+    'CREATE INDEX idx_visit_service_rollup ON visit_service_membership(visit_id,service_id,status,observed_at,fact_key)',
+    'CREATE INDEX idx_visit_service_pending ON visit_service_membership(finalized_at,status,updated_at,fact_key)',
+    'CREATE INDEX idx_visit_service_generation ON visit_service_membership(generation_id,finalized_at,status,fact_key)',
+    'CREATE INDEX idx_visit_service_unsealed ON visit_service_membership(visit_id,service_id,finalized_at,fact_key)',
+    """CREATE TABLE visit_service_summary (
+        site_id TEXT NOT NULL,visit_id TEXT NOT NULL REFERENCES visits(visit_id) ON DELETE CASCADE,service_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,visit_guard TEXT NOT NULL,generation_id TEXT NOT NULL,service_label TEXT NOT NULL,
+        organization_id TEXT NOT NULL,organization_label TEXT NOT NULL,
+        first_observed_at TEXT NOT NULL,last_observed_at TEXT NOT NULL,
+        distinct_observation_count INTEGER NOT NULL CHECK(distinct_observation_count>0),
+        taxonomy_id TEXT NOT NULL,taxonomy_version INTEGER NOT NULL,taxonomy_digest TEXT NOT NULL,
+        ruleset_id TEXT NOT NULL,ruleset_version INTEGER NOT NULL,ruleset_digest TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('processing','confirmed','incomplete')),
+        updated_at TEXT NOT NULL,finalized_at TEXT,
+        PRIMARY KEY(site_id,visit_id,service_id))""",
+    """CREATE TABLE visit_service_consumer_state (
+        singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),consumer_id TEXT NOT NULL,
+        source_stream_id TEXT NOT NULL,last_outbox_seq INTEGER NOT NULL CHECK(last_outbox_seq>=0),last_outbox_hash TEXT NOT NULL,
+        active_generation_id TEXT,source_head_seq INTEGER NOT NULL CHECK(source_head_seq>=last_outbox_seq),
+        history_ttl_days INTEGER NOT NULL CHECK(history_ttl_days BETWEEN 1 AND 365),
+        status TEXT NOT NULL CHECK(status IN ('processing','incomplete','unavailable')),
+        safe_reason TEXT NOT NULL CHECK(safe_reason IN ('backfill_limited','source_unavailable','checkpoint_conflict')),
+        updated_at TEXT NOT NULL)""",
+)
+
+
+def _schema_sql_v4():
+    return _schema_sql_v3().replace('        PRAGMA user_version = 3;\n        COMMIT;',
+        ';\n'.join(SERVICE_HISTORY_DDL) + ';\n        PRAGMA user_version = 4;\n        COMMIT;')
+
+
+def expected_visit_signature(version):
+    """An explicit schema for each supported revision; never a >= predicate."""
+    builders = {2: _schema_sql_v2, 3: _schema_sql_v3, 4: _schema_sql_v4}
+    if type(version) is not int or version not in builders:
+        raise VisitSchemaError('Unsupported Visit schema version')
+    with closing(sqlite3.connect(':memory:')) as connection:
+        connection.executescript(builders[version]())
+        return _schema_signature(connection)
+
+
 class VisitRepository:
     """Own Visit schema v2 and short serialized write transactions."""
 
@@ -732,6 +810,7 @@ class VisitRepository:
     ):
         self.config = config
         self.db_path = Path(config.db_path)
+        self._service_review_after = None
         sqlite_timeout = (
             config.sqlite_busy_timeout_ms
             if busy_timeout_ms is None
@@ -761,14 +840,20 @@ class VisitRepository:
                         raise VisitSchemaError(
                             "Visit schema version 0 is non-empty"
                         )
-                    connection.executescript(_schema_sql_v2())
+                    connection.executescript(_schema_sql_v4())
                     created = True
                 elif version == 1:
                     self._migrate_v1_to_v2(connection)
-                elif version != SCHEMA_VERSION:
+                    version = 2
+                elif version not in (2, 3, 4):
                     raise VisitSchemaError(
                         f"Unsupported Visit schema version: {version}"
                     )
+                if version == 2:
+                    self._migrate_protocol_summary(connection)
+                    version = 3
+                if version == 3:
+                    self._migrate_service_history(connection)
                 self._startup_check(connection)
                 if os.name == "posix":
                     os.chmod(self.db_path, 0o640)
@@ -809,9 +894,39 @@ class VisitRepository:
             for statement in MIGRATION_V1_TO_V2_STATEMENTS:
                 connection.execute(statement)
             connection.execute("PRAGMA user_version = 2")
-            self._startup_check(connection)
+            if _schema_signature(connection) != _expected_v2_signature():
+                raise VisitSchemaError('Visit v1 migration did not produce exact v2')
             connection.commit()
         except Exception:
+            connection.rollback()
+            raise
+
+    def _migrate_protocol_summary(self, connection):
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            if _schema_signature(connection) != expected_visit_signature(2):
+                raise VisitSchemaError('Visit v2 migration source schema mismatch')
+            if connection.execute('PRAGMA quick_check').fetchone()[0] != 'ok' or connection.execute('PRAGMA foreign_key_check').fetchone():
+                raise VisitSchemaError('Visit v2 migration source failed validation')
+            connection.execute(PROTOCOL_SUMMARY_DDL)
+            connection.execute('PRAGMA user_version=3')
+            if _schema_signature(connection)!=expected_visit_signature(3) or connection.execute('PRAGMA foreign_key_check').fetchone():
+                raise VisitSchemaError('Visit v3 migration output invalid')
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def _migrate_service_history(self, connection):
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            if _schema_signature(connection)!=expected_visit_signature(3) or connection.execute('PRAGMA quick_check').fetchone()[0]!='ok' or connection.execute('PRAGMA foreign_key_check').fetchone():
+                raise VisitSchemaError('Visit v3 migration source failed validation')
+            for statement in SERVICE_HISTORY_DDL:connection.execute(statement)
+            connection.execute('PRAGMA user_version=4')
+            self._startup_check(connection)
+            connection.commit()
+        except BaseException:
             connection.rollback()
             raise
 
@@ -926,6 +1041,266 @@ class VisitRepository:
 
     def wake_write_waiters(self) -> None:
         self._write_coordinator.wake_all()
+
+    def protocol_candidates(self, now, *, after=None, limit=25, deadline=None):
+        """Bounded fair page, only OPEN/recent provisional; no historic backfill."""
+        if type(limit) is not int or not 1 <= limit <= BACKGROUND_CHUNK_MAX_ITEMS:
+            raise ValueError('Invalid protocol batch bound')
+        cutoff = _add_seconds(now, -900)
+        with self.read_connection() as c:
+            if deadline is not None:
+                c.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+            try:
+                rows = c.execute("SELECT v.* FROM visits v LEFT JOIN visit_network_protocol_summary s ON s.visit_id=v.visit_id "
+                    "WHERE v.visit_id>? AND (v.status='open' OR v.closed_at>=? OR s.visit_id IS NOT NULL) "
+                    "AND s.finalized_at IS NULL ORDER BY v.visit_id LIMIT ?", (after or '', cutoff, limit)).fetchall()
+                return tuple(_visit_row(row) for row in rows)
+            finally:
+                c.set_progress_handler(None, 0)
+
+    def saved_protocol_summary(self, visit):
+        with self.read_connection() as c:
+            row = c.execute('SELECT * FROM visit_network_protocol_summary WHERE visit_id=?', (visit.visit_id,)).fetchone()
+            return None if row is None else dict(row)
+
+    def service_consumer_cursor(self):
+        with self.read_connection() as c:
+            row=c.execute('SELECT * FROM visit_service_consumer_state WHERE singleton_id=1').fetchone()
+            return None if row is None else dict(row)
+
+    def service_delivery_unavailable(self, *, now, deadline, conflict=False):
+        # Persist one transition, not a heartbeat/error write every idle pass.
+        old=self.service_consumer_cursor()
+        reason='checkpoint_conflict' if conflict else 'source_unavailable'
+        if old is None or old['status']=='unavailable' and old['safe_reason']==reason:return
+        with self._bounded_write(WRITE_OPERATION_RECONCILIATION,deadline=deadline) as lease,closing(
+                self._connect(busy_timeout_ms=1)) as c:
+            c.execute('BEGIN IMMEDIATE')
+            c.execute("UPDATE visit_service_consumer_state SET status='unavailable',safe_reason=?,updated_at=? WHERE singleton_id=1 AND last_outbox_seq=? AND last_outbox_hash=?",
+                (reason,now,old['last_outbox_seq'],old['last_outbox_hash']))
+            c.commit();lease.mark_progress()
+
+    @staticmethod
+    def _service_fact_key(row):
+        import hashlib,json
+        return hashlib.sha256(json.dumps([row['site_id'],row['edge_id'],row['service_id']],separators=(',',':')).encode()).hexdigest()
+
+    @staticmethod
+    def _service_credit(row):
+        return row is not None and row['visit_id'] is not None and row['status'] in ('provisional','confirmed')
+
+    def _service_association(self,c,row,now,active):
+        """At most two real event-time candidates; no current-MAC substitution."""
+        from app.network_metadata.validation import ni_timestamp
+        event=ni_timestamp(row['observed_at'],canonical=True)
+        current=datetime.fromisoformat(now.replace('Z','+00:00'))
+        if event>current:return None,'pending','future_event',None
+        if row['generation_id']!=active:return None,'pending','lineage_pending',None
+        floor=event.isoformat(timespec='milliseconds').replace('+00:00','Z')
+        candidates=c.execute('SELECT * FROM visits WHERE site_id=? AND client_mac=? AND started_at<=? AND (closed_at IS NULL OR closed_at>?) ORDER BY started_at DESC LIMIT 2',
+            (row['site_id'],row['client_mac'],floor,floor)).fetchall()
+        if len(candidates)!=1:return None,'ambiguous' if candidates else 'pending','identity_pending' if candidates else 'no_visit',None
+        visit=_visit_row(candidates[0])
+        if visit.device_id!=row['device_id'] or visit.initial_snapshot_id is None:return None,'pending','identity_pending',None
+        if visit.closed_at is not None and current>=datetime.fromisoformat(visit.closed_at.replace('Z','+00:00'))+timedelta(seconds=900):
+            if row.get('visit_id')!=visit.visit_id:return None,'pending','sealed_visit',None
+            return visit,'confirmed','unique_visit',now
+        return visit,'confirmed' if visit.status=='closed' else 'provisional','unique_visit',None
+
+    def _store_service_member(self,c,old,new,now):
+        """Incremental count, bounded indexed first/last probes; no raw rescan."""
+        groups={}
+        for member,sign in ((old,-1),(new,1)):
+            if self._service_credit(member):
+                key=(member['site_id'],member['visit_id'],member['service_id'])
+                groups[key]=groups.get(key,0)+sign
+        columns=tuple(new)
+        c.execute('INSERT INTO visit_service_membership('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+') ON CONFLICT(fact_key) DO UPDATE SET '+
+            ','.join(k+'=excluded.'+k for k in columns if k!='fact_key'),tuple(new.values()))
+        for key,delta in groups.items():
+            previous=c.execute('SELECT * FROM visit_service_summary WHERE site_id=? AND visit_id=? AND service_id=?',key).fetchone()
+            count=(previous['distinct_observation_count'] if previous else 0)+delta
+            if count<=0:
+                c.execute('DELETE FROM visit_service_summary WHERE site_id=? AND visit_id=? AND service_id=?',key);continue
+            bounds=[]
+            for status in ('provisional','confirmed'):
+                for order in ('ASC','DESC'):
+                    value=c.execute('SELECT * FROM visit_service_membership WHERE visit_id=? AND service_id=? AND status=? ORDER BY observed_at '+order+',fact_key '+order+' LIMIT 1',
+                        (key[1],key[2],status)).fetchone()
+                    if value is not None:bounds.append(dict(value))
+            if not bounds:raise VisitSchemaError('Visit service count invariant failed')
+            first=min(r['observed_at'] for r in bounds);latest=max(bounds,key=lambda r:(r['observed_at'],r['fact_key']))
+            visit=_visit_row(c.execute('SELECT * FROM visits WHERE visit_id=?',(key[1],)).fetchone())
+            saved=dict(site_id=key[0],visit_id=key[1],service_id=key[2],device_id=visit.device_id,visit_guard=protocol_visit_guard(visit),
+                generation_id=latest['generation_id'],service_label=latest['service_label'],organization_id=latest['organization_id'],organization_label=latest['organization_label'],
+                first_observed_at=first,last_observed_at=latest['observed_at'],distinct_observation_count=count,
+                **{k:latest[k] for k in ('taxonomy_id','taxonomy_version','taxonomy_digest','ruleset_id','ruleset_version','ruleset_digest')},
+                status='processing' if visit.status=='open' else 'confirmed',updated_at=now,
+                finalized_at=now if c.execute('SELECT 1 FROM visit_service_membership WHERE visit_id=? AND service_id=? AND finalized_at IS NULL LIMIT 1',
+                    (key[1],key[2])).fetchone() is None else None)
+            cols=tuple(saved)
+            c.execute('INSERT INTO visit_service_summary('+','.join(cols)+') VALUES('+','.join('?' for _ in cols)+') ON CONFLICT(site_id,visit_id,service_id) DO UPDATE SET '+
+                ','.join(k+'=excluded.'+k for k in cols if k not in ('site_id','visit_id','service_id')),tuple(saved.values()))
+
+    def consume_service_delivery(self,page,expected_cursor,*,now,history_ttl_days,deadline,cancel_event=None,crash_point=lambda _:None):
+        """Source snapshot already closed. Membership/rollup/checkpoint ONE commit."""
+        import uuid
+        from app.network_service_recognition.materialization_repository import MaterializationConflict
+        if type(history_ttl_days) is not int or not 1<=history_ttl_days<=365 or len(page['entries'])>25:raise ValueError('Invalid Visit history policy')
+        with self._bounded_write(WRITE_OPERATION_RECONCILIATION,deadline=deadline,cancel_event=cancel_event) as lease, closing(
+                self._connect(busy_timeout_ms=1)) as c:
+            c.execute('BEGIN IMMEDIATE')
+            hold=min(deadline,time.monotonic()+BACKGROUND_CHUNK_TARGET_MAX_HOLD_MS/1000)
+            c.set_progress_handler(lambda:int(time.monotonic()>=hold or cancel_event is not None and cancel_event.is_set()),100)
+            try:
+                current=c.execute('SELECT * FROM visit_service_consumer_state WHERE singleton_id=1').fetchone()
+                if (None if current is None else dict(current))!=expected_cursor:raise MaterializationConflict()
+                if current is not None and (current['source_stream_id']!=page['stream_id'] or current['history_ttl_days']!=history_ttl_days):raise MaterializationConflict()
+                seq,hashed=page['after_seq'],page['after_hash'];active=current['active_generation_id'] if current else None
+                changed=0;reviewed=set()
+                for event in page['entries']:
+                    if time.monotonic()>=hold:break
+                    if event['kind'] in ('binding','generation'):
+                        if event['kind']=='binding':
+                            where='site_id=? AND client_mac=? AND binding_seq<? AND status<>?'
+                            args=(event['site_id'],event['client_mac'],event['binding_seq'],'invalidated')
+                        else:
+                            where="generation_id<>? AND status IN ('provisional','confirmed')"
+                            args=(event['generation_id'],)
+                        affected=c.execute('SELECT * FROM visit_service_membership WHERE finalized_at IS NULL AND '+where+' ORDER BY fact_key LIMIT 25',args).fetchall()
+                        for raw in affected:
+                            old=dict(raw);new=dict(old,visit_id=None,visit_guard=None,status='invalidated' if event['kind']=='binding' else 'pending',
+                                reason='binding_changed' if event['kind']=='binding' else 'lineage_pending',updated_at=now)
+                            if event['kind']=='binding':new['binding_seq']=event['binding_seq']
+                            self._store_service_member(c,old,new,now);reviewed.add(new['fact_key']);changed+=1
+                        # Do not pass this marker until EVERY affected provisional
+                        # row has been durably corrected, in bounded chunks.
+                        if c.execute('SELECT 1 FROM visit_service_membership WHERE finalized_at IS NULL AND '+where+' LIMIT 1',args).fetchone():break
+                        if event['kind']=='generation':active=event['generation_id']
+                    else:
+                        key=self._service_fact_key(event)
+                        raw=c.execute('SELECT * FROM visit_service_membership WHERE fact_key=?',(key,)).fetchone()
+                        old=None if raw is None else dict(raw)
+                        if old is None or old['finalized_at'] is None:
+                            fields=('site_id','device_id','client_mac','edge_id','service_id','observed_at','generation_id','source_ref','source_observation_id',
+                                'binding_seq','taxonomy_id','taxonomy_version','taxonomy_digest','ruleset_id','ruleset_version','ruleset_digest','rule_id','service_label','organization_id','organization_label','category_id')
+                            new={k:event[k] for k in fields}
+                            new.update(fact_key=key,created_at=old['created_at'] if old else now,updated_at=now,last_outbox_seq=event['outbox_seq'],
+                                visit_id=old['visit_id'] if old else None,visit_guard=old['visit_guard'] if old else None,finalized_at=None)
+                            conflicts=old is not None and any(old[k]!=new[k] for k in ('site_id','device_id','client_mac','edge_id','service_id','observed_at','source_ref'))
+                            if old is not None and old['binding_seq']>new['binding_seq']:
+                                new=dict(old)  # Older replay cannot undo an authoritative correction.
+                            elif conflicts:
+                                new=dict(old,visit_id=None,visit_guard=None,status='ambiguous',reason='conflicting_fact',updated_at=now)
+                            else:
+                                visit,status,reason,finalized=self._service_association(c,new,now,page['active_generation'])
+                                new.update(visit_id=visit.visit_id if visit else None,visit_guard=protocol_visit_guard(visit) if visit else None,
+                                    status=status,reason=reason,finalized_at=finalized)
+                            self._store_service_member(c,old,new,now);reviewed.add(key);changed+=1
+                        # Sealed history never silently changes on late generations.
+                    seq,hashed=event['outbox_seq'],event['entry_hash']
+                    crash_point('visit_membership_applied' if event['kind']=='positive' else 'visit_marker_applied')
+                # Fair, bounded correction of late Visit closure/binding and
+                # previously staged missing identities; no source/raw rescan.
+                rows=c.execute("SELECT * FROM visit_service_membership WHERE finalized_at IS NULL AND status NOT IN ('invalidated','expired','ambiguous') "
+                    "AND fact_key>? ORDER BY fact_key LIMIT 25",(self._service_review_after or '',)).fetchall()
+                if not rows and self._service_review_after is not None:
+                    rows=c.execute("SELECT * FROM visit_service_membership WHERE finalized_at IS NULL AND status NOT IN ('invalidated','expired','ambiguous') ORDER BY fact_key LIMIT 25").fetchall()
+                for raw in rows:
+                    if time.monotonic()>=hold:break
+                    old=dict(raw)
+                    if old['fact_key'] in reviewed or old['reason']=='conflicting_fact':continue
+                    visit,status,reason,finalized=self._service_association(c,old,now,page['active_generation'])
+                    new=dict(old,visit_id=visit.visit_id if visit else None,visit_guard=protocol_visit_guard(visit) if visit else None,
+                        status=status,reason=reason,finalized_at=finalized)
+                    if new!=old:
+                        new['updated_at']=now;self._store_service_member(c,old,new,now);changed+=1
+                cutoff=_add_seconds(now,-14*86400);history_cutoff=_add_seconds(now,-history_ttl_days*86400)
+                expired=c.execute('SELECT fact_key,visit_id,service_id FROM visit_service_membership WHERE (visit_id IS NULL AND created_at<?) OR visit_id IN (SELECT visit_id FROM visits WHERE closed_at<?) LIMIT 25',
+                    (cutoff,history_cutoff)).fetchall()
+                for key,visit_id,service_id in expired:
+                    c.execute('DELETE FROM visit_service_membership WHERE fact_key=?',(key,))
+                    if visit_id:c.execute('DELETE FROM visit_service_summary WHERE visit_id=? AND service_id=?',(visit_id,service_id))
+                    changed+=1
+                target=dict(singleton_id=1,consumer_id=current['consumer_id'] if current else str(uuid.uuid4()),source_stream_id=page['stream_id'],
+                    last_outbox_seq=seq,last_outbox_hash=hashed,active_generation_id=page['active_generation'],source_head_seq=page['head_seq'],
+                    history_ttl_days=history_ttl_days,status='processing' if seq<page['head_seq'] else 'incomplete',safe_reason='backfill_limited',updated_at=now)
+                from app.network_metadata.validation import ni_timestamp
+                source_age=(datetime.fromisoformat(now.replace('Z','+00:00'))-ni_timestamp(page['source_updated_at'],canonical=True)).total_seconds()
+                if page['source_state'] in {'source_unavailable','recognition_unavailable','capacity_halted','blocked_conflict','stopping'} or not 0<=source_age<=300:
+                    target.update(status='unavailable',safe_reason='source_unavailable')
+                cp_changed=current is None or any(current[k]!=v for k,v in target.items() if k!='updated_at')
+                if cp_changed:
+                    cols=tuple(target)
+                    c.execute('INSERT INTO visit_service_consumer_state('+','.join(cols)+') VALUES('+','.join('?' for _ in cols)+') ON CONFLICT(singleton_id) DO UPDATE SET '+
+                        ','.join(k+'=excluded.'+k for k in cols if k!='singleton_id'),tuple(target.values()))
+                crash_point('visit_checkpoint_applied')
+                c.set_progress_handler(None,0)
+                if changed or cp_changed:
+                    if time.monotonic()>=deadline or cancel_event is not None and cancel_event.is_set():raise MaterializationConflict()
+                    crash_point('visit_before_commit');c.commit();lease.mark_progress();crash_point('visit_after_commit')
+                else:c.rollback();lease.mark_no_work()
+                self._service_review_after=rows[-1]['fact_key'] if rows else None
+                return changed
+            except BaseException:
+                c.set_progress_handler(None,0)
+                if c.in_transaction:c.rollback()
+                raise
+
+    @staticmethod
+    def _protocol_bounds_clear(c, visit, end):
+        return c.execute("SELECT 1 FROM visits WHERE site_id=? AND client_mac=? AND visit_id<>? "
+            "AND started_at<? AND (closed_at IS NULL OR closed_at>?) LIMIT 1",
+            (visit.site_id, visit.client_mac, visit.visit_id, end, visit.started_at)).fetchone() is None
+
+    def protocol_bounds_clear(self, visit, end):
+        with self.read_connection() as c:
+            return self._protocol_bounds_clear(c, visit, end)
+
+    def put_protocol_summaries(self, updates, *, deadline, cancel_event=None):
+        """Source readers are closed. Existing priority lease, one short batch."""
+        from .models import protocol_visit_guard
+        if len(updates) > BACKGROUND_CHUNK_MAX_ITEMS:
+            raise ValueError('Invalid protocol batch bound')
+        # No idle BEGIN/COMMIT/WAL writes merely to refresh evaluated_at.
+        changes = []
+        for visit, value in updates:
+            previous = self.saved_protocol_summary(visit)
+            if previous is not None and all(previous[k] == v for k, v in value.items() if k != 'evaluated_at'):
+                continue
+            changes.append((visit, value))
+        if not changes:
+            return 0
+        changed = 0
+        try:
+            with self._bounded_write(WRITE_OPERATION_RECONCILIATION, deadline=deadline, cancel_event=cancel_event) as lease, closing(
+                    self._connect(busy_timeout_ms=1)) as c:
+                c.execute('BEGIN IMMEDIATE')
+                hold_deadline = min(deadline, time.monotonic()+BACKGROUND_CHUNK_TARGET_MAX_HOLD_MS/1000)
+                for visit, value in changes:
+                    if time.monotonic() >= hold_deadline or cancel_event is not None and cancel_event.is_set():
+                        break
+                    current = c.execute('SELECT * FROM visits WHERE visit_id=?', (visit.visit_id,)).fetchone()
+                    if current is None or protocol_visit_guard(_visit_row(current)) != protocol_visit_guard(visit):
+                        continue
+                    if value['partial_reason'] != 'identity_unconfirmed' and not self._protocol_bounds_clear(
+                            c, visit, visit.closed_at or value['evaluated_at']):
+                        continue
+                    old = c.execute('SELECT finalized_at FROM visit_network_protocol_summary WHERE visit_id=?', (visit.visit_id,)).fetchone()
+                    if old is not None and old[0] is not None:
+                        continue  # No silent correction of sealed historical cards.
+                    columns = tuple(value)
+                    sql = 'INSERT INTO visit_network_protocol_summary('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')'
+                    sql += ' ON CONFLICT(visit_id) DO UPDATE SET '+','.join(k+'=excluded.'+k for k in columns if k != 'visit_id')
+                    c.execute(sql, tuple(value.values()))
+                    changed += 1
+                if changed:
+                    c.commit(); lease.mark_progress()
+                else:
+                    c.rollback(); lease.mark_no_work()
+        except sqlite3.Error as exc:
+            raise _storage_error(exc, operation=WRITE_OPERATION_RECONCILIATION) from exc
+        return changed
 
     def get_visit(self, site_id: str, visit_id: str) -> VisitRecord | None:
         with closing(self._connect(readonly=True)) as connection:
@@ -2031,9 +2406,9 @@ class VisitRepository:
         violations = connection.execute("PRAGMA foreign_key_check").fetchone()
         if violations is not None:
             raise VisitSchemaError("Visit foreign key validation failed")
-        if _schema_signature(connection) != _expected_v2_signature():
+        if _schema_signature(connection) != expected_visit_signature(SCHEMA_VERSION):
             raise VisitSchemaError(
-                "Visit schema v2 does not match the exact contract"
+                "Visit schema does not match the exact contract for this version"
             )
 
     @staticmethod

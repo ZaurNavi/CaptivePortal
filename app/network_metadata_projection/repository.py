@@ -11,7 +11,7 @@ from app.network_metadata.validation import digest, ni_timestamp
 from .config import configuration_digest, ScopeAdmission
 from .models import (ALGORITHM, PROJECTION_TRANSACTION_HEADROOM_BYTES, ProjectionUnavailable,
                      ProjectionCapacity, ProjectionConflict, RUNTIME_STATES)
-from .schema import TABLES, create_schema, validate_schema
+from .schema import TABLES, INDEXES, create_schema, validate_schema
 from .validation import timestamp, semantic_digest
 from .service_extension import append_candidate, maintain_authoritative_change
 
@@ -97,6 +97,14 @@ class ProjectionRepository:
                         self.crash_point("reset_floors_installed")
             elif self._reset_bootstrap is not None:
                 raise ProjectionUnavailable("reset_requires_fresh_store")
+            # #296: additive compatibility with the already deployed #293
+            # index. Only this sole writer installs it; readers never migrate.
+            name = "idx_projection_mac_family_event_latest"
+            if self.connection.execute("SELECT 1 FROM sqlite_schema WHERE name=?", (name,)).fetchone() is None:
+                with self.transaction():
+                    validate_schema(self.connection)
+                    self.connection.execute(f"CREATE INDEX {name} ON {INDEXES[name]}")
+                    self.crash_point("visit_protocol_index_installed")
             if self.config.scope_admission_json is not None:
                 with self.transaction():
                     self._pin_scope_admission()

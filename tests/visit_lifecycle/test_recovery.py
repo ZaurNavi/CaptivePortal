@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
+from app.visit_lifecycle.models import SCHEMA_VERSION
 
 from app.visit_lifecycle.recovery import (
     RecoveryError,
@@ -171,7 +172,7 @@ def test_apply_revalidates_and_closes_from_persisted_controller_evidence(
         assert connection.execute("SELECT COUNT(*) FROM visits").fetchone()[0] == (
             visit_count_before
         )
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert event["processing_result"] == "closed"
     assert event["reason"] is None
     assert event["visit_id"] == opened.visit_id
@@ -354,13 +355,13 @@ def test_sqlite_backup_is_consistent_verified_and_source_unchanged(
     )
 
     assert result["quick_check"] == "ok"
-    assert result["source_schema_version"] == 2
-    assert result["backup_schema_version"] == 2
+    assert result["source_schema_version"] == SCHEMA_VERSION
+    assert result["backup_schema_version"] == SCHEMA_VERSION
     assert destination.is_file()
     assert _fingerprint(visit_repository) == before
     with sqlite3.connect(destination) as connection:
         assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     with pytest.raises(RecoveryError, match="already exists"):
         backup_database(
             db_path=str(visit_repository.db_path.resolve()),
@@ -441,7 +442,7 @@ def test_no_explicit_action_is_dry_run_with_exact_default_limit(
     assert result["mode"] == "dry-run"
     assert result["limit"] == 500
     assert result["resolved_db_path"] == str(visit_repository.db_path.resolve())
-    assert result["schema_version"] == 2
+    assert result["schema_version"] == SCHEMA_VERSION
 
 
 def test_continuation_requires_canonical_complete_pair(visit_repository):

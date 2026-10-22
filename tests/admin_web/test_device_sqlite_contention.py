@@ -19,8 +19,6 @@ from app.analytics.source_gateway import QueryDeadline, AnalyticsQueryDeadlineEx
 from .conftest import SITE_ID, login
 from .test_device_gateway import _databases, _snapshot, _current_database
 from .test_device_current_context import DEVICE_ID, MAC, _CurrentState, _Traffic
-from .test_device_protocol_intelligence import Reader
-from app.network_protocol_intelligence.read_service import DeviceProtocolIntelligenceReadService
 
 
 @pytest.fixture
@@ -42,7 +40,6 @@ def device_http(admin_app, tmp_path):
     query._reads = SimpleNamespace(list_visits=lambda **kwargs: ([], False),
                                    latest_client_observation=lambda **kwargs: None)
     query._current_state, query._current_guest_traffic = _CurrentState(), _Traffic()
-    query._protocol_intelligence = DeviceProtocolIntelligenceReadService(Reader())
     query._execution_controls = AdminQueryExecutionControls(max_concurrent_queries=1, max_query_duration_seconds=1)
     app = Flask(__name__)
     app.config["TESTING"] = True
@@ -150,13 +147,15 @@ def test_short_exclusive_wal_window_recovers_within_deadline(device_http, monkey
 
 
 @pytest.mark.parametrize("suffix", ["", "/inventory-summary", "/detail", "/current", "/protocol-intelligence"])
-def test_device_endpoints_short_lock_recover(device_http, monkeypatch, suffix):
+def test_device_endpoints_short_lock_recover_or_retired_ni03_is_absent(device_http, monkeypatch, suffix):
     if suffix == "/detail":
         suffix = ""
         # Distinguish Device detail from collection route in the shared driver.
         device_http.root += f"/{DEVICE_ID}"
     response, elapsed, _ = request_in_window(device_http, monkeypatch, delay=0.025, suffix=suffix)
-    assert response.status_code == 200, response.json
+    # #296 deliberately removes only this old Device-wide NI03 route. All
+    # remaining Device handlers retain the original lock-recovery assertion.
+    assert response.status_code == (404 if suffix == '/protocol-intelligence' else 200), response.json
     assert elapsed < 0.5
 
 

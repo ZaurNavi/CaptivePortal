@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, TypeVar
+from app.visit_lifecycle.models import compatible_visit_schema_version
 
 from app.analytics.source_gateway import (
     AnalyticsQueryDeadlineExceeded,
@@ -136,6 +137,36 @@ class AdminSqlReadGateway:
 
         row = self._read(self._visit_path, 2, deadline, read)
         return None if row is None else self._safe_row(row, fields)
+
+    def visit_protocol_summary(self, *, site_id, device_id, visit_id, deadline):
+        from app.visit_lifecycle.repository import _visit_row
+        from app.visit_lifecycle.read_service import project_visit_protocol_summary
+        def read(c):
+            row = c.execute('SELECT * FROM visits WHERE site_id=? AND device_id=? AND visit_id=?',
+                (site_id, device_id, visit_id)).fetchone()
+            if row is None:
+                return None
+            visit = _visit_row(row)
+            version = c.execute('PRAGMA user_version').fetchone()[0]
+            saved = c.execute('SELECT * FROM visit_network_protocol_summary WHERE visit_id=?',
+                (visit_id,)).fetchone() if version in (3,4) else None
+            return project_visit_protocol_summary(visit, None if saved is None else dict(saved))
+        return self._read(self._visit_path, 2, deadline, read)
+
+    def visit_service_history(self, *, site_id, device_id, visit_id, deadline):
+        from datetime import datetime,timezone
+        from app.visit_lifecycle.repository import _visit_row
+        from app.visit_lifecycle.read_service import project_visit_service_history
+        def read(c):
+            row=c.execute('SELECT * FROM visits WHERE site_id=? AND device_id=? AND visit_id=?',(site_id,device_id,visit_id)).fetchone()
+            if row is None:return None
+            rows=();consumer=None
+            if c.execute('PRAGMA user_version').fetchone()[0]==4:
+                rows=tuple(dict(r) for r in c.execute('SELECT * FROM visit_service_summary WHERE site_id=? AND visit_id=? ORDER BY service_id LIMIT 51',(site_id,visit_id)))
+                saved=c.execute('SELECT * FROM visit_service_consumer_state WHERE singleton_id=1').fetchone()
+                consumer=None if saved is None else dict(saved)
+            return project_visit_service_history(_visit_row(row),rows,consumer,evaluated_now=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
+        return self._read(self._visit_path,2,deadline,read)
 
     def latest_client_observation(
         self,
@@ -313,7 +344,7 @@ class AdminSqlReadGateway:
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version != expected_version:
+            if not (compatible_visit_schema_version(version) if path == self._visit_path else version == expected_version):
                 raise AdminReadSourceError("Admin source unavailable")
             connection.set_progress_handler(
                 lambda: 1 if deadline.expired() else 0,

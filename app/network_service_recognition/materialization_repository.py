@@ -9,13 +9,97 @@ from datetime import datetime,timedelta,timezone
 from pathlib import Path
 
 from app.network_metadata.validation import canonical_uuid,digest,integer,ni_format_utc,ni_timestamp
+from app.network_metadata.models import NetworkMetadataValidationError
 from app.network_attribution.validation import canonical_mac
 from app.device_fingerprint.validation import validate_site_id
 from .artifacts import RecognitionBundle,AdmittedArtifact
-from .materialization_schema import create_schema,validate_schema,MaterializationUnavailable
+from .materialization_schema import create_schema,validate_schema,migrate_visit_delivery,MaterializationUnavailable
 from .canonical import canonical_json
 
 HEADROOM = 4 * 1024 * 1024
+VISIT_DELIVERY_FIELDS = ('outbox_seq','stream_id','kind','site_id','device_id','client_mac','edge_id','service_id',
+    'observed_at','source_ref','generation_id','source_observation_id','binding_seq','taxonomy_id','taxonomy_version',
+    'taxonomy_digest','ruleset_id','ruleset_version','ruleset_digest','rule_id','service_label','organization_id',
+    'organization_label','category_id','created_at','previous_hash')
+
+
+def visit_delivery_hash(row):
+    return sha256(canonical_json({k:row[k] for k in VISIT_DELIVERY_FIELDS})).hexdigest()
+
+
+def validate_visit_delivery(row):
+    """Closed, bounded provenance only; never accepts raw endpoint payload."""
+    import re
+    if set(row)!=set(VISIT_DELIVERY_FIELDS):raise MaterializationConflict()
+    integer(row['outbox_seq'],1);canonical_uuid(row['stream_id']);digest(row['previous_hash'])
+    ni_timestamp(row['created_at'],canonical=True)
+    common={'outbox_seq','stream_id','kind','created_at','previous_hash'}
+    if row['kind']=='positive':
+        required=set(VISIT_DELIVERY_FIELDS)-common
+        validate_site_id(row['site_id']);canonical_uuid(row['device_id'])
+        if canonical_mac(row['client_mac'])!=row['client_mac']:raise MaterializationConflict()
+        digest(row['edge_id']);digest(row['source_observation_id']);canonical_uuid(row['source_ref'],5)
+        ni_timestamp(row['observed_at'],canonical=True);canonical_uuid(row['generation_id'])
+        integer(row['binding_seq'],1);integer(row['taxonomy_version'],1);integer(row['ruleset_version'],1)
+        digest(row['taxonomy_digest']);digest(row['ruleset_digest'])
+        for key in ('service_id','taxonomy_id','ruleset_id','rule_id','organization_id','category_id'):
+            if not isinstance(row[key],str) or len(row[key])>128 or re.fullmatch(r'[A-Za-z0-9_.:-]+',row[key]) is None:raise MaterializationConflict()
+        for key in ('service_label','organization_label'):
+            if not isinstance(row[key],str) or not 1<=len(row[key])<=128 or any(ord(c)<32 for c in row[key]):raise MaterializationConflict()
+    elif row['kind']=='binding':
+        required={'site_id','device_id','client_mac','binding_seq'}
+        validate_site_id(row['site_id']);canonical_uuid(row['device_id']);integer(row['binding_seq'],1)
+        if canonical_mac(row['client_mac'])!=row['client_mac']:raise MaterializationConflict()
+    elif row['kind']=='generation':
+        required={'generation_id'};canonical_uuid(row['generation_id'])
+    else:raise MaterializationConflict()
+    if any(row[k] is not None for k in set(row)-common-required):raise MaterializationConflict()
+
+
+@contextmanager
+def _visit_readonly(path, deadline=None):
+    if deadline is not None:deadline.require_remaining()
+    connection=sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro',uri=True,isolation_level=None,timeout=0)
+    connection.row_factory=sqlite3.Row
+    try:
+        connection.execute('PRAGMA query_only=ON');connection.execute('PRAGMA foreign_keys=ON');connection.execute('BEGIN')
+        if deadline is not None:connection.set_progress_handler(lambda:int(deadline.expired()),100)
+        yield connection
+        if deadline is not None:deadline.require_remaining()
+    finally:
+        connection.set_progress_handler(None,0)
+        connection.rollback();connection.close()
+
+
+def read_visit_delivery_page(path, cursor, *, deadline):
+    """One bounded RO snapshot, released before ANY Visit write transaction."""
+    with _visit_readonly(path,deadline) as c:
+        validate_schema(c)
+        if c.execute('PRAGMA user_version').fetchone()[0]!=2:raise MaterializationUnavailable()
+        anchor=dict(c.execute('SELECT * FROM ni04_visit_delivery_outbox WHERE outbox_seq=0').fetchone())
+        if cursor is None:
+            if anchor['floor_seq']!=0:raise MaterializationConflict()
+            seq,hashed=0,anchor['floor_hash']
+        else:
+            seq,hashed=cursor['last_outbox_seq'],cursor['last_outbox_hash']
+            integer(seq);digest(hashed);canonical_uuid(cursor['consumer_id'])
+            if cursor['source_stream_id']!=anchor['stream_id'] or anchor['consumer_id'] not in (None,cursor['consumer_id']):raise MaterializationConflict()
+            if not anchor['floor_seq']<=seq<=anchor['head_seq']:raise MaterializationConflict()
+            row=c.execute('SELECT entry_hash FROM ni04_visit_delivery_outbox WHERE outbox_seq=?',(seq,)).fetchone() if seq!=anchor['floor_seq'] else None
+            expected=anchor['floor_hash'] if seq==anchor['floor_seq'] else row[0] if row else None
+            if expected!=hashed:raise MaterializationConflict()
+        entries=[];previous=hashed
+        for raw in c.execute('SELECT * FROM ni04_visit_delivery_outbox WHERE outbox_seq>? ORDER BY outbox_seq LIMIT 25',(seq,)).fetchall():
+            row={k:raw[k] for k in VISIT_DELIVERY_FIELDS}
+            validate_visit_delivery(row)
+            if row['stream_id']!=anchor['stream_id'] or row['outbox_seq']!=seq+len(entries)+1 or row['previous_hash']!=previous or visit_delivery_hash(row)!=raw['entry_hash']:raise MaterializationConflict()
+            row['entry_hash']=raw['entry_hash'];entries.append(row);previous=raw['entry_hash']
+        if seq<anchor['head_seq'] and not entries:raise MaterializationConflict()
+        if entries and entries[-1]['outbox_seq']==anchor['head_seq'] and previous!=anchor['head_hash']:raise MaterializationConflict()
+        runtime=c.execute('SELECT active_generation_id,runtime_state,updated_at_utc FROM service_materialization_runtime WHERE singleton_id=1').fetchone()
+        return dict(stream_id=anchor['stream_id'],floor_seq=anchor['floor_seq'],floor_hash=anchor['floor_hash'],
+            head_seq=anchor['head_seq'],head_hash=anchor['head_hash'],after_seq=seq,after_hash=hashed,
+            active_generation=runtime[0],source_state=runtime[1],source_updated_at=runtime[2],entries=tuple(entries))
 
 
 class MaterializationConflict(RuntimeError):
@@ -43,13 +127,22 @@ def bundle_identity(bundle):
 
 class ServiceMaterializationRepository:
     def __init__(self, db_path, *, max_db_bytes=512*1024*1024,
-                 clock=lambda: datetime.now(timezone.utc),crash_point=lambda _:None):
+                 clock=lambda: datetime.now(timezone.utc),crash_point=lambda _:None,
+                 visit_delivery_db_path=None,visit_delivery_ttl_days=None):
         if type(db_path) is not str or not Path(db_path).is_absolute() or type(max_db_bytes) is not int or not 128*1024*1024 <= max_db_bytes <= 2*1024**3:
             raise MaterializationUnavailable()
         self.db_path,self.max_db_bytes,self.clock,self.crash_point=db_path,max_db_bytes,clock,crash_point
         self.connection=self._writer_fd=None
         self._retention=False
         self.live_state="initializing"
+        if visit_delivery_db_path is not None and (type(visit_delivery_db_path) is not str or not Path(visit_delivery_db_path).is_absolute()):
+            raise MaterializationUnavailable()
+        if (visit_delivery_db_path is None)!=(visit_delivery_ttl_days is None) or visit_delivery_ttl_days is not None and (type(visit_delivery_ttl_days) is not int or not 1<=visit_delivery_ttl_days<=365):
+            raise MaterializationUnavailable()
+        # No history publication/pruning until both applications are explicitly
+        # configured with an Owner-approved retention policy. Default is inert.
+        self.visit_delivery_db_path=visit_delivery_db_path
+        self.visit_delivery_ttl_days=visit_delivery_ttl_days
 
     def footprint(self):
         try:
@@ -83,6 +176,9 @@ class ServiceMaterializationRepository:
             if self.connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()[0]==0 and self.connection.execute("PRAGMA user_version").fetchone()[0]==0:
                 with self.transaction():
                     create_schema(self.connection,ni_format_utc(self.clock()))
+            elif self.connection.execute('PRAGMA user_version').fetchone()[0]==1:
+                with self.transaction():
+                    migrate_visit_delivery(self.connection,ni_format_utc(self.clock()))
             validate_schema(self.connection,integrity=True)
             self.live_state=self.connection.execute("SELECT runtime_state FROM service_materialization_runtime").fetchone()[0]
             return self
@@ -131,8 +227,11 @@ class ServiceMaterializationRepository:
         at=self.clock()
         cutoff=ni_format_utc(at-timedelta(days=14))
         grace=ni_format_utc(at-timedelta(days=1))
+        # Read/close the Visit checkpoint BEFORE acquiring the NI04 write lock.
+        acknowledgement=self._visit_acknowledgement()
         # Every pass is bounded; no VACUUM or deletion of current positives.
         with self.transaction(retention=True):
+            self._prune_visit_delivery(acknowledgement)
             self.connection.execute("DELETE FROM device_service_rollups WHERE rowid IN (SELECT rowid FROM device_service_rollups WHERE last_observed_at<? ORDER BY last_observed_at LIMIT 256)",(cutoff,))
             self.connection.execute("DELETE FROM service_recognition_observations WHERE rowid IN (SELECT o.rowid FROM service_recognition_observations o WHERE observed_at<? AND NOT EXISTS (SELECT 1 FROM device_service_rollups r WHERE r.generation_id=o.generation_id AND r.last_service_observation_id=o.service_observation_id) ORDER BY observed_at LIMIT 256)",(cutoff,))
             latest=self.connection.execute("SELECT generation_id FROM service_materialization_generations WHERE state='superseded' ORDER BY superseded_at_utc DESC,generation_id LIMIT 1").fetchone()
@@ -147,6 +246,59 @@ class ServiceMaterializationRepository:
                 if not any(self.connection.execute(f"SELECT 1 FROM {table} WHERE generation_id=? LIMIT 1",(gen,)).fetchone() for table in ("device_service_rollups","service_recognition_observations","device_materialization_state","service_binding_replay_jobs")):
                     self.connection.execute("DELETE FROM service_materialization_generations WHERE generation_id=?",(gen,))
             self.connection.execute("DELETE FROM service_binding_replay_jobs WHERE rowid IN (SELECT rowid FROM service_binding_replay_jobs WHERE state IN ('complete','terminal') AND to_utc<? LIMIT 128)",(grace,))
+
+    def append_visit_delivery(self, kind, at, **fields):
+        if self.visit_delivery_db_path is None:return False
+        if not self.connection.in_transaction:raise MaterializationConflict()
+        if kind not in {'positive','binding','generation'} or set(fields)-set(VISIT_DELIVERY_FIELDS):raise MaterializationConflict()
+        ni_timestamp(at,canonical=True)
+        anchor=self.connection.execute('SELECT * FROM ni04_visit_delivery_outbox WHERE outbox_seq=0').fetchone()
+        if anchor['head_seq']-anchor['floor_seq']>=100000:raise MaterializationCapacity()
+        row={k:None for k in VISIT_DELIVERY_FIELDS}
+        row.update(fields,outbox_seq=anchor['head_seq']+1,stream_id=anchor['stream_id'],kind=kind,
+            created_at=at,previous_hash=anchor['head_hash'])
+        validate_visit_delivery(row)
+        row['entry_hash']=visit_delivery_hash(row)
+        self.connection.execute('INSERT INTO ni04_visit_delivery_outbox('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',tuple(row.values()))
+        self.connection.execute('UPDATE ni04_visit_delivery_outbox SET head_seq=?,head_hash=? WHERE outbox_seq=0',
+            (row['outbox_seq'],row['entry_hash']))
+        self.crash_point('visit_delivery_appended')
+        return True
+
+    def _visit_acknowledgement(self):
+        if self.visit_delivery_db_path is None:return None
+        try:
+            with _visit_readonly(self.visit_delivery_db_path) as c:
+                from app.visit_lifecycle.repository import expected_visit_signature,_schema_signature
+                if c.execute('PRAGMA user_version').fetchone()[0]!=4 or _schema_signature(c)!=expected_visit_signature(4):return None
+                # Partial integrity check of this one-row checkpoint B-tree,
+                # not a full Visit history scan on every retention tick.
+                if c.execute("PRAGMA quick_check('visit_service_consumer_state')").fetchone()[0]!='ok':return None
+                row=c.execute('SELECT consumer_id,source_stream_id,last_outbox_seq,last_outbox_hash,history_ttl_days FROM visit_service_consumer_state WHERE singleton_id=1').fetchone()
+                return None if row is None or row['history_ttl_days']!=self.visit_delivery_ttl_days else dict(row)
+        except Exception:
+            return None  # Unknown/unavailable/rollback checkpoint never prunes.
+
+    def _prune_visit_delivery(self, ack):
+        if ack is None:return
+        try:
+            if self.connection.execute('PRAGMA user_version').fetchone()[0]!=2:return
+            canonical_uuid(ack['consumer_id']);canonical_uuid(ack['source_stream_id']);integer(ack['last_outbox_seq']);digest(ack['last_outbox_hash'])
+            anchor=self.connection.execute('SELECT * FROM ni04_visit_delivery_outbox WHERE outbox_seq=0').fetchone()
+            seq=ack['last_outbox_seq']
+            if (anchor['stream_id']!=ack['source_stream_id'] or anchor['consumer_id'] not in (None,ack['consumer_id'])
+                    or not anchor['floor_seq']<=seq<=anchor['head_seq']):return
+            expected=anchor['floor_hash'] if seq==anchor['floor_seq'] else self.connection.execute('SELECT entry_hash FROM ni04_visit_delivery_outbox WHERE outbox_seq=?',(seq,)).fetchone()
+            expected=expected if isinstance(expected,str) else expected[0] if expected else None
+            if expected!=ack['last_outbox_hash']:return
+            rows=self.connection.execute('SELECT outbox_seq,entry_hash FROM ni04_visit_delivery_outbox WHERE outbox_seq>0 AND outbox_seq<=? ORDER BY outbox_seq LIMIT 256',(seq,)).fetchall()
+            if not rows:return
+            end,hashed=rows[-1]
+            self.connection.execute('DELETE FROM ni04_visit_delivery_outbox WHERE outbox_seq>0 AND outbox_seq<=?',(end,))
+            self.connection.execute('UPDATE ni04_visit_delivery_outbox SET floor_seq=?,floor_hash=?,consumer_id=? WHERE outbox_seq=0',(end,hashed,ack['consumer_id']))
+            self.crash_point('visit_delivery_pruned')
+        except (ValueError,KeyError,TypeError,NetworkMetadataValidationError):
+            return
 
     def ensure_generation(self,bundle,highwater,at):
         integer(highwater)
@@ -209,6 +361,7 @@ class ServiceMaterializationRepository:
             self.connection.execute("UPDATE service_materialization_generations SET state='superseded',superseded_at_utc=? WHERE state='active'",(at,))
             self.connection.execute("UPDATE service_materialization_generations SET state='active',activated_at_utc=? WHERE generation_id=?",(at,gen))
             self.connection.execute("UPDATE service_materialization_runtime SET active_generation_id=? WHERE singleton_id=1",(gen,))
+            self.append_visit_delivery('generation',at,generation_id=gen)
             self.runtime("usable",at,highwater=highwater,cursor=highwater,poll=at,commit=at)
 
     def put_evaluated(self,gen,evaluation,bundle,at):
@@ -263,6 +416,17 @@ class ServiceMaterializationRepository:
             service=bundle.taxonomy.index["services"][observation.service_id]
             org=next(x for x in bundle.taxonomy["organizations"] if x["organization_id"]==observation.organization_id)
             cat=next(x for x in bundle.taxonomy["service_categories"] if x["service_category_id"]==observation.service_category_id)
+            if old is None:
+                if observation.support_state!='directly_supported' or observation.evidence_strength_class!='strong' or values['source_event_family'] not in {'tls','quic'}:
+                    raise MaterializationConflict()
+                self.append_visit_delivery('positive',at,site_id=ident.site_id,device_id=ident.device_id,client_mac=ident.client_mac,
+                    edge_id=ref.edge_id,service_id=observation.service_id,observed_at=observation.observed_at,
+                    source_ref=ref.source_observation_ref,generation_id=gen,source_observation_id=observation.service_observation_id,
+                    binding_seq=ident.registry_binding_change_seq,taxonomy_id=bundle.taxonomy['taxonomy_id'],
+                    taxonomy_version=bundle.taxonomy['taxonomy_version'],taxonomy_digest=bundle.taxonomy['taxonomy_digest_sha256'],
+                    ruleset_id=bundle.ruleset['ruleset_id'],ruleset_version=bundle.ruleset['ruleset_version'],ruleset_digest=bundle.ruleset['ruleset_digest_sha256'],
+                    rule_id=evaluation.matched_rule_id,service_label=service['display_name'],organization_id=observation.organization_id,
+                    organization_label=org['display_name'],category_id=observation.service_category_id)
             rollup=(gen,ident.site_id,ident.device_id,ident.client_mac,observation.service_id,service["display_name"],observation.organization_id,org["display_name"],observation.service_category_id,cat["display_name"],observation.observed_at,observation.service_observation_id)
             old_rollup=self.connection.execute("SELECT client_mac FROM device_service_rollups WHERE generation_id=? AND site_id=? AND device_id=? AND service_id=?",(gen,ident.site_id,ident.device_id,observation.service_id)).fetchone()
             if old_rollup and old_rollup[0]!=ident.client_mac:
