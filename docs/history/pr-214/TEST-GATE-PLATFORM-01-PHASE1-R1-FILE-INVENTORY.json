@@ -1,0 +1,72 @@
+{
+  "task": "TEST-GATE-PLATFORM-01",
+  "handoff": "PHASE1-R1-REPAIR-HANDOFF",
+  "gate_identity": "TEST-GATE-PLATFORM-01/P1-R1-v2",
+  "status": "DRAFT / NOT ADMITTED",
+  "files": [
+    {
+      "path": "C:\\CaptivPortal-Lab\\test-gate-platform-01\\compare-gate-evidence-v1.py",
+      "bytes": 8658,
+      "sha256": "01f779a1b21158d550df211d8162a79caf36e1e6161f637681f3c99824b46ba3",
+      "archived_path": "C:\\CaptivPortal-Lab\\artifacts\\TEST-GATE-PLATFORM-01-PHASE1-R0-SOURCE\\compare-gate-evidence-v1.py",
+      "archived_sha256": "bb29a9d5393521716a021136664905af66b58dbe2e534e013377d2a993ea88dd",
+      "changed": true
+    },
+    {
+      "path": "C:\\CaptivPortal-Lab\\test-gate-platform-01\\gate-environment-lock-v1.json",
+      "bytes": 9803,
+      "sha256": "61ecef6851915b12cb256d5ed09b3956a3ddfb926e4eefe4ad710e0debcab3b1",
+      "archived_path": "C:\\CaptivPortal-Lab\\artifacts\\TEST-GATE-PLATFORM-01-PHASE1-R0-SOURCE\\gate-environment-lock-v1.json",
+      "archived_sha256": "33d6e5306d8d566df677f4cfb62dd32d9fac096102f39ed7057f36a151dc1270",
+      "changed": true
+    },
+    {
+      "path": "C:\\CaptivPortal-Lab\\test-gate-platform-01\\gate-preflight-v1.py",
+      "bytes": 13660,
+      "sha256": "baeeab562ec56f40c06e8a8a8c6042757692f9c4c3c725379cad48e2dfc0fc1f",
+      "archived_path": "C:\\CaptivPortal-Lab\\artifacts\\TEST-GATE-PLATFORM-01-PHASE1-R0-SOURCE\\gate-preflight-v1.py",
+      "archived_sha256": "57e855c8c663ca09d127c3e4d98f5c7c8577c492f4ad6413d0d233b7a2855cd9",
+      "changed": true
+    },
+    {
+      "path": "C:\\CaptivPortal-Lab\\test-gate-platform-01\\platform-manifest-v1.json",
+      "bytes": 255126,
+      "sha256": "ccca746f45ad1e22ee82add7b4b02598b6a0e7f6f5954a8930a873b37ca31b07",
+      "archived_path": "C:\\CaptivPortal-Lab\\artifacts\\TEST-GATE-PLATFORM-01-PHASE1-R0-SOURCE\\platform-manifest-v1.json",
+      "archived_sha256": "1410395a2aec51c0f18fab6a2fddf010997e46755232fd0249040c3ffb1d7954",
+      "changed": true
+    },
+    {
+      "path": "C:\\CaptivPortal-Lab\\test-gate-platform-01\\pytest_platform_contract.py",
+      "bytes": 21538,
+      "sha256": "3cab7cc7550190a44b14456ed2c32af266d1aaa6df71715b433d410d5c63dd0f",
+      "archived_path": "C:\\CaptivPortal-Lab\\artifacts\\TEST-GATE-PLATFORM-01-PHASE1-R0-SOURCE\\pytest_platform_contract.py",
+      "archived_sha256": "11ecabe55a996ff2676d6502d2965d0225f1d0baaa72113c4a1a065f64e750ab",
+      "changed": true
+    },
+    {
+      "path": "C:\\CaptivPortal-Lab\\test-gate-platform-01\\run-linux-platform-gates-v1.sh",
+      "bytes": 600,
+      "sha256": "3885905b6b5333ca3c1284d2f1901922705bad787af68695476e229c8b037438",
+      "archived_path": "C:\\CaptivPortal-Lab\\artifacts\\TEST-GATE-PLATFORM-01-PHASE1-R0-SOURCE\\run-linux-platform-gates-v1.sh",
+      "archived_sha256": "e4e578b6430fbb80c9ea42cecfed2f8d76eb5d5b9fa24e6af6f1fe4c667906e1",
+      "changed": true
+    },
+    {
+      "path": "C:\\CaptivPortal-Lab\\test-gate-platform-01\\run-platform-gates-v1.cmd",
+      "bytes": 561,
+      "sha256": "3265bf9d6c081e152c81ea0edeb38d678e6e810d90abd27ef9094dfd7f83f736",
+      "archived_path": "C:\\CaptivPortal-Lab\\artifacts\\TEST-GATE-PLATFORM-01-PHASE1-R0-SOURCE\\run-platform-gates-v1.cmd",
+      "archived_sha256": "cf52e859b804ee011723287cb01ac3cb89f4689a769c2b0db51d55f54111c226",
+      "changed": true
+    },
+    {
+      "path": "C:\\CaptivPortal-Lab\\test-gate-platform-01\\test_gate_platform_contract.py",
+      "bytes": 28960,
+      "sha256": "17c800dc90f25316b479f8f4558b6b2c69a4242f2dc93c13cfdc3b6a0e801234",
+      "archived_path": "C:\\CaptivPortal-Lab\\artifacts\\TEST-GATE-PLATFORM-01-PHASE1-R0-SOURCE\\test_gate_platform_contract.py",
+      "archived_sha256": "2a0d4d753fb23b88d84b1ef4d11231c352997737c3666ac927cd2a925581ee93",
+      "changed": true
+    }
+  ]
+}
