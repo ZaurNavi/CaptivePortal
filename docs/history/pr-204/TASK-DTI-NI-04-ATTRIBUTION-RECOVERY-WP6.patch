@@ -1,0 +1,1306 @@
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index 270de040ddb31438b5eb8e6eaf6b62f5e650c0b2..34d55440d7dff7093e79b1d6ba0e26e9316e4911 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -1065,7 +1065,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             response = runtime.query_service.device_service_intelligence(
+                 g.admin_principal, selected, device_id, query_parameters_present=False)
+             return _success(selected, response.result, enforce_size=True, response_limit_bytes=16384,
+-                            api_version="admin.device.service-intelligence.v1")
++                            api_version="admin.device.service-intelligence.v2")
+         except AdminQueryValidationError:
+             return _error("invalid_request", 400)
+         except AdminQueryForbidden:
+@@ -2455,7 +2455,7 @@ def _error(code: str, status_code: int) -> Response:
+     if _is_api_path(request.path):
+         return jsonify(
+             {
+-                "api_version": ("admin.device.service-intelligence.v1" if _is_service_intelligence_path(request.path)
++                "api_version": ("admin.device.service-intelligence.v2" if _is_service_intelligence_path(request.path)
+                     else "admin.device.protocol-intelligence.v1" if _is_protocol_intelligence_path(request.path)
+                     else "admin.settings.features.mutation.v1" if request.path == "/admin/api/v1/settings/features/generations"
+                     else "admin.settings.features.v1" if request.path == "/admin/api/v1/settings/features"
+diff --git a/app/admin_web/static/admin.js b/app/admin_web/static/admin.js
+index 37479d7468587f8fd1a737ef64ba462baa82e655..b8f1ffab39328bd9394492d4b117c25292000a3c 100644
+--- a/app/admin_web/static/admin.js
++++ b/app/admin_web/static/admin.js
+@@ -6706,7 +6706,7 @@
+     "productivity_collaboration", "gaming", "software_distribution", "web_search", "other_supported"].map((x) => `category.${x}`));
+   const evidenceLabels = {
+     supported_results_present: "Supported web-host evidence observed.",
+-    no_supported_result_observed_with_sufficient_coverage: "No supported services recognized in the last 24 hours. This does not prove no Internet services or network activity.",
++    no_supported_result_observed_with_sufficient_coverage: "No supported services recognized in the current window. This does not prove no Internet services or network activity.",
+     insufficient_source_coverage: "Source coverage is insufficient; service activity is unknown.",
+     insufficient_attribution: "Device attribution is insufficient; service activity is unknown.",
+     recognition_limited: "Recognition is limited; service activity is unknown.",
+@@ -6731,13 +6731,13 @@
+   }
+   function validate(payload) {
+     if (!exact(payload, ["api_version", "request_id", "site_id", "result", "page"]) ||
+-      payload.api_version !== "admin.device.service-intelligence.v1" || payload.site_id !== site || payload.page !== null ||
++      payload.api_version !== "admin.device.service-intelligence.v2" || payload.site_id !== site || payload.page !== null ||
+       typeof payload.request_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(payload.request_id)) throw new Error("shape");
+     const v = payload.result;
+     if (!exact(v, ["schema_version", "site_id", "device_id", "evaluated_at_utc", "window", "availability_state", "evidence_state",
+       "identity_binding_state", "recent_services", "service_categories", "last_service_observation", "freshness_state", "coverage",
+       "recognition_ruleset_id", "recognition_ruleset_version", "recognition_ruleset_digest_sha256", "taxonomy_id", "taxonomy_version", "taxonomy_digest_sha256"]) ||
+-      v.schema_version !== 1 || v.site_id !== site || v.device_id !== device ||
++      v.schema_version !== 2 || v.site_id !== site || v.device_id !== device ||
+       !["authoritative", "pending", "unavailable", "absent"].includes(v.identity_binding_state) ||
+       !Object.hasOwn(evidenceLabels, v.evidence_state) || !["fresh", "recent", "stale", "unavailable"].includes(v.freshness_state) ||
+       !["usable", "degraded"].includes(v.availability_state)) throw new Error("shape");
+@@ -6751,10 +6751,12 @@
+       w.to_utc !== v.evaluated_at_utc || w.duration_seconds !== 86400 || w.recent_duration_seconds !== 3600 ||
+       utc(w.from_utc) !== at - 86400000000 || utc(w.recent_from_utc) !== at - 3600000000 ||
+       w.from_utc.slice(23) !== v.evaluated_at_utc.slice(23) || w.recent_from_utc.slice(23) !== v.evaluated_at_utc.slice(23) ||
+-      !exact(c, ["scope", "source_state", "attribution_state", "projection_state", "recognition_state", "historical_window_completeness_claimed"]) ||
+-      c.scope !== "current_pipeline" || c.historical_window_completeness_claimed !== false || !["usable", "limited"].includes(c.recognition_state) ||
+-      !["usable/usable/usable", "degraded/usable/usable", "degraded/usable/degraded", "degraded/unavailable/unknown", "degraded/degraded/degraded", "degraded/unknown/unknown"]
+-        .includes(`${c.projection_state}/${c.source_state}/${c.attribution_state}`) ||
++      !exact(c, ["scope", "source_state", "pipeline_attribution_state", "device_evidence_binding_state", "device_linked_pending", "recognition_state", "historical_window_completeness_claimed"]) ||
++      c.scope !== "confirmed_device_evidence" || c.historical_window_completeness_claimed !== false || !["usable", "limited", "unavailable"].includes(c.recognition_state) ||
++      !["usable", "degraded", "unavailable", "unknown"].includes(c.source_state) ||
++      !["usable", "degraded", "unavailable", "unknown"].includes(c.pipeline_attribution_state) ||
++      c.device_evidence_binding_state !== (v.identity_binding_state === "authoritative" ? "authoritative" : "none") ||
++      typeof c.device_linked_pending !== "boolean" || (v.identity_binding_state !== "authoritative" && c.device_linked_pending) ||
+       !Array.isArray(v.recent_services) || v.recent_services.length > 12 || !Array.isArray(v.service_categories) || v.service_categories.length > 10) throw new Error("shape");
+     function service(row, key, lower) {
+       if (!exact(row, ["service_id", "display_name", "organization_id", "organization_display_name", "service_category_id",
+@@ -6788,16 +6790,16 @@
+     if (last !== null) {
+       const event = service(last, "observed_at", at - 86400000000), age = (at - event) / 1000000;
+       expectedFreshness = age <= 300 ? "fresh" : age <= 3600 ? "recent" : "stale";
+-      if (["unavailable", "unknown"].includes(c.source_state)) expectedFreshness = "stale";
+-      else if (expectedFreshness === "fresh" && (c.source_state !== "usable" || c.attribution_state !== "usable" || c.recognition_state !== "usable")) expectedFreshness = "recent";
+       if (event >= at - 3600000000 && (!v.recent_services.length || v.recent_services[0].service_id !== last.service_id || v.recent_services[0].last_observed_at !== last.observed_at) ||
+         event < at - 3600000000 && v.recent_services.length) throw new Error("shape");
+     } else if (v.recent_services.length) throw new Error("shape");
+     const expectedEvidence = v.identity_binding_state !== "authoritative" ? "identity_pending" : last !== null ? "supported_results_present" :
+-      c.source_state !== "usable" ? "insufficient_source_coverage" : c.attribution_state !== "usable" ? "insufficient_attribution" :
++      c.source_state !== "usable" ? "insufficient_source_coverage" : c.pipeline_attribution_state !== "usable" || c.device_linked_pending ? "insufficient_attribution" :
+       c.recognition_state !== "usable" ? "recognition_limited" : "no_supported_result_observed_with_sufficient_coverage";
+     if (v.freshness_state !== expectedFreshness || v.evidence_state !== expectedEvidence || v.availability_state !== (
+-      v.identity_binding_state === "authoritative" && c.projection_state === "usable" && c.recognition_state === "usable" ? "usable" : "degraded") ||
++      v.identity_binding_state === "authoritative" && c.source_state === "usable" && c.pipeline_attribution_state === "usable" &&
++      !c.device_linked_pending && c.recognition_state === "usable" ? "usable" : "degraded") ||
++      c.recognition_state === "unavailable" && last !== null ||
+       v.identity_binding_state !== "authoritative" && last !== null) throw new Error("shape");
+     return v;
+   }
+@@ -6807,6 +6809,16 @@
+     for (const line of lines) { const p = document.createElement("p"); p.textContent = line; node.appendChild(p); }
+     content.appendChild(node);
+   }
++  function coverageMessage(v) {
++    const c = v.coverage, positive = v.last_service_observation !== null;
++    if (c.pipeline_attribution_state === "unavailable") return positive ?
++      "Confirmed historical service evidence is shown. Current device attribution is unavailable; additional activity may be missing." :
++      "Service evidence cannot be fully evaluated because device attribution is currently unavailable.";
++    if (c.pipeline_attribution_state !== "usable" || c.device_linked_pending) return positive ?
++      "Confirmed service evidence is shown. Attribution coverage is partial; additional activity may be missing." :
++      "No supported service evidence is confirmed for this device in the current window. Attribution coverage is partial, so this is not evidence of no activity.";
++    return evidenceLabels[v.evidence_state];
++  }
+   function render(v, stale) {
+     content.replaceChildren();
+     card("Recent Services · last 60 minutes", v.recent_services.length ? v.recent_services.map((row) =>
+@@ -6815,8 +6827,9 @@
+     card("Last Service Observation · last 24 hours", v.last_service_observation ?
+       [`${v.last_service_observation.display_name} · ${v.last_service_observation.observed_at}`] : ["No supported observation available."]);
+     card("Freshness / coverage", [`Freshness: ${stale ? "stale (refresh failed)" : v.freshness_state}`, `Source: ${v.coverage.source_state}`,
+-      `Attribution: ${v.coverage.attribution_state}`, `Recognition: ${v.coverage.recognition_state}`, `Last evaluated: ${v.evaluated_at_utc}`]);
+-    status.textContent = (stale ? "Refresh unavailable; showing stale last-good data. " : "") + evidenceLabels[v.evidence_state];
++      `Pipeline attribution: ${v.coverage.pipeline_attribution_state}`, `Device evidence binding: ${v.coverage.device_evidence_binding_state}`,
++      `Recognition: ${v.coverage.recognition_state}`, `Last evaluated: ${v.evaluated_at_utc}`]);
++    status.textContent = (stale ? "Refresh unavailable; showing stale last-good data. " : "") + coverageMessage(v);
+   }
+   function clearTimer() { if (timer !== null) window.clearTimeout(timer); timer = null; }
+   function schedule() {
+diff --git a/app/network_metadata_projection/recognition_read_service.py b/app/network_metadata_projection/recognition_read_service.py
+index e5ad2dbabd792c096db25b2f47138a8a4e49b7cd..a3055baa04dea009fcaefb9d10d52366b7ac30f1 100644
+--- a/app/network_metadata_projection/recognition_read_service.py
++++ b/app/network_metadata_projection/recognition_read_service.py
+@@ -5,6 +5,7 @@ from app.network_attribution.validation import canonical_mac
+ from app.network_metadata.validation import canonical_uuid, ni_timestamp, digest, ip, integer, text
+ from .read_service import DeviceNetworkMetadataReadService
+ from .models import ProjectionUnavailable, ProjectionValidationError, RUNTIME_STATES
++from .effective_runtime_state import effective_runtime_state
+ 
+ 
+ @dataclass(frozen=True, slots=True, repr=False)
+@@ -28,14 +29,16 @@ class RecognitionProjectionEdgeFactV1:
+ 
+ 
+ @dataclass(frozen=True, slots=True, repr=False)
+-class RecognitionProjectionSnapshotV1:
++class RecognitionProjectionSnapshotV2:
+     schema_version: int
+     site_id: str
+     device_id: str
+     identity_binding_state: str
+     projection_runtime_state: str
++    projection_safe_reason: str | None
+     bound_device_id: str | None
+     facts: tuple[RecognitionProjectionEdgeFactV1, ...]
++    device_linked_pending_count: int
+     historical_window_completeness_claimed: bool = False
+ 
+ 
+@@ -53,7 +56,12 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
+         except Exception:
+             raise ProjectionValidationError() from None
+         with self._snapshot(deadline=deadline) as connection:
+-            state = self._runtime_state(connection)
++            runtime = connection.execute(
++                "SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
++            if runtime is None:
++                raise ProjectionUnavailable()
++            state, reason = effective_runtime_state(runtime, enabled=self.idle_write_reduction_enabled,
++                                                    evaluated_at_utc=self.clock())
+             if state not in RUNTIME_STATES:
+                 raise ProjectionUnavailable()
+             binding = connection.execute(
+@@ -66,7 +74,7 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
+             if identity != "authoritative":
+                 if bound is not None:
+                     raise ProjectionUnavailable()
+-                return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state, None, ())
++                return RecognitionProjectionSnapshotV2(2, site_id, device_id, identity, state, reason, None, (), 0)
+             if bound != device_id:
+                 raise ProjectionUnavailable()
+             registry_identity = connection.execute(
+@@ -109,4 +117,15 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
+                     facts.append(RecognitionProjectionEdgeFactV1(**dict(row)))
+             except (ValueError, TypeError):
+                 raise ProjectionUnavailable() from None
+-            return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state, bound, tuple(facts))
++            # Any committed role edge can link pending to this exact Device.
++            # Both-pending/no-edge observations cannot enter this join.
++            linked = connection.execute(
++                "SELECT DISTINCT p.observation_id FROM device_network_metadata_edges AS e INDEXED BY idx_projection_mac_event "
++                "JOIN projection_pending_attribution AS p ON p.observation_id=e.source_observation_ref AND p.site_id=e.site_id "
++                "WHERE e.site_id=? AND e.client_mac=? AND e.event_at>=? AND e.event_at<? "
++                "AND p.event_at>=? AND p.event_at<? LIMIT ?",
++                (site_id, client_mac, from_utc, to_utc, from_utc, to_utc, max_rows + 1)).fetchall()
++            if len(linked) > max_rows:
++                raise ProjectionUnavailable()
++            return RecognitionProjectionSnapshotV2(2, site_id, device_id, identity, state, reason, bound,
++                                                   tuple(facts), len(linked))
+diff --git a/app/network_metadata_projection/repository.py b/app/network_metadata_projection/repository.py
+index 8451996ccade31831da2d832a81c7df8ab5dd474..5445de5a7f207b92c3b53ffde951cb9ae4d469c1 100644
+--- a/app/network_metadata_projection/repository.py
++++ b/app/network_metadata_projection/repository.py
+@@ -29,6 +29,9 @@ class ProjectionRepository:
+         self._transaction_source_poll_at = None
+         self._last_soft_checkpoint_tick = None
+         self.telemetry = None
++        # Process-local observed authority read state, never inferred from a
++        # successful NI-01 poll or restored optimistically after restart.
++        self.attribution_read_state = None
+ 
+     def _count_success(self, **counts):
+         if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
+@@ -252,24 +255,36 @@ class ProjectionRepository:
+ 
+     def successful_source_state(self):
+         """Read-only candidate state; no idle UPDATE needed to evaluate it."""
+-        if self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
++        if (self.attribution_read_state == "unavailable"
++                or self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone()):
+             return "attribution_unavailable"
+         if self.connection.execute("SELECT 1 FROM projection_site_mac_bindings WHERE binding_state='registry_unavailable' LIMIT 1").fetchone():
+             return "registry_degraded"
+         return "usable"
+ 
++    def successful_source_reason(self, state):
++        if state != "attribution_unavailable":
++            return None
++        return ("pending_attribution" if self.attribution_read_state == "available"
++                else "attribution_authority_unavailable")
++
++    def pending_metrics(self):
++        row = self.connection.execute(
++            "SELECT count(*),min(first_pending_at) FROM projection_pending_attribution").fetchone()
++        age = 0 if row[1] is None else max(0, int((self.clock() - ni_timestamp(row[1], canonical=True)).total_seconds()))
++        return int(row[0]), age
++
+     def success_state(self, *, source_verified=False, **times):
+-        if (self.config.idle_write_reduction_enabled and not source_verified
++        if self.live_state in {"blocked_conflict", "capacity_halted", "capacity_waiting_reader"}:
++            self.runtime(self.live_state, self.live_reason, **times)
++        elif (self.config.idle_write_reduction_enabled and not source_verified
+                 and not self.source_verified_in_run):
+             self.runtime(self.live_state, self.live_reason, **times)
+         elif not source_verified and self.live_state in {"source_unavailable", "blocked_conflict"}:
+             self.runtime(self.live_state, self.live_reason, **times)
+-        elif self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
+-            self.runtime("attribution_unavailable", **times)
+-        elif self.connection.execute("SELECT 1 FROM projection_site_mac_bindings WHERE binding_state='registry_unavailable' LIMIT 1").fetchone():
+-            self.runtime("registry_degraded", **times)
+         else:
+-            self.runtime("usable", **times)
++            state = self.successful_source_state()
++            self.runtime(state, self.successful_source_reason(state), **times)
+ 
+     def commit_dispositions(self, dispositions, evaluations, run_id, *, checkpoint=None):
+         if not 1 <= len(dispositions) <= 256:
+diff --git a/app/network_metadata_projection/service.py b/app/network_metadata_projection/service.py
+index 6343de3d0eaf5ef9e0bc9c7bc1bc1cd7430fcf00..2979fa9112121691580e5f2775e571c4b315ac2c 100644
+--- a/app/network_metadata_projection/service.py
++++ b/app/network_metadata_projection/service.py
+@@ -14,6 +14,7 @@ from .models import (ALGORITHM, ATTRIBUTION_STATES, ProjectionConflict, Projecti
+ from .models import NetworkMetadataProjectionResultV1, PreparedDisposition
+ from .validation import edge_id, semantic_digest, timestamp
+ from .effective_runtime_state import effective_runtime_state
++from .telemetry import RETRY_COUNTER_FIELDS, MAX_COUNTER
+ 
+ 
+ class NetworkMetadataProjectionService:
+@@ -24,6 +25,8 @@ class NetworkMetadataProjectionService:
+         self.telemetry, self.stop_event, self.monotonic = telemetry, stop_event or threading.Event(), monotonic
+         self.run_id = None
+         self.last_retry = self.last_reconcile = self.last_retention = None
++        self._retry_counts = dict.fromkeys(RETRY_COUNTER_FIELDS, 0)
++        self._authority_failed_in_batch = False
+         if config.telemetry_aggregation_enabled and telemetry is not None:
+             telemetry.enable_aggregation(monotonic=monotonic)
+             repository.telemetry = telemetry
+@@ -39,12 +42,32 @@ class NetworkMetadataProjectionService:
+         if not self.config.enabled:
+             return False
+         self.repository.initialize()
++        self.repository.attribution_read_state = None
+         if self.config.idle_write_reduction_enabled:
+             self.repository.source_verified_in_run = False
+             self.repository.last_durable_source_poll_at = self.repository.last_durable_source_poll_tick = None
+         self.run_id = self.repository.create_run(self.identity)
+         return True
+ 
++    def _count_retry(self, name, amount=1):
++        self._retry_counts[name] = min(MAX_COUNTER, self._retry_counts[name] + amount)
++
++    def _authority_read(self, available):
++        if not available:
++            self._authority_failed_in_batch = True
++            self.repository.attribution_read_state = "unavailable"
++            self._count_retry("attribution_authority_unavailable_count")
++        elif not self._authority_failed_in_batch:
++            self.repository.attribution_read_state = "available"
++
++    def _emit_retry_counters(self):
++        pending, age = self.repository.pending_metrics()
++        values = dict(self._retry_counts)
++        values.update(pending_attribution_count=min(MAX_COUNTER, pending),
++                      pending_oldest_age_seconds=min(MAX_COUNTER, age))
++        self.emit("attribution_retry_counters", **values)
++        self._retry_counts = dict.fromkeys(RETRY_COUNTER_FIELDS, 0)
++
+     @staticmethod
+     def _source_identity(source):
+         try:
+@@ -75,9 +98,13 @@ class NetworkMetadataProjectionService:
+         try:
+             value = self.attribution.resolve_ipv4(source.site_id, address, source.event_at)
+         except Exception:
++            self._authority_read(False)
+             return result("unavailable", "attribution_store_unavailable")
+         if value.state not in ATTRIBUTION_STATES or value.state == "invalid":
+             raise ProjectionConflict("attribution_query_contract_invalid")
++        if value.state == "unavailable" and value.reason in {
++                "attribution_disabled", "authority_horizon_unavailable", "attribution_store_unavailable"}:
++            self._authority_read(False)
+         if value.state == "resolved":
+             try:
+                 if (value.site_id != source.site_id or value.ipv4 != address or value.event_at != source.event_at
+@@ -134,12 +161,15 @@ class NetworkMetadataProjectionService:
+             horizon = self.attribution.get_authority_horizon(source.site_id)
+         except Exception:
+             horizon = SimpleNamespace(state="unavailable")
++        self._authority_read(horizon.state == "available")
+         states = {}
+         for role in ("src", "dst"):
+             if prior_pending is not None and not prior_pending["pending_" + role]:
+                 states[role] = NetworkMetadataAttributionResultV1(prior_pending[role + "_snapshot_state"],
+                     binding_id=prior_pending[role + "_snapshot_binding_id"])
+             else:
++                if prior_pending is not None:
++                    self._count_retry("attribution_retry_attempted_roles")
+                 states[role] = self._resolve(source, role, horizon)
+         existing = self.repository.existing_edges(source.observation_id) if prior_pending is not None else {}
+         edges = []
+@@ -210,6 +240,7 @@ class NetworkMetadataProjectionService:
+                 after = self._checkpoint_verified(generation)
+                 batch = self.source.read_projection_batch(generation.source_generation_id, after, self.config.batch_max_observations)
+                 if batch:
++                    self._authority_failed_in_batch = False
+                     offsets = [source.record_start_byte_offset for source in batch]
+                     if offsets != sorted(set(offsets)) or (after is not None and offsets[0] <= after):
+                         raise ProjectionConflict("checkpoint_source_conflict")
+@@ -248,13 +279,14 @@ class NetworkMetadataProjectionService:
+         repo = self.repository
+         now = repo.clock()
+         desired = repo.successful_source_state()
++        desired_reason = repo.successful_source_reason(desired)
+         row = repo.connection.execute(
+             "SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+         if row is None:
+             raise ProjectionUnavailable()
+         unchanged = (repo.source_verified_in_run and repo.live_state == desired
+-                     and row["runtime_state"] == desired and row["safe_reason"] is None
+-                     and repo.live_reason is None)
++                     and row["runtime_state"] == desired and row["safe_reason"] == desired_reason
++                     and repo.live_reason == desired_reason)
+         fresh = effective_runtime_state(row, enabled=True, evaluated_at_utc=now)[0] == desired
+         previous = repo.last_durable_source_poll_tick
+         elapsed = None if previous is None else self.monotonic() - previous
+@@ -266,6 +298,7 @@ class NetworkMetadataProjectionService:
+         selected = self.repository.pending()
+         results = []
+         for start in range(0, len(selected), 256):
++            self._authority_failed_in_batch = False
+             prepared = []
+             for row in selected[start:start + 256]:
+                 if self.stop_event.is_set():
+@@ -282,7 +315,19 @@ class NetworkMetadataProjectionService:
+             if self.stop_event.is_set():
+                 return tuple(results)
+             self.repository.commit_dispositions(prepared, evaluations, self.run_id)
++            # Outcomes describe committed dispositions, not abandoned prepare
++            # attempts. A failed transaction must never claim a resolved role.
++            for prior, item in zip(selected[start:start + 256], prepared):
++                if item.result.projection_state == "expired_unresolved":
++                    self._count_retry("attribution_retry_expired_unresolved")
++                else:
++                    for role in ("src", "dst"):
++                        if prior["pending_" + role]:
++                            state = getattr(item.result, role + "_attribution_state")
++                            suffix = {"resolved": "resolved", "unavailable": "still_unavailable"}.get(state, "terminal")
++                            self._count_retry("attribution_retry_" + suffix + "_roles")
+             results.extend(item.result for item in prepared)
++        self._emit_retry_counters()
+         return tuple(results)
+ 
+     def reconcile(self):
+diff --git a/app/network_metadata_projection/telemetry.py b/app/network_metadata_projection/telemetry.py
+index 63e68feede603c09880e1b92636f0fcae31b5ed8..1e29b26f7f51ef74c23dff85e648df5667880ce3 100644
+--- a/app/network_metadata_projection/telemetry.py
++++ b/app/network_metadata_projection/telemetry.py
+@@ -5,8 +5,17 @@ from .models import CONFLICTS
+ from app.network_metadata.success_telemetry import SuccessCounters
+ 
+ EVENTS = frozenset({"projection_conflict", "projection_unavailable", "source_unavailable", "expired_unresolved",
+-                   "projection_started", "projection_stopped", "batch_committed", "registry_reconciled", "retention_completed"})
+-FIELDS = frozenset({"observation_id", "edge_id", "source_generation_id", "site_id", "reason_code", "count"})
++                   "projection_started", "projection_stopped", "batch_committed", "registry_reconciled", "retention_completed",
++                   "attribution_retry_counters"})
++RETRY_COUNTER_FIELDS = frozenset({
++    "attribution_retry_attempted_roles", "attribution_retry_resolved_roles",
++    "attribution_retry_terminal_roles", "attribution_retry_still_unavailable_roles",
++    "attribution_retry_expired_unresolved", "pending_attribution_count",
++    "pending_oldest_age_seconds", "attribution_authority_unavailable_count",
++})
++MAX_COUNTER = 2**63 - 1
++_LEGACY_FIELDS = frozenset({"observation_id", "edge_id", "source_generation_id", "site_id", "reason_code", "count"})
++FIELDS = _LEGACY_FIELDS | RETRY_COUNTER_FIELDS
+ 
+ 
+ class ProjectionTelemetry:
+@@ -31,8 +40,14 @@ class ProjectionTelemetry:
+             self._success.flush_due()
+ 
+     def emit(self, event, **values):
+-        if event not in EVENTS or not set(values) <= FIELDS:
++        allowed = RETRY_COUNTER_FIELDS if event == "attribution_retry_counters" else _LEGACY_FIELDS
++        if event not in EVENTS or not set(values) <= allowed:
+             raise ValueError("invalid_projection_telemetry")
++        if event == "attribution_retry_counters":
++            if not values or any(type(value) is not int or not 0 <= value <= MAX_COUNTER for value in values.values()):
++                raise ValueError("invalid_projection_telemetry")
++            self.logger.info(json.dumps(dict(event=event, **values), sort_keys=True, separators=(",", ":")))
++            return
+         # Closed token grammar: never interpolate an upstream error/value.
+         from app.network_metadata.validation import canonical_uuid, digest, integer
+         from app.device_fingerprint.validation import validate_site_id, validate_machine_id
+diff --git a/app/network_service_recognition/models.py b/app/network_service_recognition/models.py
+index 0f343a72abd4338ee650381dc9e838bca5419a63..4a192632ddf6f90a09cbe7b54d45c40b26f9c667 100644
+--- a/app/network_service_recognition/models.py
++++ b/app/network_service_recognition/models.py
+@@ -113,17 +113,18 @@ class LastServiceObservationV1:
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+-class ServiceRecognitionCoverageV1:
++class ServiceRecognitionCoverageV2:
+     scope: str
+     source_state: str
+-    attribution_state: str
+-    projection_state: str
++    pipeline_attribution_state: str
++    device_evidence_binding_state: str
++    device_linked_pending: bool
+     recognition_state: str
+     historical_window_completeness_claimed: bool
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+-class DeviceServiceSummaryV1:
++class DeviceServiceSummaryV2:
+     schema_version: int
+     site_id: str
+     device_id: str
+@@ -136,7 +137,7 @@ class DeviceServiceSummaryV1:
+     service_categories: tuple[RecentServiceCategoryV1, ...]
+     last_service_observation: LastServiceObservationV1 | None
+     freshness_state: str
+-    coverage: ServiceRecognitionCoverageV1
++    coverage: ServiceRecognitionCoverageV2
+     recognition_ruleset_id: str
+     recognition_ruleset_version: int
+     recognition_ruleset_digest_sha256: str
+@@ -149,7 +150,7 @@ def evidence_state(identity, last, coverage):
+     if identity != "authoritative": return "identity_pending"
+     if last is not None: return "supported_results_present"
+     if coverage.source_state != "usable": return "insufficient_source_coverage"
+-    if coverage.attribution_state != "usable": return "insufficient_attribution"
++    if coverage.pipeline_attribution_state != "usable" or coverage.device_linked_pending: return "insufficient_attribution"
+     if coverage.recognition_state != "usable": return "recognition_limited"
+     return "no_supported_result_observed_with_sufficient_coverage"
+ 
+@@ -157,8 +158,35 @@ def evidence_state(identity, last, coverage):
+ def freshness(age, coverage):
+     if age is None: return "unavailable"
+     if not 0 <= age <= 86400: raise ServiceUnavailable()
+-    base = "fresh" if age <= 300 else "recent" if age <= 3600 else "stale"
+-    if coverage.source_state in {"unavailable", "unknown"}: return "stale"
+-    if base == "fresh" and (coverage.source_state != "usable" or coverage.attribution_state != "usable"
+-                             or coverage.recognition_state != "usable"): return "recent"
+-    return base
++    return "fresh" if age <= 300 else "recent" if age <= 3600 else "stale"
++
++
++def pipeline_coverage(state, reason):
++    """NI-04 owned mapping: pipeline uncertainty is never a fact veto."""
++    if reason is not None and (type(reason) is not str or not reason or len(reason) > 128):
++        raise ServiceUnavailable()
++    if state == "usable":
++        if reason is not None:
++            raise ServiceUnavailable()
++        return "usable", "usable"
++    if state == "registry_degraded":
++        return "usable", "usable"
++    if state == "attribution_unavailable":
++        attribution = {None: "unknown", "pending_attribution": "degraded",
++                       "attribution_authority_unavailable": "unavailable"}
++        if reason not in attribution:
++            raise ServiceUnavailable()
++        return "usable", attribution[reason]
++    if state == "source_unavailable":
++        return "unavailable", "unknown"
++    if state in {"capacity_waiting_reader", "capacity_halted", "blocked_conflict", "degraded"}:
++        return "degraded", "degraded"
++    if state in {"initializing", "stopping"}:
++        return "unknown", "unknown"
++    raise ServiceUnavailable()
++
++
++def availability(identity, coverage):
++    return ("usable" if identity == "authoritative" and coverage.source_state == "usable"
++            and coverage.pipeline_attribution_state == "usable" and not coverage.device_linked_pending
++            and coverage.recognition_state == "usable" else "degraded")
+diff --git a/app/network_service_recognition/read_service.py b/app/network_service_recognition/read_service.py
+index d93763aa66af881d77a235d19322416d5ee09026..17c825dcb497a37c9cef6b77dc615967cce671fe 100644
+--- a/app/network_service_recognition/read_service.py
++++ b/app/network_service_recognition/read_service.py
+@@ -8,14 +8,14 @@ from app.network_attribution.validation import canonical_mac
+ from app.network_metadata.validation import canonical_uuid, ni_timestamp, ni_format_utc
+ from app.network_metadata.recognition_read_service import RecognitionSourceEvidenceV1
+ from app.network_metadata_projection.recognition_read_service import (
+-    RecognitionProjectionSnapshotV1, RecognitionProjectionEdgeFactV1)
+-from app.network_protocol_intelligence.read_service import _COVERAGE
++    RecognitionProjectionSnapshotV2, RecognitionProjectionEdgeFactV1)
+ from .artifacts import RecognitionBundle
+ from .canonical import canonical_hostname
+ from .matcher import match_direct_sni_v1, matching_rules, rule_eligible
+ from .models import (ServiceUnavailable, ServiceValidationError, ServiceBusy, ServiceDeadline,
+-    ServiceWindowV1, ServiceRecognitionCoverageV1, RecentServiceV1, RecentServiceCategoryV1,
+-    LastServiceObservationV1, DeviceServiceSummaryV1, service_observation, freshness, evidence_state)
++    ServiceWindowV1, ServiceRecognitionCoverageV2, RecentServiceV1, RecentServiceCategoryV1,
++    LastServiceObservationV1, DeviceServiceSummaryV2, service_observation, freshness, evidence_state,
++    pipeline_coverage, availability)
+ from .serialization import serialize_device_service_intelligence
+ 
+ _READ_SLOTS = threading.BoundedSemaphore(1)
+@@ -42,15 +42,18 @@ class DeviceServiceRecognitionReadService:
+             start, recent = at - timedelta(days=1), at - timedelta(hours=1)
+             snapshot = self._projection_reader.read_service_recognition_snapshot(site_id, device_id, client_mac,
+                 ni_format_utc(start), evaluated_at_utc, max_rows=5000, deadline=bounded)
+-            if (type(snapshot) is not RecognitionProjectionSnapshotV1 or snapshot.schema_version != 1
++            if (type(snapshot) is not RecognitionProjectionSnapshotV2 or type(snapshot.schema_version) is not int or snapshot.schema_version != 2
+                     or snapshot.site_id != site_id or snapshot.device_id != device_id
+                     or snapshot.historical_window_completeness_claimed is not False
+-                    or type(snapshot.facts) is not tuple or len(snapshot.facts) > 5000):
++                    or type(snapshot.facts) is not tuple or len(snapshot.facts) > 5000
++                    or type(snapshot.device_linked_pending_count) is not int
++                    or not 0 <= snapshot.device_linked_pending_count <= 5000):
+                 raise ServiceUnavailable()
+-            projection, source, attribution = _COVERAGE[snapshot.projection_runtime_state]
++            source, attribution = pipeline_coverage(snapshot.projection_runtime_state, snapshot.projection_safe_reason)
+             identity = {"authoritative": "authoritative", "not_yet_registry_resolved": "pending",
+                         "registry_unavailable": "unavailable", "absent": "absent"}[snapshot.identity_binding_state]
+-            if identity != "authoritative" and (snapshot.bound_device_id is not None or snapshot.facts): raise ServiceUnavailable()
++            if identity != "authoritative" and (snapshot.bound_device_id is not None or snapshot.facts
++                                                or snapshot.device_linked_pending_count): raise ServiceUnavailable()
+             if identity == "authoritative" and snapshot.bound_device_id != device_id: raise ServiceUnavailable()
+             observations, limited = [], False
+             if identity == "authoritative":
+@@ -122,7 +125,7 @@ class DeviceServiceRecognitionReadService:
+                     observations.append(service_observation(site_id, device_id, fact, matched))
+                 if len(observations) > 5000: raise ServiceUnavailable()
+             result = self._summary(site_id, device_id, evaluated_at_utc, start, recent, at, identity,
+-                                   projection, source, attribution, observations, limited)
++                                   source, attribution, bool(snapshot.device_linked_pending_count), observations, limited)
+             serialize_device_service_intelligence(result, self.bundle)
+             bounded.require_remaining()
+             return result
+@@ -135,7 +138,7 @@ class DeviceServiceRecognitionReadService:
+         finally:
+             _READ_SLOTS.release()
+ 
+-    def _summary(self, site, device, evaluated, start, recent, at, identity, projection, source, attribution, observations, limited):
++    def _summary(self, site, device, evaluated, start, recent, at, identity, source, attribution, linked_pending, observations, limited):
+         ordered = sorted((row for row in observations if row.resolution_state == "service_resolved"),
+                          key=lambda row: (at - ni_timestamp(row.observed_at, canonical=True), row.service_id, row.service_observation_id))
+         services = self.bundle.taxonomy.index["services"]
+@@ -157,12 +160,14 @@ class DeviceServiceRecognitionReadService:
+             latest_categories.setdefault(row.service_category_id, row.last_observed_at)
+         category_rows = tuple(RecentServiceCategoryV1(key, categories[key]["display_name"], event) for key, event in
+             sorted(latest_categories.items(), key=lambda pair: (at - ni_timestamp(pair[1], canonical=True), pair[0])))
+-        coverage = ServiceRecognitionCoverageV1("current_pipeline", source, attribution, projection, "limited" if limited else "usable", False)
++        coverage = ServiceRecognitionCoverageV2("confirmed_device_evidence", source, attribution,
++            "authoritative" if identity == "authoritative" else "none", linked_pending,
++            "unavailable" if identity != "authoritative" else "limited" if limited else "usable", False)
+         identity_values = {"recognition_" + key: self.bundle.ruleset[key] for key in ("ruleset_id", "ruleset_version", "ruleset_digest_sha256")}
+         identity_values.update({key: self.bundle.taxonomy[key] for key in ("taxonomy_id", "taxonomy_version", "taxonomy_digest_sha256")})
+-        return DeviceServiceSummaryV1(1, site, device, evaluated,
++        return DeviceServiceSummaryV2(2, site, device, evaluated,
+             ServiceWindowV1(ni_format_utc(start), evaluated, 86400, ni_format_utc(recent), 3600),
+-            "usable" if projection == "usable" and identity == "authoritative" and not limited else "degraded",
++            availability(identity, coverage),
+             evidence_state(identity, last, coverage), identity, visible, category_rows, last,
+             freshness(None if last is None else (at - ni_timestamp(last.observed_at, canonical=True)).total_seconds(), coverage),
+             coverage, **identity_values)
+diff --git a/app/network_service_recognition/serialization.py b/app/network_service_recognition/serialization.py
+index 4478f12122aeb192f73e6c201e63f31a3b9ee0ad..af8cf249d8b68a1bed739a9b098859f7f082c2e9 100644
+--- a/app/network_service_recognition/serialization.py
++++ b/app/network_service_recognition/serialization.py
+@@ -3,14 +3,13 @@ from dataclasses import asdict
+ from datetime import timedelta
+ from app.device_fingerprint.validation import validate_site_id
+ from app.network_metadata.validation import canonical_uuid, ni_timestamp
+-from app.network_protocol_intelligence.read_service import _COVERAGE
+-from .models import (DeviceServiceSummaryV1, ServiceWindowV1, ServiceRecognitionCoverageV1,
+-    RecentServiceV1, RecentServiceCategoryV1, LastServiceObservationV1, ServiceUnavailable, freshness, evidence_state)
++from .models import (DeviceServiceSummaryV2, ServiceWindowV1, ServiceRecognitionCoverageV2,
++    RecentServiceV1, RecentServiceCategoryV1, LastServiceObservationV1, ServiceUnavailable, freshness, evidence_state, availability)
+ 
+ 
+ def serialize_device_service_intelligence(value, bundle):
+     try:
+-        if type(value) is not DeviceServiceSummaryV1 or type(value.window) is not ServiceWindowV1 or type(value.coverage) is not ServiceRecognitionCoverageV1:
++        if type(value) is not DeviceServiceSummaryV2 or type(value.window) is not ServiceWindowV1 or type(value.coverage) is not ServiceRecognitionCoverageV2:
+             raise ValueError
+         validate_site_id(value.site_id)
+         canonical_uuid(value.device_id)
+@@ -18,14 +17,18 @@ def serialize_device_service_intelligence(value, bundle):
+         window, coverage = value.window, value.coverage
+         start = ni_timestamp(window.from_utc, canonical=True)
+         recent = ni_timestamp(window.recent_from_utc, canonical=True)
+-        if (type(value.schema_version) is not int or value.schema_version != 1
++        if (type(value.schema_version) is not int or value.schema_version != 2
+                 or window.to_utc != value.evaluated_at_utc
+                 or type(window.duration_seconds) is not int or window.duration_seconds != 86400
+                 or type(window.recent_duration_seconds) is not int or window.recent_duration_seconds != 3600
+                 or at - start != timedelta(days=1) or at - recent != timedelta(hours=1)
+-                or coverage.scope != "current_pipeline" or coverage.historical_window_completeness_claimed is not False
+-                or (coverage.projection_state, coverage.source_state, coverage.attribution_state) not in set(_COVERAGE.values())
+-                or coverage.recognition_state not in {"usable", "limited"}
++                or coverage.scope != "confirmed_device_evidence" or coverage.historical_window_completeness_claimed is not False
++                or coverage.source_state not in {"usable", "degraded", "unavailable", "unknown"}
++                or coverage.pipeline_attribution_state not in {"usable", "degraded", "unavailable", "unknown"}
++                or coverage.device_evidence_binding_state != ("authoritative" if value.identity_binding_state == "authoritative" else "none")
++                or type(coverage.device_linked_pending) is not bool
++                or (value.identity_binding_state != "authoritative" and coverage.device_linked_pending)
++                or coverage.recognition_state not in {"usable", "limited", "unavailable"}
+                 or value.identity_binding_state not in {"authoritative", "pending", "unavailable", "absent"}
+                 or type(value.recent_services) is not tuple or len(value.recent_services) > 12
+                 or type(value.service_categories) is not tuple or len(value.service_categories) > 10):
+@@ -77,7 +80,8 @@ def serialize_device_service_intelligence(value, bundle):
+         elif value.recent_services or value.service_categories: raise ValueError
+         if value.identity_binding_state != "authoritative" and (last is not None or value.recent_services): raise ValueError
+         if value.freshness_state != freshness(age, coverage) or value.evidence_state != evidence_state(value.identity_binding_state, last, coverage): raise ValueError
+-        expected_availability = "usable" if value.identity_binding_state == "authoritative" and coverage.projection_state == "usable" and coverage.recognition_state == "usable" else "degraded"
++        if coverage.recognition_state == "unavailable" and last is not None: raise ValueError
++        expected_availability = availability(value.identity_binding_state, coverage)
+         if value.availability_state != expected_availability: raise ValueError
+         result = asdict(value)
+         result["recent_services"] = list(result["recent_services"])
+diff --git a/tests/admin_web/device_service_intelligence.cjs b/tests/admin_web/device_service_intelligence.cjs
+index b66fce6705ff074955afd4d3fa7f09045be7ba9b..3f2f6fc1bfccb254a5e99648d68cc41b55e676ae 100644
+--- a/tests/admin_web/device_service_intelligence.cjs
++++ b/tests/admin_web/device_service_intelligence.cjs
+@@ -9,14 +9,16 @@ const service = {service_id: "service.youtube", display_name: "YouTube", organiz
+   organization_display_name: "Google", service_category_id: "category.video_streaming",
+   service_category_display_name: "Video Streaming", last_observed_at: event, support_state: "directly_supported"};
+ const {last_observed_at, ...last} = service;
+-const base = {api_version: "admin.device.service-intelligence.v1", request_id: device, site_id: site, page: null,
+-  result: {schema_version: 1, site_id: site, device_id: device, evaluated_at_utc: at,
++const base = {api_version: "admin.device.service-intelligence.v2", request_id: device, site_id: site, page: null,
++  result: {schema_version: 2, site_id: site, device_id: device, evaluated_at_utc: at,
+     window: {from_utc: "2026-10-11T00:00:00.123456Z", to_utc: at, duration_seconds: 86400,
+       recent_from_utc: "2026-10-11T23:00:00.123456Z", recent_duration_seconds: 3600},
+     availability_state: "usable", evidence_state: "supported_results_present", identity_binding_state: "authoritative",
+     recent_services: [service], service_categories: [{service_category_id: service.service_category_id, display_name: service.service_category_display_name, last_observed_at: event}],
+     last_service_observation: {...last, observed_at: event}, freshness_state: "fresh",
+-    coverage: {scope: "current_pipeline", source_state: "usable", attribution_state: "usable", projection_state: "usable", recognition_state: "usable", historical_window_completeness_claimed: false},
++    coverage: {scope: "confirmed_device_evidence", source_state: "usable", pipeline_attribution_state: "usable",
++      device_evidence_binding_state: "authoritative", device_linked_pending: false,
++      recognition_state: "usable", historical_window_completeness_claimed: false},
+     recognition_ruleset_id: "captivportal.network-intelligence.service-recognition", recognition_ruleset_version: 1, recognition_ruleset_digest_sha256: "a".repeat(64),
+     taxonomy_id: "captivportal.network-intelligence.recognition-taxonomy", taxonomy_version: 1, taxonomy_digest_sha256: "b".repeat(64)}};
+ class Element {
+@@ -119,7 +121,11 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
+   const timeout = fixture(); timeout.hold(); timeout.visible(); await settle(); timeout.fire(10000); await settle();
+   assert.equal(timeout.calls[0].options.signal.aborted, true); assert.match(timeout.ids["device-service-state"].textContent, /unavailable/);
+   for (const mutate of [
+-    (v) => {v.result.peer_ip = "raw-privacy-canary";}, (v) => {v.result.schema_version = 2;},
++    (v) => {v.result.peer_ip = "raw-privacy-canary";}, (v) => {v.result.schema_version = 1;},
++    (v) => {v.api_version = "admin.device.service-intelligence.v1";},
++    (v) => {v.result.coverage.device_linked_pending_count = 1;},
++    (v) => {v.result.coverage.attribution_state = "usable";},
++    (v) => {v.result.coverage.device_linked_pending = 1;},
+     (v) => {v.result.recent_services[0].sni = "raw-privacy-canary";},
+     (v) => {v.result.recent_services.push(v.result.recent_services[0]);},
+     (v) => {v.result.service_categories = [];}, (v) => {v.result.coverage.historical_window_completeness_claimed = true;},
+@@ -137,6 +143,36 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
+   empty.setPayload(value); empty.visible(); await settle();
+   assert.match(empty.ids["device-service-state"].textContent, /does not prove/);
+   assert.equal(empty.ids["device-service-content"].children.length, 4);
++  assert.equal(empty.ids["device-service-state"].textContent,
++    "No supported services recognized in the current window. This does not prove no Internet services or network activity.");
++  // T20-T24: coverage warnings never suppress confirmed cards or age a fresh fact.
++  for (const [positive, pipeline, expected] of [
++    [true, "degraded", "Confirmed service evidence is shown. Attribution coverage is partial; additional activity may be missing."],
++    [true, "unavailable", "Confirmed historical service evidence is shown. Current device attribution is unavailable; additional activity may be missing."],
++    [false, "degraded", "No supported service evidence is confirmed for this device in the current window. Attribution coverage is partial, so this is not evidence of no activity."],
++    [false, "unavailable", "Service evidence cannot be fully evaluated because device attribution is currently unavailable."],
++    [true, "unknown", "Confirmed service evidence is shown. Attribution coverage is partial; additional activity may be missing."],
++  ]) {
++    const t = fixture(), v = structuredClone(positive ? base : value);
++    v.result.coverage.pipeline_attribution_state = pipeline;
++    v.result.availability_state = "degraded";
++    if (!positive) v.result.evidence_state = "insufficient_attribution";
++    t.setPayload(v); t.visible(); await settle();
++    assert.equal(t.ids["device-service-state"].textContent, expected);
++    assert.equal(t.ids["device-service-content"].children.length, 4);
++    assert.equal(t.ids["device-service-content"].textContent.includes("YouTube"), positive);
++    if (positive) assert.match(t.ids["device-service-content"].textContent, /Fresh/);
++  }
++  for (const linked of [false, true]) {
++    const t = fixture(), v = structuredClone(base);
++    v.result.coverage.pipeline_attribution_state = "degraded";
++    v.result.coverage.device_linked_pending = linked;
++    v.result.availability_state = "degraded";
++    t.setPayload(v); t.visible(); await settle();
++    assert.match(t.ids["device-service-content"].textContent, /YouTube/);
++    assert.doesNotMatch(t.ids["device-service-state"].textContent, /device attribution is unavailable/);
++  }
++  console.log("NI04_ATTRIBUTION_RECOVERY_V2_PASS");
+   for (const forbidden of ["innerHTML", "localStorage", "sessionStorage", "indexedDB", "document.cookie", "console.log"])
+     assert.ok(!source.includes(forbidden));
+   console.log("NI04_FRONTEND_PASS");
+diff --git a/tests/admin_web/test_device_service_intelligence.py b/tests/admin_web/test_device_service_intelligence.py
+index 9cd6345b555b2b7f16dbc88f0d78bda66e5896a4..19e4d2a4b11fc3604e4bb272f6fd81cd6fe6e01f 100644
+--- a/tests/admin_web/test_device_service_intelligence.py
++++ b/tests/admin_web/test_device_service_intelligence.py
+@@ -13,7 +13,7 @@ from app.admin_web.query_service import (AdminQueryResponse, AdminQueryUnavailab
+ from app.admin_web.runtime import create_admin_web_runtime
+ from app.network_service_recognition.read_service import DeviceServiceRecognitionReadService
+ from app.network_service_recognition.models import ServiceBusy, ServiceUnavailable, ServiceDeadline
+-from app.network_metadata_projection.recognition_read_service import RecognitionProjectionSnapshotV1
++from app.network_metadata_projection.recognition_read_service import RecognitionProjectionSnapshotV2
+ from app.settings_control.features import AdminFeaturePlanV1
+ from app.settings_control.models import ResolvedSettingsSnapshot
+ from tests.network_service_recognition.support import bundle
+@@ -31,7 +31,7 @@ def service_app(admin_app):
+     query._config = runtime.config
+     query._devices = SimpleNamespace(get_device=lambda **kw: SimpleNamespace(canonical_mac=MAC))
+     query._service_intelligence = DeviceServiceRecognitionReadService(
+-        Projection(RecognitionProjectionSnapshotV1(1, SITE_ID, DEVICE, "authoritative", "usable", DEVICE, ())), Source(()), bundle())
++        Projection(RecognitionProjectionSnapshotV2(2, SITE_ID, DEVICE, "authoritative", "usable", None, DEVICE, (), 0)), Source(()), bundle())
+     app = Flask(__name__); app.config["TESTING"] = True
+     app.register_blueprint(create_admin_web_blueprint(runtime, logger=logging.getLogger("ni04-test")))
+     app.extensions["admin_web_runtime"] = runtime
+@@ -44,7 +44,7 @@ def test_api_exact_safe_dto_and_headers(service_app):
+     assert response.status_code == 200 and len(response.data) <= 16384
+     value = response.json
+     assert set(value) == {"api_version", "request_id", "site_id", "result", "page"}
+-    assert value["api_version"] == "admin.device.service-intelligence.v1" and value["page"] is None
++    assert value["api_version"] == "admin.device.service-intelligence.v2" and value["page"] is None
+     assert value["result"]["evidence_state"] == "no_supported_result_observed_with_sufficient_coverage"
+     assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
+     for private in (MAC, "peer_ip", "source_observation_ref", "edge_id", "sni", "knowledge_ref", "hostname"):
+@@ -67,7 +67,7 @@ def test_off_and_unauthorized_never_lookup_evidence(admin_app, monkeypatch, auth
+     response = client.get(f"/admin/api/v1/sites/{site}/devices/{device}/service-intelligence" + suffix,
+         data=body, base_url="https://localhost")
+     assert response.status_code == status and response.json["error"]["code"] == code
+-    assert response.json["api_version"] == "admin.device.service-intelligence.v1"
++    assert response.json["api_version"] == "admin.device.service-intelligence.v2"
+ 
+ 
+ @pytest.mark.parametrize("error,status,code", [(AdminQueryBusy, 429, "concurrency_limit"),
+diff --git a/tests/admin_web/test_device_service_intelligence_frontend.py b/tests/admin_web/test_device_service_intelligence_frontend.py
+index 36b166554465ab208728e89ad9f822ec8d73765d..e563f0ce81fa80c1434d4e206b78f15955c5b6ba 100644
+--- a/tests/admin_web/test_device_service_intelligence_frontend.py
++++ b/tests/admin_web/test_device_service_intelligence_frontend.py
+@@ -23,7 +23,9 @@ def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
+     assert prefix.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n")
+     for name in ("app/admin_web/static/device_protocol_intelligence.js", "app/network_protocol_intelligence/read_service.py",
+                  "app/network_protocol_intelligence/models.py", "app/network_metadata_projection/read_service.py"):
+-        accepted = subprocess.check_output(["git", "show", "22cdde5d4168de02d142c840028a4d66167e47f7:" + name], cwd=ROOT)
++        # Recovery freezes the current accepted baseline, including the admitted
++        # Wave-1 idle-source guard in the shared projection reader.
++        accepted = subprocess.check_output(["git", "show", "5c7b4c46afa5a57d55fe044c4326da3a10b9e145:" + name], cwd=ROOT)
+         current = ROOT.joinpath(name).read_bytes().replace(b"\r\n", b"\n")
+         assert current == accepted.replace(b"\r\n", b"\n")
+ 
+diff --git a/tests/network_metadata_projection/test_attribution_recovery.py b/tests/network_metadata_projection/test_attribution_recovery.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f26762e5387903182b77fac118cdab4b4e581e02
+--- /dev/null
++++ b/tests/network_metadata_projection/test_attribution_recovery.py
+@@ -0,0 +1,246 @@
++"""Recovery observability uses disposable stores, never persisted retry history."""
++import json
++import logging
++from dataclasses import replace
++from types import SimpleNamespace
++
++import pytest
++
++from app.network_metadata_projection.telemetry import (
++    ProjectionTelemetry, RETRY_COUNTER_FIELDS, MAX_COUNTER,
++)
++from .support import stack
++from .test_projection import edges
++
++
++@pytest.fixture
++def state(tmp_path, caplog):
++    value = stack(tmp_path)
++    value.service.telemetry = ProjectionTelemetry(logging.getLogger("recovery-test"))
++    caplog.set_level(logging.INFO, logger="recovery-test")
++    try:
++        yield value
++    finally:
++        value.repo.close()
++
++
++def counters(caplog):
++    return [json.loads(record.message) for record in caplog.records
++            if record.name == "recovery-test" and
++            json.loads(record.message).get("event") == "attribution_retry_counters"][-1]
++
++
++@pytest.mark.parametrize("field", sorted(RETRY_COUNTER_FIELDS))
++@pytest.mark.parametrize("value", [0, 1, MAX_COUNTER])
++def test_each_counter_accepts_only_safe_bounds(caplog, field, value):
++    caplog.set_level(logging.INFO, logger="recovery-test")
++    ProjectionTelemetry(logging.getLogger("recovery-test")).emit("attribution_retry_counters", **{field: value})
++    assert counters(caplog) == {"event": "attribution_retry_counters", field: value}
++
++
++@pytest.mark.parametrize("field", sorted(RETRY_COUNTER_FIELDS))
++@pytest.mark.parametrize("value", [-1, MAX_COUNTER + 1, 1.5, "1", None, True, False])
++def test_bad_counter_values_fail_closed(field, value):
++    with pytest.raises(ValueError):
++        ProjectionTelemetry().emit("attribution_retry_counters", **{field: value})
++
++
++@pytest.mark.parametrize("field", ["ip", "mac", "device_id", "sni", "dns", "binding_id",
++    "observation_id", "payload", "site_id", "reason_code", "unknown"])
++def test_new_event_has_no_identifier_or_payload_fields(field):
++    with pytest.raises(ValueError):
++        ProjectionTelemetry().emit("attribution_retry_counters", **{field: "privacy-canary"})
++
++
++def test_closed_event_separation_and_existing_telemetry(caplog):
++    caplog.set_level(logging.INFO, logger="recovery-test")
++    telemetry = ProjectionTelemetry(logging.getLogger("recovery-test"))
++    for event, values in [("unknown", {}), ("attribution_retry_counters", {}),
++                          ("batch_committed", {"pending_attribution_count": 1}),
++                          ("batch_committed", {"payload": "private"})]:
++        with pytest.raises(ValueError):
++            telemetry.emit(event, **values)
++    telemetry.emit("batch_committed", count=2)
++    assert json.loads(caplog.records[-1].message) == {"event": "batch_committed", "count": 2}
++
++
++@pytest.mark.parametrize("outcome", ["unavailable", "resolved", "ambiguous", "unattributed",
++    "outside_historical_horizon", "unsupported_address_family", "endpoint_absent"])
++def test_retry_role_outcomes_and_immutable_opposite_edge(state, caplog, outcome):
++    state.attribution.states["10.73.0.8"] = "unavailable"
++    state.service.poll()
++    old = edges(state)
++    before = dict(state.repo.connection.execute("SELECT * FROM projection_pending_attribution").fetchone())
++    state.service.retry()  # Not eligible before the existing 30-second boundary.
++    assert counters(caplog)["attribution_retry_attempted_roles"] == 0
++    state.clock.advance(seconds=30)
++    state.attribution.calls.clear()
++    state.attribution.states = {"10.73.0.7": "invalid", "10.73.0.8": outcome}
++    state.service.retry()
++    report = counters(caplog)
++    assert set(report) == {"event"} | RETRY_COUNTER_FIELDS
++    assert report["attribution_retry_attempted_roles"] == 1
++    assert report["attribution_retry_resolved_roles"] == int(outcome == "resolved")
++    assert report["attribution_retry_still_unavailable_roles"] == int(outcome == "unavailable")
++    assert report["attribution_retry_terminal_roles"] == int(outcome not in {"resolved", "unavailable"})
++    assert report["pending_attribution_count"] == int(outcome == "unavailable")
++    assert report["pending_oldest_age_seconds"] == (30 if outcome == "unavailable" else 0)
++    assert report["attribution_retry_expired_unresolved"] == 0
++    assert [call[1] for call in state.attribution.calls] == ["10.73.0.8"]
++    assert all(row in edges(state) for row in old)
++    assert len(edges(state)) == (2 if outcome == "resolved" else 1)
++    if outcome == "unavailable":
++        after = dict(state.repo.connection.execute("SELECT * FROM projection_pending_attribution").fetchone())
++        assert after["first_pending_at"] == before["first_pending_at"]
++        assert after["next_retry_at"] > before["next_retry_at"]
++    else:
++        state.clock.advance(seconds=30)
++        state.service.retry()
++        assert counters(caplog)["attribution_retry_attempted_roles"] == 0
++        assert len(edges(state)) == (2 if outcome == "resolved" else 1)
++    for private in ("10.73.", "00:11:", "observation_id", "device_id", "binding_id", "sni", "payload"):
++        assert private not in json.dumps(report)
++
++
++@pytest.mark.parametrize("missing", [True, False])
++def test_expired_retry_counter_without_new_edge_or_rewrite(state, caplog, missing):
++    state.attribution.states["10.73.0.8"] = "unavailable"
++    state.service.poll()
++    old = edges(state)
++    state.clock.advance(seconds=30)
++    state.source.records = ([] if missing else [
++        replace(state.source.records[0], sensitive_endpoint_presence_state="expired", src_ip=None, dst_ip=None)])
++    state.service.retry()
++    report = counters(caplog)
++    assert report["attribution_retry_expired_unresolved"] == 1
++    assert report["attribution_retry_attempted_roles"] == report["pending_attribution_count"] == 0
++    assert edges(state) == old
++
++
++def test_pending_reason_requires_actual_read_and_preserves_failure_on_empty_poll(state, caplog):
++    state.attribution.states["10.73.0.8"] = "unavailable"
++    state.service.poll()
++    assert (state.repo.live_state, state.repo.live_reason) == ("attribution_unavailable", "pending_attribution")
++    state.attribution.get_authority_horizon = lambda _: SimpleNamespace(state="unavailable")
++    state.clock.advance(seconds=30)
++    state.service.retry()
++    assert state.repo.live_reason == "attribution_authority_unavailable"
++    assert counters(caplog)["attribution_authority_unavailable_count"] == 1
++    assert counters(caplog)["attribution_retry_still_unavailable_roles"] == 1
++    state.service.poll()  # Empty successful source poll is not an authority probe.
++    assert state.repo.live_reason == "attribution_authority_unavailable"
++    state.repo.attribution_read_state = None  # A fresh process has no demonstrated authority read.
++    state.service.poll()
++    assert state.repo.live_reason == "attribution_authority_unavailable"
++
++
++def test_store_exception_is_not_pending_only_even_with_successful_horizon(state):
++    original = state.attribution.resolve_ipv4
++    def resolve(site, ip, event):
++        if ip == "10.73.0.8":
++            raise OSError("private-store-canary")
++        return original(site, ip, event)
++    state.attribution.resolve_ipv4 = resolve
++    state.service.poll()
++    assert state.repo.live_reason == "attribution_authority_unavailable"
++    assert len(edges(state)) == 1
++
++
++@pytest.mark.parametrize("runtime", ["blocked_conflict", "capacity_halted", "capacity_waiting_reader", "source_unavailable"])
++def test_retry_success_does_not_erase_stronger_runtime_failure(state, runtime):
++    state.repo.runtime(runtime, runtime)
++    # Check success-state precedence itself. Normal post-commit capacity
++    # maintenance may legitimately clear recovered pressure, independently.
++    state.repo.success_state()
++    assert state.repo.live_state == runtime
++
++
++def test_retry_invalid_retains_pending_and_blocks_without_reinterpretation(state):
++    state.attribution.states["10.73.0.8"] = "unavailable"
++    state.service.poll()
++    before = tuple(state.repo.connection.execute("SELECT * FROM projection_pending_attribution").fetchone())
++    old = edges(state)
++    state.clock.advance(seconds=30)
++    state.attribution.states["10.73.0.8"] = "invalid"
++    state.service.tick()
++    assert state.repo.live_state == "blocked_conflict"
++    assert tuple(state.repo.connection.execute("SELECT * FROM projection_pending_attribution").fetchone()) == before
++    assert edges(state) == old
++
++
++def test_failed_retry_commit_cannot_publish_resolved_outcome(state, caplog):
++    state.attribution.states["10.73.0.8"] = "unavailable"
++    state.service.poll()
++    old = edges(state)
++    state.clock.advance(seconds=30)
++    state.attribution.states.clear()
++    def fail(point):
++        if point == "before_commit":
++            raise RuntimeError("disposable transaction failure")
++    state.repo.crash_point = fail
++    with pytest.raises(RuntimeError):
++        state.service.retry()
++    assert edges(state) == old
++    assert state.service._retry_counts["attribution_retry_attempted_roles"] == 1
++    assert state.service._retry_counts["attribution_retry_resolved_roles"] == 0
++    state.repo.crash_point = lambda _: None
++    state.service.retry()
++    assert counters(caplog)["attribution_retry_attempted_roles"] == 2
++    assert counters(caplog)["attribution_retry_resolved_roles"] == 1
++
++
++def test_idle_empty_poll_keeps_safe_reason_without_extra_writes(state):
++    config = replace(state.config, idle_write_reduction_enabled=True)
++    state.repo.config = state.service.config = config
++    tick = [100.0]
++    state.repo.monotonic = state.service.monotonic = lambda: tick[0]
++    state.attribution.states["10.73.0.8"] = "unavailable"
++    state.service.poll()
++    assert state.repo.source_verified_in_run is True
++    assert state.repo.live_reason == "pending_attribution"
++    changes = state.repo.connection.total_changes
++    calls = tuple(state.attribution.calls)
++    for _ in range(3):
++        tick[0] += 1
++        state.clock.advance(seconds=1)
++        state.service.poll()
++    assert state.repo.connection.total_changes == changes
++    assert tuple(state.attribution.calls) == calls
++    assert state.repo.live_reason == "pending_attribution"
++    tick[0] += 10
++    state.clock.advance(seconds=10)
++    state.service.poll()
++    assert state.repo.connection.total_changes > changes
++    assert state.repo.live_reason == "pending_attribution"
++
++
++def test_failure_then_confirmed_retry_recovers_reason_without_rewriting_edges(state):
++    state.attribution.states["10.73.0.8"] = "unavailable"
++    original = state.attribution.get_authority_horizon
++    state.attribution.get_authority_horizon = lambda _: SimpleNamespace(state="unavailable")
++    state.service.poll()
++    assert state.repo.live_reason == "attribution_authority_unavailable"
++    state.clock.advance(seconds=30)
++    state.attribution.get_authority_horizon = original
++    state.service.retry()
++    assert state.repo.live_reason == "pending_attribution"
++    old = edges(state)
++    state.clock.advance(seconds=30)
++    state.attribution.states.clear()
++    state.service.retry()
++    assert state.repo.live_reason is None
++    assert all(row in edges(state) for row in old)
++
++
++def test_existing_success_aggregation_remains_independent(caplog):
++    caplog.set_level(logging.INFO, logger="recovery-test")
++    telemetry = ProjectionTelemetry(logging.getLogger("recovery-test"))
++    clock = [0.0]
++    telemetry.enable_aggregation(monotonic=lambda: clock[0])
++    telemetry.emit("batch_committed", count=2)
++    telemetry.emit("attribution_retry_counters", pending_attribution_count=1)
++    assert counters(caplog)["pending_attribution_count"] == 1
++    clock[0] += 61
++    telemetry.flush_due()
++    summaries = [json.loads(record.message) for record in caplog.records]
++    assert any(row.get("record_count") == 2 and row.get("batch_count") == 1 for row in summaries)
+diff --git a/tests/network_service_recognition/test_attribution_recovery_v2.py b/tests/network_service_recognition/test_attribution_recovery_v2.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e689fb8bdc72d1cdfd0a71d573fbf9245e1f4355
+--- /dev/null
++++ b/tests/network_service_recognition/test_attribution_recovery_v2.py
+@@ -0,0 +1,231 @@
++"""Exact V2 recovery matrix: pipeline health cannot stand in for Device trust."""
++import ast
++import json
++from dataclasses import asdict, replace
++from datetime import timedelta
++from contextlib import contextmanager
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++from app.analytics.source_gateway import QueryDeadline
++from app.network_metadata.validation import ni_format_utc, ni_timestamp
++from app.network_metadata_projection.models import RegistryEvaluation, ProjectionUnavailable
++from app.network_metadata_projection.recognition_read_service import DeviceNetworkMetadataRecognitionReadService
++from app.network_service_recognition.models import ServiceUnavailable
++from app.network_service_recognition.read_service import DeviceServiceRecognitionReadService
++from app.network_service_recognition.serialization import serialize_device_service_intelligence
++from tests.network_metadata_projection.support import stack, source_record, SITE, MAC, OTHER_MAC, T0
++from .support import AT, bundle
++from .test_summary import synthetic, read, Source, Projection, DEVICE
++
++
++@pytest.mark.parametrize("runtime,reason,pipeline,source_state", [
++    ("usable", None, "usable", "usable"),
++    ("registry_degraded", "registry_unavailable", "usable", "usable"),
++    ("attribution_unavailable", "pending_attribution", "degraded", "usable"),
++    ("attribution_unavailable", "attribution_authority_unavailable", "unavailable", "usable"),
++    ("attribution_unavailable", None, "unknown", "usable"),
++    ("source_unavailable", "source_unavailable", "unknown", "unavailable"),
++    ("capacity_halted", "capacity_halted", "degraded", "degraded"),
++    ("capacity_waiting_reader", "capacity_waiting_reader", "degraded", "degraded"),
++    ("blocked_conflict", "edge_semantic_conflict", "degraded", "degraded"),
++    ("initializing", None, "unknown", "unknown"),
++    ("stopping", None, "unknown", "unknown"),
++])
++@pytest.mark.parametrize("linked", [0, 1])
++def test_T01_T04_T05_T07_closed_mapping_preserves_confirmed_fact(runtime, reason, pipeline, source_state, linked):
++    snapshot, source = synthetic()
++    result = read(replace(snapshot, projection_runtime_state=runtime, projection_safe_reason=reason,
++                          device_linked_pending_count=linked), source)
++    assert result.schema_version == 2
++    assert result.last_service_observation.service_id == "service.youtube"
++    assert result.freshness_state == "fresh"
++    assert asdict(result.coverage) == {
++        "scope": "confirmed_device_evidence", "source_state": source_state,
++        "pipeline_attribution_state": pipeline, "device_evidence_binding_state": "authoritative",
++        "device_linked_pending": bool(linked), "recognition_state": "usable",
++        "historical_window_completeness_claimed": False,
++    }
++    assert result.availability_state == ("usable" if source_state == pipeline == "usable" and not linked else "degraded")
++    public = serialize_device_service_intelligence(result, bundle())
++    assert public["coverage"] == asdict(result.coverage)
++    assert "device_linked_pending_count" not in json.dumps(public)
++
++
++@pytest.mark.parametrize("reason", ["pending_attribution", "attribution_authority_unavailable", None])
++def test_T06_T08_no_edge_means_no_recognition_even_with_exact_sni(reason):
++    snapshot, source = synthetic()
++    source_reader = Source((source,))
++    snapshot = replace(snapshot, facts=(), projection_runtime_state="attribution_unavailable", projection_safe_reason=reason)
++    result = read(reader=DeviceServiceRecognitionReadService(Projection(snapshot), source_reader, bundle()))
++    assert result.last_service_observation is None and result.recent_services == ()
++    assert result.evidence_state == "insufficient_attribution"
++    assert source_reader.calls == []
++
++
++@pytest.mark.parametrize("seconds,expected", [(300, "fresh"), (301, "recent"), (3600, "recent"), (3601, "stale"), (86400, "stale")])
++def test_T24_freshness_age_only(seconds, expected):
++    event = ni_format_utc(ni_timestamp(AT, canonical=True) - timedelta(seconds=seconds))
++    snapshot, source = synthetic(event=event)
++    result = read(replace(snapshot, projection_runtime_state="attribution_unavailable",
++                          projection_safe_reason="attribution_authority_unavailable"), source)
++    assert result.freshness_state == expected
++    assert serialize_device_service_intelligence(result, bundle())["freshness_state"] == expected
++
++
++@pytest.mark.parametrize("changes", [
++    {"schema_version": 1}, {"schema_version": True}, {"projection_runtime_state": "future"},
++    {"projection_safe_reason": "invented", "projection_runtime_state": "attribution_unavailable"},
++    {"projection_safe_reason": "pending_attribution", "projection_runtime_state": "usable"},
++    {"device_linked_pending_count": True}, {"device_linked_pending_count": -1},
++    {"device_linked_pending_count": 5001}, {"historical_window_completeness_claimed": True},
++    {"bound_device_id": "10000000-0000-4000-8000-000000000002"},
++])
++def test_unsupported_or_inconsistent_snapshot_fails_closed(changes):
++    snapshot, source = synthetic()
++    with pytest.raises(ServiceUnavailable):
++        read(replace(snapshot, **changes), source)
++
++
++def test_v1_duck_shape_and_public_v1_rejected():
++    snapshot, source = synthetic()
++    with pytest.raises(ServiceUnavailable):
++        read(SimpleNamespace(**asdict(snapshot)), source)
++    result = read()
++    with pytest.raises(ServiceUnavailable):
++        serialize_device_service_intelligence(replace(result, schema_version=1), bundle())
++    for change in ({"device_linked_pending": 1}, {"scope": "current_pipeline"},
++                   {"device_evidence_binding_state": "none"}, {"pipeline_attribution_state": "invented"}):
++        with pytest.raises(ServiceUnavailable):
++            serialize_device_service_intelligence(replace(result, coverage=replace(result.coverage, **change)), bundle())
++
++
++def test_T19_no_private_ni03_mapping_or_import():
++    root = Path(__file__).resolve().parents[2] / "app/network_service_recognition"
++    for path in root.glob("*.py"):
++        tree = ast.parse(path.read_text())
++        for node in ast.walk(tree):
++            if isinstance(node, ast.ImportFrom):
++                assert not (node.module or "").startswith("app.network_protocol_intelligence")
++            if isinstance(node, ast.Attribute):
++                assert node.attr != "_COVERAGE"
++
++
++def snapshot_for(state, *, site=SITE, mac=MAC, device=DEVICE, end=None):
++    end = end or T0 + timedelta(minutes=1)
++    return DeviceNetworkMetadataRecognitionReadService(state.config.db_path).read_service_recognition_snapshot(
++        site, device, mac, ni_format_utc(end - timedelta(days=1)), ni_format_utc(end),
++        max_rows=5000, deadline=QueryDeadline.after(5))
++
++
++@pytest.mark.parametrize("kind,linked", [("same_device", 1), ("other_device", 0), ("both_pending", 0), ("other_site", 0)])
++def test_T02_T03_T04_T10_T29_T30_pending_requires_exact_materialized_device_link(tmp_path, kind, linked):
++    # First edge is confirmed. The independent second observation may be pending.
++    first = source_record(dst_ip="203.0.113.93")
++    second = source_record(100, src_ip="10.73.0.9", dst_ip="203.0.113.94")
++    if kind == "other_site":
++        second = replace(second, site_id="f" * 24)
++    state = stack(tmp_path, [first, second])
++    try:
++        state.attribution.states.update({"203.0.113.93": "endpoint_absent", "203.0.113.94": "unavailable"})
++        state.attribution.macs["10.73.0.9"] = OTHER_MAC if kind == "other_device" else MAC
++        if kind == "both_pending":
++            state.attribution.states["10.73.0.9"] = "unavailable"
++        state.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
++        state.service.poll()
++        before = tuple(state.repo.connection.iterdump())
++        snapshot = snapshot_for(state)
++        assert snapshot.device_linked_pending_count == linked
++        assert snapshot.projection_safe_reason == "pending_attribution"
++        assert len(snapshot.facts) == (2 if kind == "same_device" else 1)
++        if not linked:
++            assert all(f.source_observation_ref != second.observation_id for f in snapshot.facts)
++        # Read-only repeated extraction cannot rewrite past edge/pending identities.
++        assert snapshot_for(state) == snapshot
++        assert tuple(state.repo.connection.iterdump()) == before
++        with pytest.raises(ProjectionUnavailable):
++            snapshot_for(state, device="10000000-0000-4000-8000-000000000002")
++    finally:
++        state.repo.close()
++
++
++def test_v2_serialization_golden_field_order_and_coverage():
++    result = serialize_device_service_intelligence(read(), bundle())
++    assert list(result) == [
++        "schema_version", "site_id", "device_id", "evaluated_at_utc", "window",
++        "availability_state", "evidence_state", "identity_binding_state", "recent_services",
++        "service_categories", "last_service_observation", "freshness_state", "coverage",
++        "recognition_ruleset_id", "recognition_ruleset_version", "recognition_ruleset_digest_sha256",
++        "taxonomy_id", "taxonomy_version", "taxonomy_digest_sha256",
++    ]
++    assert json.dumps(result["coverage"], separators=(",", ":")) == (
++        '{"scope":"confirmed_device_evidence","source_state":"usable",'
++        '"pipeline_attribution_state":"usable","device_evidence_binding_state":"authoritative",'
++        '"device_linked_pending":false,"recognition_state":"usable",'
++        '"historical_window_completeness_claimed":false}')
++    assert json.dumps(result, separators=(",", ":")) == json.dumps(
++        serialize_device_service_intelligence(read(), bundle()), separators=(",", ":"))
++
++
++def test_runtime_binding_facts_and_pending_share_one_read_snapshot(tmp_path):
++    state = stack(tmp_path, [source_record(dst_ip="203.0.113.93")])
++    try:
++        state.attribution.states["203.0.113.93"] = "unavailable"
++        state.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
++        state.service.poll()
++        reader = DeviceNetworkMetadataRecognitionReadService(state.config.db_path)
++        original = reader._snapshot
++        triggered = []
++        class RuntimeCursor:
++            def __init__(self, cursor):
++                self.cursor = cursor
++            def fetchone(self):
++                row = self.cursor.fetchone()  # Establish the reader's WAL snapshot.
++                with state.repo.transaction():
++                    state.repo.connection.execute("DELETE FROM projection_pending_attribution")
++                    state.repo.runtime("usable")
++                triggered.append(True)
++                return row
++        class Connection:
++            def __init__(self, connection):
++                self.connection = connection
++            def execute(self, query, *args):
++                cursor = self.connection.execute(query, *args)
++                return RuntimeCursor(cursor) if query.startswith("SELECT runtime_state,") else cursor
++        @contextmanager
++        def snapshot(**kwargs):
++            with original(**kwargs) as connection:
++                yield Connection(connection)
++        reader._snapshot = snapshot
++        end = T0 + timedelta(minutes=1)
++        value = reader.read_service_recognition_snapshot(
++            SITE, DEVICE, MAC, ni_format_utc(end - timedelta(days=1)), ni_format_utc(end),
++            max_rows=5000, deadline=QueryDeadline.after(5))
++        assert triggered == [True]
++        assert value.projection_runtime_state == "attribution_unavailable"
++        assert value.projection_safe_reason == "pending_attribution"
++        assert len(value.facts) == value.device_linked_pending_count == 1
++        current = snapshot_for(state)
++        assert current.projection_runtime_state == "usable"
++        assert current.device_linked_pending_count == 0
++        assert current.facts == value.facts
++    finally:
++        state.repo.close()
++
++
++def test_pending_window_half_open_and_inbound_edge_can_link_without_service_fact(tmp_path):
++    state = stack(tmp_path, [source_record(src_ip="203.0.113.93", dst_ip="10.73.0.7")])
++    try:
++        state.attribution.states["203.0.113.93"] = "unavailable"
++        state.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
++        state.service.poll()
++        snapshot = snapshot_for(state)
++        assert snapshot.facts == () and snapshot.device_linked_pending_count == 1
++        event = ni_timestamp(state.source.records[0].event_at, canonical=True)
++        assert snapshot_for(state, end=event).device_linked_pending_count == 0
++        assert snapshot_for(state, end=event + timedelta(days=1)).device_linked_pending_count == 1
++        assert snapshot_for(state, end=event + timedelta(days=1, microseconds=1)).device_linked_pending_count == 0
++    finally:
++        state.repo.close()
+diff --git a/tests/network_service_recognition/test_summary.py b/tests/network_service_recognition/test_summary.py
+index 267f84d06c1b2d176e5ab960e1958625c9b165aa..e8f03eceb8c2b9b3255030b2aea7f588615f65af 100644
+--- a/tests/network_service_recognition/test_summary.py
++++ b/tests/network_service_recognition/test_summary.py
+@@ -12,7 +12,7 @@ from app.network_metadata.recognition_read_service import (NetworkMetadataRecogn
+     RecognitionSourceEvidenceV1, RecognitionSniV1, RecognitionDnsV1, RecognitionDnsQueryV1)
+ from app.network_metadata.projection_source import NetworkMetadataProjectionSourceReadService
+ from app.network_metadata_projection.recognition_read_service import (DeviceNetworkMetadataRecognitionReadService,
+-    RecognitionProjectionSnapshotV1, RecognitionProjectionEdgeFactV1)
++    RecognitionProjectionSnapshotV2, RecognitionProjectionEdgeFactV1)
+ from app.network_metadata_projection.models import RegistryEvaluation
+ from app.network_service_recognition.read_service import DeviceServiceRecognitionReadService
+ from app.network_service_recognition.models import ServiceUnavailable, ServiceDeadline, ServiceBusy
+@@ -31,7 +31,7 @@ REF = "10000000-0000-5000-8000-000000000001"
+ def synthetic(host="www.youtube.com", family="tls", presence="observed_retained", *, event=EVENT):
+     fact = RecognitionProjectionEdgeFactV1("a" * 64, event, REF, family, GEN,
+         "synthetic-sensor", "lab-scope", "b" * 64, "src", "10.73.0.7", 12345, "203.0.113.93", 443, "TCP", "external", "outbound")
+-    snapshot = RecognitionProjectionSnapshotV1(1, SITE, DEVICE, "authoritative", "usable", DEVICE, (fact,))
++    snapshot = RecognitionProjectionSnapshotV2(2, SITE, DEVICE, "authoritative", "usable", None, DEVICE, (fact,), 0)
+     payloads = dict(dns=None, tls=None, quic=None)
+     payloads[family] = (RecognitionDnsV1("dns", "request", None, 1, 0, False, False, "observed_retained", "not_observed",
+         (RecognitionDnsQueryV1(0, host, "A"),), ()) if family == "dns" else RecognitionSniV1(host, presence))
+@@ -165,7 +165,7 @@ def test_legitimately_expired_endpoints_preserve_existing_limited_behavior():
+         dst_ip=None, dst_port=None, transport_protocol=None)
+     result = read(snapshot, source)
+     assert result.last_service_observation.service_id == "service.youtube"
+-    assert result.coverage.recognition_state == "limited" and result.freshness_state == "recent"
++    assert result.coverage.recognition_state == "limited" and result.freshness_state == "fresh"
+ 
+ 
+ @pytest.mark.parametrize("binding,expected", [("not_yet_registry_resolved", "pending"), ("registry_unavailable", "unavailable"), ("absent", "absent")])
+@@ -177,8 +177,8 @@ def test_pending_identity_does_not_read_sensitive_store(binding, expected):
+     assert result.identity_binding_state == expected and result.evidence_state == "identity_pending" and reader.calls == []
+ 
+ 
+-@pytest.mark.parametrize("runtime,expected", [("registry_degraded", "fresh"), ("attribution_unavailable", "recent"), ("source_unavailable", "stale"),
+-    ("capacity_halted", "recent"), ("initializing", "stale")])
++@pytest.mark.parametrize("runtime,expected", [("registry_degraded", "fresh"), ("attribution_unavailable", "fresh"), ("source_unavailable", "fresh"),
++    ("capacity_halted", "fresh"), ("initializing", "fresh")])
+ def test_coverage_and_freshness_do_not_erase_supported(runtime, expected):
+     snapshot, source = synthetic()
+     result = read(replace(snapshot, projection_runtime_state=runtime), source)

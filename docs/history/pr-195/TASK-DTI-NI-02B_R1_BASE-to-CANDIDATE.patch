@@ -1,0 +1,3263 @@
+diff --git a/.env.example b/.env.example
+index 7b73b0704080c0e14e20940e4a976758e6565a70..ecf44a203263666ce602f748fff7a0aa92109b12 100644
+--- a/.env.example
++++ b/.env.example
+@@ -29,6 +29,21 @@ VISITOR_REGISTRY_SCAN_INTERVAL_SECONDS=5
+ VISITOR_REGISTRY_SHUTDOWN_TIMEOUT_SECONDS=10
+ VISITOR_REGISTRY_MAX_LINE_BYTES=4194304
+ 
++# Independent NI-02B Device-relative metadata projection. Activation is separate.
++NETWORK_METADATA_PROJECTION_ENABLED=false
++NETWORK_METADATA_PROJECTION_DB_PATH=/opt/CaptivePortal/data/network_metadata_projection.sqlite3
++NETWORK_METADATA_PROJECTION_MAX_DB_BYTES=17179869184
++NETWORK_METADATA_PROJECTION_BATCH_MAX_OBSERVATIONS=256
++NETWORK_METADATA_PROJECTION_POLL_INTERVAL_SECONDS=1
++NETWORK_METADATA_PROJECTION_ATTRIBUTION_RETRY_INTERVAL_SECONDS=30
++NETWORK_METADATA_PROJECTION_ATTRIBUTION_RETRY_BATCH_SIZE=500
++NETWORK_METADATA_PROJECTION_REGISTRY_RECONCILE_INTERVAL_SECONDS=60
++NETWORK_METADATA_PROJECTION_REGISTRY_RECONCILE_BATCH_SIZE=500
++NETWORK_METADATA_PROJECTION_RETENTION_INTERVAL_SECONDS=3600
++NETWORK_METADATA_PROJECTION_RETENTION_BATCH_SIZE=5000
++NETWORK_METADATA_PROJECTION_RETENTION_MAX_BATCHES_PER_PASS=20
++NETWORK_METADATA_PROJECTION_SHUTDOWN_TIMEOUT_SECONDS=20
++
+ # Visit Lifecycle v1. Keep disabled until a separate production activation.
+ VISIT_LIFECYCLE_ENABLED=false
+ VISIT_LIFECYCLE_DB_PATH=/opt/CaptivePortal/data/visits.sqlite3
+diff --git a/app/network_attribution/models.py b/app/network_attribution/models.py
+index efb4f926780ff86514f691ee8b0aae0a13a8d43c..740160e26b27731424de4c95d567edf2fa150bff 100644
+--- a/app/network_attribution/models.py
++++ b/app/network_attribution/models.py
+@@ -84,3 +84,12 @@ class NetworkMetadataAttributionResultV1:
+     valid_from: str | None = None
+     valid_until: str | None = None
+     attribution_source: str | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class NetworkAttributionHorizonV1:
++    state: str
++    site_id: str
++    first_usable_at: str | None = None
++    retained_from: str | None = None
++    reason: str | None = None
+diff --git a/app/network_attribution/read_service.py b/app/network_attribution/read_service.py
+index 4a2d8d77a6d07cde559eb6f7d0662c85d40b3800..ebb493a3559fed4f3f4bb560a9afe6034fe73fcb 100644
+--- a/app/network_attribution/read_service.py
++++ b/app/network_attribution/read_service.py
+@@ -4,55 +4,111 @@ import sqlite3
+ from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ 
+-from app.device_fingerprint.validation import format_utc
++from app.device_fingerprint.validation import format_utc, parse_utc, validate_site_id
++from app.device_fingerprint.models import DeviceFingerprintValidationError
+ 
+-from .models import NetworkMetadataAttributionResultV1, NetworkAttributionError
+-from .repository import RETENTION_SECONDS, coverage_is_continuous
++from .models import NetworkMetadataAttributionResultV1, NetworkAttributionError, NetworkAttributionHorizonV1
++from .repository import RETENTION_SECONDS
+ from .schema import validate_schema_contract
+-from .validation import query_values
++from .validation import read_query_values
++
++
++def _read_coverage_is_continuous(connection, site, source, start, exact_end, floor_end):
++    """Read-only T1 continuity over (confirmation, exact query instant]."""
++    rows = connection.execute(
++        "SELECT * FROM source_coverage WHERE site_id=? AND capture_source_id=? AND coverage_from<=? "
++        "AND (coverage_until IS NULL OR coverage_until>?) ORDER BY coverage_from,coverage_id",
++        (site, source, floor_end, start)).fetchall()
++    through = parse_utc(start)
++    for row in rows:
++        beginning = parse_utc(row["coverage_from"])
++        until = None if row["coverage_until"] is None else parse_utc(row["coverage_until"])
++        if until is not None and until <= beginning:
++            continue
++        if (beginning > through or row["state"] != "usable"
++                or (until is None and parse_utc(row["verified_through"]) < exact_end)):
++            return False
++        if until is None or until > exact_end:
++            return True
++        through = max(through, until)
++    return False
+ 
+ 
+ class NetworkAttributionReadService:
+     def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc)):
+         self.config, self.clock = config, clock
+ 
++    def _open(self):
++        paths = (Path(self.config.db_path), Path(self.config.db_path + "-wal"), Path(self.config.db_path + "-shm"))
++        if sum(path.stat().st_size for path in paths if path.exists()) > self.config.max_db_bytes:
++            raise NetworkAttributionError("attribution_store_unavailable")
++        connection = sqlite3.connect(Path(self.config.db_path).resolve().as_uri() + "?mode=ro", uri=True,
++                                     timeout=.5, isolation_level=None)
++        try:
++            connection.row_factory = sqlite3.Row
++            connection.execute("PRAGMA foreign_keys=ON")
++            connection.execute("PRAGMA query_only=ON")
++            connection.execute("PRAGMA busy_timeout=500")
++            connection.execute("BEGIN")
++            validate_schema_contract(connection)
++            return connection
++        except BaseException:
++            connection.close()
++            raise
++
++    def get_authority_horizon(self, site_id):
++        result = NetworkAttributionHorizonV1
++        connection = None
++        try:
++            validate_site_id(site_id)
++            if not self.config.enabled:
++                return result("unavailable", site_id, reason="attribution_disabled")
++            connection = self._open()
++            row = connection.execute("SELECT first_usable_at,retained_from FROM authority_horizon WHERE site_id=?",
++                                     (site_id,)).fetchone()
++            if row is None:
++                return result("unavailable", site_id, reason="authority_horizon_unavailable")
++            first, retained = parse_utc(row[0]), parse_utc(row[1])
++            if retained < first:
++                raise NetworkAttributionError("authority_horizon_unavailable")
++            return result("available", site_id, row[0], max(row[1], format_utc(self.clock() - timedelta(seconds=RETENTION_SECONDS))))
++        except (sqlite3.Error, OSError, ValueError, NetworkAttributionError, DeviceFingerprintValidationError):
++            return result("unavailable", site_id, reason="authority_horizon_unavailable")
++        finally:
++            if connection is not None:
++                connection.close()
++
+     def resolve_ipv4(self, site_id, ipv4, event_at):
+         result = NetworkMetadataAttributionResultV1
+         try:
+-            query_values(site_id, ipv4, event_at)
++            exact_query, floor_query = read_query_values(site_id, ipv4, event_at)
+         except NetworkAttributionError:
+             return result("invalid", "invalid_query")
++        def result(state, reason=None, **values):
++            values.setdefault("event_at", event_at)
++            return NetworkMetadataAttributionResultV1(state, reason, **values)
+         if not self.config.enabled:
+             return result("unavailable", "attribution_disabled")
+         connection = None
+         try:
+-            paths = (Path(self.config.db_path), Path(self.config.db_path + "-wal"), Path(self.config.db_path + "-shm"))
+-            if sum(path.stat().st_size for path in paths if path.exists()) > self.config.max_db_bytes:
+-                return result("unavailable", "attribution_store_unavailable")
+-            connection = sqlite3.connect(Path(self.config.db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=.5, isolation_level=None)
+-            connection.row_factory = sqlite3.Row
+-            connection.execute("PRAGMA foreign_keys=ON")
+-            connection.execute("PRAGMA query_only=ON")
+-            connection.execute("PRAGMA busy_timeout=500")
+-            connection.execute("BEGIN")
+-            validate_schema_contract(connection)
++            connection = self._open()
+             horizon = connection.execute("SELECT retained_from FROM authority_horizon WHERE site_id=?", (site_id,)).fetchone()
+             if horizon is None:
+                 return result("unavailable", "authority_horizon_unavailable")
+             retention = format_utc(self.clock() - timedelta(seconds=RETENTION_SECONDS))
+-            if event_at < max(horizon[0], retention):
++            if exact_query < max(parse_utc(horizon[0]), parse_utc(retention)):
+                 return result("outside_historical_horizon", "outside_historical_horizon")
+             coverage = connection.execute(
+                 "SELECT * FROM source_coverage WHERE site_id=? AND coverage_from<=? "
+-                "AND (coverage_until IS NULL OR ?<coverage_until)", (site_id, event_at, event_at)).fetchall()
++                "AND (coverage_until IS NULL OR ?<coverage_until)", (site_id, floor_query, floor_query)).fetchall()
+             if not coverage or any(row["state"] != "usable" or
+-                                   (row["coverage_until"] is None and event_at > row["verified_through"])
++                                   (row["coverage_until"] is None and exact_query > parse_utc(row["verified_through"]))
+                                    for row in coverage):
+                 return result("unavailable", "source_coverage_unavailable")
+             sources = {row["capture_source_id"] for row in coverage}
+             candidates = connection.execute(
+                 "SELECT * FROM binding_intervals WHERE site_id=? AND ipv4=? AND valid_from<=? AND ?<valid_until",
+-                (site_id, ipv4, event_at, event_at)).fetchall()
++                (site_id, ipv4, floor_query, floor_query)).fetchall()
+             for binding in candidates:
+                 if binding["capture_source_id"] not in sources:
+                     return result("unavailable", "source_coverage_unavailable")
+@@ -61,8 +117,8 @@ class NetworkAttributionReadService:
+                 confirmation = connection.execute(
+                     "SELECT max(f.event_at) FROM binding_fact_links l JOIN authority_facts f USING(fact_id) "
+                     "WHERE l.binding_id=? AND f.message_type='ack' AND f.event_at<=?",
+-                    (binding["binding_id"], event_at)).fetchone()[0]
+-                if confirmation is None or not coverage_is_continuous(connection, site_id, binding["capture_source_id"], confirmation, event_at):
++                    (binding["binding_id"], floor_query)).fetchone()[0]
++                if confirmation is None or not _read_coverage_is_continuous(connection, site_id, binding["capture_source_id"], confirmation, exact_query, floor_query):
+                     return result("unavailable", "source_coverage_gap")
+             if len(candidates) > 1:
+                 return result("ambiguous", "multiple_authoritative_bindings")
+@@ -73,19 +129,19 @@ class NetworkAttributionReadService:
+                     boundary = connection.execute(
+                         "SELECT max(event_at) FROM authority_facts WHERE site_id=? AND capture_source_id=? "
+                         "AND event_at<=? AND (ipv4=? OR fact_id IN (SELECT last_fact_id FROM binding_intervals "
+-                        "WHERE site_id=? AND ipv4=?))", (site_id, source, event_at, ipv4, site_id, ipv4)).fetchone()[0]
++                        "WHERE site_id=? AND ipv4=?))", (site_id, source, floor_query, ipv4, site_id, ipv4)).fetchone()[0]
+                     if boundary is None:
+                         boundary = connection.execute("SELECT min(coverage_from) FROM source_coverage WHERE site_id=? "
+                                                       "AND capture_source_id=? AND state='usable'", (site_id, source)).fetchone()[0]
+                         boundary = max(boundary, horizon[0], retention) if boundary is not None else None
+-                    if boundary is None or not coverage_is_continuous(connection, site_id, source, boundary, event_at):
++                    if boundary is None or not _read_coverage_is_continuous(connection, site_id, source, boundary, exact_query, floor_query):
+                         return result("unavailable", "source_coverage_gap")
+                 return result("unattributed", "no_authoritative_binding")
+             binding = candidates[0]
+             return result("resolved", site_id=site_id, client_mac=binding["client_mac"], ipv4=ipv4,
+                           event_at=event_at, binding_id=binding["binding_id"], valid_from=binding["valid_from"],
+                           valid_until=binding["valid_until"], attribution_source="trusted_dhcp_v4")
+-        except (sqlite3.Error, OSError, ValueError, NetworkAttributionError):
++        except (sqlite3.Error, OSError, ValueError, NetworkAttributionError, DeviceFingerprintValidationError):
+             return result("unavailable", "attribution_store_unavailable")
+         finally:
+             if connection is not None:
+diff --git a/app/network_attribution/validation.py b/app/network_attribution/validation.py
+index 8efc9a09c00b62b7b0d9b14c456ee46a7fa83c73..b38c8e4af03b0c180c3e3914e32953ec3b1420f1 100644
+--- a/app/network_attribution/validation.py
++++ b/app/network_attribution/validation.py
+@@ -3,6 +3,8 @@
+ import hashlib
+ import ipaddress
+ import json
++import re
++from datetime import datetime, timezone
+ from dataclasses import asdict
+ 
+ from app.device_fingerprint.validation import (
+@@ -24,6 +26,30 @@ def query_values(site_id, ipv4, event_at):
+         raise NetworkAttributionValidationError("invalid_query") from None
+ 
+ 
++def read_query_values(site_id, ipv4, event_at):
++    """T1 read-only bridge; writer query_values stays millisecond-only.
++
++    Return both the exact instant and an indexed comparison key. The latter
++    is valid only for <= / < predicates against millisecond-aligned rows.
++    """
++    try:
++        validate_site_id(site_id)
++        if not isinstance(ipv4, str) or str(ipaddress.IPv4Address(ipv4)) != ipv4:
++            raise ValueError
++        if not isinstance(event_at, str) or re.fullmatch(
++                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.(?:[0-9]{3}|[0-9]{6})Z",
++                event_at) is None:
++            raise ValueError
++        exact = datetime.strptime(event_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
++        precision = "milliseconds" if len(event_at) == 24 else "microseconds"
++        if exact.isoformat(timespec=precision).replace("+00:00", "Z") != event_at:
++            raise ValueError
++        floor = exact.isoformat(timespec="milliseconds").replace("+00:00", "Z")
++        return exact, floor
++    except (ValueError, TypeError, DeviceFingerprintValidationError):
++        raise NetworkAttributionValidationError("invalid_query") from None
++
++
+ def source_values(site_id, capture_source_id, event_at):
+     try:
+         validate_site_id(site_id)
+diff --git a/app/network_metadata/projection_source.py b/app/network_metadata/projection_source.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..95265db7fb5266f4a08ecfaa5f9f0a9e26ea23b8
+--- /dev/null
++++ b/app/network_metadata/projection_source.py
+@@ -0,0 +1,190 @@
++"""NI-01-owned sensitive, read-only boundary for the isolated NI-02B worker.
++
++No payload/family tables or raw EVE are read. All joined lineage and endpoint
++data comes from one SQLite snapshot; an untrusted dependency fails the read.
++"""
++import json
++import sqlite3
++from contextlib import contextmanager
++from dataclasses import dataclass
++from pathlib import Path
++
++from .canonical import ni01_canonical_json, observation_uuid, source_event_identity
++from .config import make_capture_scope_binding
++from .models import SourceGenerationV1, NetworkMetadataError, NetworkMetadataStorageUnavailable, LOGICAL_SOURCE_ID
++from .schema import validate_schema
++from .validation import canonical_uuid, digest, integer, ip, ni_timestamp
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class NetworkMetadataProjectionSourceRecordV1:
++    observation_id: str
++    source_event_identity: str
++    source_event_family: str
++    source_generation_id: str
++    record_start_byte_offset: int
++    site_id: str
++    capture_source_id: str
++    network_scope_id: str
++    network_scope_state: str
++    capture_scope_binding_digest: str
++    capture_scope_ipv4_cidrs: tuple[str, ...]
++    event_at: str
++    ingested_at: str
++    sensitive_endpoint_presence_state: str
++    src_ip: str | None
++    dst_ip: str | None
++    src_port: int | None
++    dst_port: int | None
++    transport_protocol: str | None
++
++
++class NetworkMetadataProjectionSourceReadService:
++    def __init__(self, db_path):
++        self.db_path = db_path
++
++    @contextmanager
++    def _snapshot(self):
++        connection = None
++        try:
++            connection = sqlite3.connect(Path(self.db_path).resolve().as_uri() + "?mode=ro",
++                                         uri=True, timeout=.5, isolation_level=None)
++            connection.row_factory = sqlite3.Row
++            for pragma in ("query_only=ON", "foreign_keys=ON", "busy_timeout=500"):
++                connection.execute("PRAGMA " + pragma)
++            connection.execute("BEGIN")
++            validate_schema(connection, writer=False)
++            yield connection
++        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, NetworkMetadataError):
++            raise NetworkMetadataStorageUnavailable() from None
++        finally:
++            if connection is not None:
++                connection.close()
++
++    @staticmethod
++    def _binding(connection, generation):
++        if generation.logical_source_id != LOGICAL_SOURCE_ID:
++            raise ValueError
++        row = connection.execute("SELECT * FROM network_metadata_capture_scope_bindings WHERE binding_digest=?",
++                                 (generation.capture_scope_binding_digest,)).fetchone()
++        if row is None:
++            raise ValueError
++        values = dict(row)
++        stored_digest = values.pop("binding_digest")
++        encoded = values.pop("ipv4_cidrs_json")
++        cidrs = json.loads(encoded)
++        if ni01_canonical_json(cidrs).decode("utf-8") != encoded:
++            raise ValueError
++        binding = make_capture_scope_binding(dict(values, ipv4_cidrs=cidrs))
++        if (binding.binding_digest != stored_digest or generation.capture_scope_binding_schema_version != 1
++                or generation.binding_valid_from_utc != binding.valid_from_utc):
++            raise ValueError
++        return binding
++
++    def _generation(self, connection, generation_id):
++        row = connection.execute("SELECT * FROM network_metadata_source_generations WHERE source_generation_id=?",
++                                 (canonical_uuid(generation_id, 4),)).fetchone()
++        if row is None:
++            raise ValueError
++        generation = SourceGenerationV1(**dict(row))
++        self._binding(connection, generation)
++        return generation
++
++    def list_source_generations(self):
++        with self._snapshot() as connection:
++            rows = connection.execute("SELECT * FROM network_metadata_source_generations ORDER BY opened_at_utc,source_generation_id")
++            output = []
++            for row in rows:
++                generation = SourceGenerationV1(**dict(row))
++                self._binding(connection, generation)
++                output.append(generation)
++            return tuple(output)
++
++    def get_source_progress(self, source_generation_id):
++        with self._snapshot() as connection:
++            return self._generation(connection, source_generation_id)
++
++    def _record(self, connection, row, generation):
++        values = dict(row)
++        binding = self._binding(connection, generation)
++        offset = integer(values["record_start_byte_offset"])
++        identity = source_event_identity(generation.source_generation_id, offset)
++        if (values["source_generation_id"] != generation.source_generation_id
++                or values["source_event_identity"] != identity
++                or values["observation_id"] != observation_uuid(values["source_event_family"], identity)
++                or values["source_event_family"] not in {"dns", "tls", "quic"}
++                or values["schema_version"] != 1 or values["capture_scope_binding_schema_version"] != 1
++                or values["network_scope_state"] != "within_intended_scope"
++                or any(values[name] != getattr(binding, name) for name in ("site_id", "capture_source_id", "network_scope_id"))
++                or values["capture_scope_binding_digest"] != binding.binding_digest
++                or not generation.generation_start_offset <= offset < generation.committed_byte_offset):
++            raise ValueError
++        ni_timestamp(values["event_at"], canonical=True)
++        ni_timestamp(values["ingested_at"], canonical=True)
++        # Only dependencies of this selected observation: never audit the store.
++        health = connection.execute("SELECT * FROM network_metadata_source_health WHERE health_id=?",
++            (canonical_uuid(values["source_health_ref"], 4),)).fetchone()
++        run = connection.execute("SELECT * FROM network_metadata_ingest_runs WHERE ingest_run_id=?",
++            (canonical_uuid(values["ingest_run_id"], 4),)).fetchone()
++        if (health is None or run is None
++                or health["source_generation_id"] != generation.source_generation_id
++                or health["capture_source_id"] != binding.capture_source_id
++                or run["normalizer_version"] != values["normalizer_version"]):
++            raise ValueError
++        ni_timestamp(health["evaluated_at"], canonical=True)
++        if ni_timestamp(run["started_at_utc"], canonical=True) > ni_timestamp(values["ingested_at"], canonical=True):
++            raise ValueError
++        for name in ("capture_health", "metadata_output_health", "metadata_ingest_health"):
++            if health[name] not in {"usable", "partial", "stale", "unavailable", "unknown"}:
++                raise ValueError
++        digest(run["repository_head"], 40)
++        digest(run["repository_tree"], 40)
++        digest(run["configuration_digest"])
++        state = values["sensitive_endpoint_presence_state"]
++        if state not in {"observed_retained", "not_observed", "expired"}:
++            raise ValueError
++        endpoint = connection.execute("SELECT * FROM network_metadata_sensitive_endpoints WHERE observation_id=?",
++                                      (values["observation_id"],)).fetchone()
++        endpoints = dict(src_ip=None, dst_ip=None, src_port=None, dst_port=None, transport_protocol=None)
++        if state == "observed_retained":
++            if endpoint is None:
++                raise ValueError
++            for role in ("src", "dst"):
++                address, port = endpoint[role + "_ip"], endpoint[role + "_port"]
++                if address is not None and ip(address) != address:
++                    raise ValueError
++                if port is not None:
++                    integer(port, 0, 65535)
++                if address is None and port is not None:
++                    raise ValueError
++                endpoints.update({role + "_ip": address, role + "_port": port})
++            if endpoint["transport_protocol"] not in {None, "TCP", "UDP"}:
++                raise ValueError
++            endpoints["transport_protocol"] = endpoint["transport_protocol"]
++        # Never expose stale endpoints even if a damaged source leaves old rows.
++        names = NetworkMetadataProjectionSourceRecordV1.__dataclass_fields__
++        selected = {name: values[name] for name in names if name in values}
++        return NetworkMetadataProjectionSourceRecordV1(**selected, capture_scope_ipv4_cidrs=binding.ipv4_cidrs, **endpoints)
++
++    def read_projection_batch(self, source_generation_id, after_record_start_byte_offset, limit):
++        integer(limit, 1, 256)
++        if after_record_start_byte_offset is not None:
++            integer(after_record_start_byte_offset)
++        with self._snapshot() as connection:
++            generation = self._generation(connection, source_generation_id)
++            clause = "" if after_record_start_byte_offset is None else " AND record_start_byte_offset>?"
++            parameters = [source_generation_id]
++            if after_record_start_byte_offset is not None:
++                parameters.append(after_record_start_byte_offset)
++            parameters.append(limit)
++            rows = connection.execute("SELECT * FROM network_metadata_observations WHERE source_generation_id=?" +
++                                      clause + " ORDER BY record_start_byte_offset LIMIT ?", parameters).fetchall()
++            return tuple(self._record(connection, row, generation) for row in rows)
++
++    def get_projection_source_record(self, observation_id):
++        canonical_uuid(observation_id, 5)
++        with self._snapshot() as connection:
++            row = connection.execute("SELECT * FROM network_metadata_observations WHERE observation_id=?", (observation_id,)).fetchone()
++            if row is None:
++                return None
++            return self._record(connection, row, self._generation(connection, row["source_generation_id"]))
+diff --git a/app/network_metadata_projection/__init__.py b/app/network_metadata_projection/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7c15a99c74d4a59b669c3830cec9760731a023a
+--- /dev/null
++++ b/app/network_metadata_projection/__init__.py
+@@ -0,0 +1 @@
++"""Failure-isolated, default-OFF NI-02B materialized Device projection V1."""
+diff --git a/app/network_metadata_projection/cli.py b/app/network_metadata_projection/cli.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2185fd2b167a94e55379e9a2f7641d3486a430f5
+--- /dev/null
++++ b/app/network_metadata_projection/cli.py
+@@ -0,0 +1,48 @@
++"""Authorized independent composition root; never loaded by the Portal."""
++import argparse
++import os
++import signal
++from pathlib import Path
++from app.artifact_identity import capture_loaded_artifact_identity
++from app.network_metadata.projection_source import NetworkMetadataProjectionSourceReadService
++from app.network_attribution.config import network_attribution_config_from_env
++from app.network_attribution.read_service import NetworkAttributionReadService
++from .config import projection_config_from_env
++from .repository import ProjectionRepository
++from .registry_adapter import RegistryAdapter
++from .service import NetworkMetadataProjectionService
++from .telemetry import ProjectionTelemetry
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description="Independent NI-02B projection worker")
++    parser.add_argument("command", choices=("run",))
++    parser.parse_args(argv)
++    repo = None
++    try:
++        config = projection_config_from_env()
++        if not config.enabled:
++            return 0  # No DB, lock, upstream configuration/open, identity capture.
++        attribution_config = network_attribution_config_from_env()
++        if Path(config.db_path).resolve() == Path(attribution_config.db_path).resolve():
++            raise ValueError
++        identity = capture_loaded_artifact_identity("network-metadata-projection.service")
++        repo = ProjectionRepository(config)
++        service = NetworkMetadataProjectionService(config, repo,
++            NetworkMetadataProjectionSourceReadService(config.source_db_path), NetworkAttributionReadService(attribution_config),
++            RegistryAdapter(config.registry_db_path), identity, telemetry=ProjectionTelemetry())
++        for sig in (signal.SIGINT, signal.SIGTERM):
++            signal.signal(sig, lambda *_: service.stop())
++        service.run()
++        return 0
++    except Exception:
++        # No raw endpoints, Registry row, config dump, traceback or secrets.
++        print("network_metadata_projection_unavailable")
++        return 1
++    finally:
++        if repo is not None:
++            repo.close()
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/app/network_metadata_projection/config.py b/app/network_metadata_projection/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2dd2128150d3c97d13a05efaeaa6048f7623127
+--- /dev/null
++++ b/app/network_metadata_projection/config.py
+@@ -0,0 +1,49 @@
++"""Default-OFF independent configuration; upstream paths are read-only."""
++import hashlib
++import os
++import re
++from dataclasses import asdict, fields
++from pathlib import Path
++from app.network_metadata.canonical import ni01_canonical_json
++from .models import ProjectionConfig, ProjectionValidationError
++
++PREFIX = "NETWORK_METADATA_PROJECTION_"
++
++
++def configuration_digest(config):
++    return hashlib.sha256(ni01_canonical_json(asdict(config))).hexdigest()
++
++
++def projection_config_from_env(environ=None):
++    env = os.environ if environ is None else environ
++    enabled = env.get(PREFIX + "ENABLED", "false")
++    if enabled not in {"true", "false"}:
++        raise ProjectionValidationError()
++    if enabled == "false":
++        return ProjectionConfig()
++    defaults, values = ProjectionConfig(), {"enabled": True}
++    for field in fields(defaults):
++        name = field.name
++        if name == "enabled":
++            continue
++        key = {"source_db_path": "NETWORK_METADATA_DB_PATH", "registry_db_path": "VISITOR_REGISTRY_DB_PATH"}.get(name, PREFIX + name.upper())
++        default = getattr(defaults, name)
++        value = env.get(key, str(default))
++        if name.endswith("db_path"):
++            if not isinstance(value, str) or not value or "\0" in value or not Path(value).is_absolute():
++                raise ProjectionValidationError()
++        else:
++            if not isinstance(value, str) or re.fullmatch(r"[0-9]{1,11}", value) is None:
++                raise ProjectionValidationError()
++            value = int(value)
++            if name == "max_db_bytes":
++                if not 67108864 <= value <= 68719476736:
++                    raise ProjectionValidationError()
++            elif value != default:
++                # V1 processing values are frozen, not operator-tunable limits.
++                raise ProjectionValidationError()
++        values[name] = value
++    paths = [Path(values[name]).resolve() for name in ("db_path", "source_db_path", "registry_db_path")]
++    if len(set(paths)) != len(paths):
++        raise ProjectionValidationError()
++    return ProjectionConfig(**values)
+diff --git a/app/network_metadata_projection/models.py b/app/network_metadata_projection/models.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2d8dafbe53b604fac7fea2c9eee53a737bc9dab
+--- /dev/null
++++ b/app/network_metadata_projection/models.py
+@@ -0,0 +1,125 @@
++"""Closed NI-02B constants and safe errors; no import-time composition."""
++from dataclasses import dataclass
++
++ALGORITHM = "dti-ni-02b-projection-v1"
++PROJECTION_TRANSACTION_HEADROOM_BYTES = 16777216
++ATTRIBUTION_STATES = frozenset({"resolved", "ambiguous", "unattributed", "unavailable",
++    "outside_historical_horizon", "invalid", "unsupported_address_family", "endpoint_absent"})
++BINDING_STATES = frozenset({"authoritative", "not_yet_registry_resolved", "registry_unavailable"})
++RUNTIME_STATES = frozenset({"initializing", "usable", "degraded", "source_unavailable", "attribution_unavailable",
++    "registry_degraded", "capacity_waiting_reader", "capacity_halted", "blocked_conflict", "stopping"})
++CONFLICTS = frozenset({"source_observation_identity_conflict", "resolved_endpoint_outside_capture_scope",
++    "attribution_query_contract_invalid", "edge_semantic_conflict", "registry_identity_conflict", "checkpoint_source_conflict"})
++
++
++class ProjectionError(RuntimeError):
++    def __init__(self, reason="projection_store_unavailable"):
++        self.reason = reason
++        super().__init__(reason)
++
++
++class ProjectionUnavailable(ProjectionError):
++    pass
++
++
++class ProjectionValidationError(ProjectionError):
++    def __init__(self):
++        super().__init__("invalid_projection_request")
++
++
++class ProjectionConflict(ProjectionError):
++    def __init__(self, reason):
++        if reason not in CONFLICTS:
++            raise ProjectionValidationError()
++        super().__init__(reason)
++
++
++class ProjectionCapacity(ProjectionUnavailable):
++    pass
++
++
++@dataclass(frozen=True, slots=True)
++class ProjectionConfig:
++    enabled: bool = False
++    db_path: str = "/opt/CaptivePortal/data/network_metadata_projection.sqlite3"
++    max_db_bytes: int = 17179869184
++    batch_max_observations: int = 256
++    poll_interval_seconds: int = 1
++    attribution_retry_interval_seconds: int = 30
++    attribution_retry_batch_size: int = 500
++    registry_reconcile_interval_seconds: int = 60
++    registry_reconcile_batch_size: int = 500
++    retention_interval_seconds: int = 3600
++    retention_batch_size: int = 5000
++    retention_max_batches_per_pass: int = 20
++    shutdown_timeout_seconds: int = 20
++    source_db_path: str = "/opt/CaptivePortal/data/network_metadata.sqlite3"
++    registry_db_path: str = "/opt/CaptivePortal/data/visitor_registry.sqlite3"
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class RegistryEvaluation:
++    state: str
++    device_id: str | None = None
++    record_updated_at: str | None = None
++    reason: str | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class NetworkMetadataProjectionResultV1:
++    observation_id: str
++    src_attribution_state: str
++    dst_attribution_state: str
++    emitted_edge_count: int
++    projection_state: str
++    safe_reason: str | None = None
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class DeviceNetworkMetadataEdgeV1:
++    edge_id: str
++    schema_version: int
++    site_id: str
++    device_id: str | None
++    client_mac: str
++    identity_binding_state: str
++    identity_binding_evaluated_at: str
++    device_id_bound_at: str | None
++    event_at: str
++    projected_at: str
++    device_endpoint: dict
++    peer_endpoint: dict
++    device_endpoint_role: str
++    peer_scope: str
++    direction: str
++    source_observation_ref: str
++    source_event_identity: str
++    source_event_family: str
++    source_generation_id: str
++    capture_source_id: str
++    network_scope_id: str
++    network_scope_state: str
++    capture_scope_binding_digest: str
++    attribution_state: str
++    attribution_source: str
++    attribution_binding_id: str
++    attribution_valid_from: str
++    attribution_valid_until: str
++    peer_attribution_state: str
++    peer_attribution_binding_id: str | None
++    projection_contract_version: int
++    projection_algorithm_version: str
++    projection_run_id: str
++
++
++@dataclass(slots=True, repr=False)
++class PreparedDisposition:
++    source: object
++    edges: list
++    pending: dict | None
++    result: NetworkMetadataProjectionResultV1
++
++    def __iter__(self):
++        yield self.source
++        yield self.edges
++        yield self.pending
+diff --git a/app/network_metadata_projection/read_service.py b/app/network_metadata_projection/read_service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0189aa48e3d9b53668b54295a37dda017b0885eb
+--- /dev/null
++++ b/app/network_metadata_projection/read_service.py
+@@ -0,0 +1,120 @@
++"""Projection-only set-based reads. No upstream calls or query-time attribution."""
++import sqlite3
++from contextlib import contextmanager
++from pathlib import Path
++from app.device_fingerprint.validation import validate_site_id
++from app.network_metadata.validation import canonical_uuid
++from app.network_attribution.validation import canonical_mac
++from .models import ALGORITHM, ProjectionUnavailable, ProjectionValidationError, DeviceNetworkMetadataEdgeV1
++from dataclasses import asdict
++from .schema import validate_schema
++from .validation import read_window
++
++JOIN = " FROM device_network_metadata_edges e LEFT JOIN projection_site_mac_bindings b ON b.site_id=e.site_id AND b.client_mac=e.client_mac"
++COLUMNS = "SELECT e.*,b.site_id AS joined_site,b.device_id,b.binding_state,b.last_evaluated_at,b.authoritative_bound_at"
++
++
++class DeviceNetworkMetadataReadService:
++    def __init__(self, db_path, *, enabled=True, max_db_bytes=17179869184):
++        self.db_path, self.enabled, self.max_db_bytes = db_path, enabled, max_db_bytes
++
++    @contextmanager
++    def _snapshot(self):
++        connection = None
++        try:
++            if not self.enabled:
++                raise ProjectionUnavailable("projection_disabled")
++            connection = sqlite3.connect(Path(self.db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=.5, isolation_level=None)
++            connection.row_factory = sqlite3.Row
++            for pragma in ("query_only=ON", "foreign_keys=ON", "busy_timeout=500"):
++                connection.execute("PRAGMA " + pragma)
++            connection.execute("BEGIN")
++            validate_schema(connection)
++            yield connection
++        except (sqlite3.Error, OSError, ValueError):
++            raise ProjectionUnavailable() from None
++        finally:
++            if connection is not None:
++                connection.close()
++
++    @staticmethod
++    def _logical(row):
++        if row["joined_site"] is None:
++            raise ProjectionUnavailable()
++        item = dict(row)
++        for key in ("joined_site", "record_start_byte_offset", "source_ingested_at", "edge_semantic_digest"):
++            item.pop(key)
++        item["identity_binding_state"] = item.pop("binding_state")
++        item["identity_binding_evaluated_at"] = item.pop("last_evaluated_at")
++        item["device_id_bound_at"] = item.pop("authoritative_bound_at")
++        for role, prefix in (("device", "device"), ("peer", "peer")):
++            item[role + "_endpoint"] = dict(ip=item.pop(prefix + "_ip"), port=item.pop(prefix + "_port"), transport_protocol=item["transport_protocol"])
++        item.pop("transport_protocol")
++        return asdict(DeviceNetworkMetadataEdgeV1(**item))
++
++    def _list(self, site_id, from_utc, to_utc, limit, cursor, predicate, identity):
++        read_window(site_id, from_utc, to_utc, limit, cursor)
++        parameters = [site_id, identity, from_utc, to_utc]
++        condition = "e.site_id=? AND " + predicate + " AND e.event_at>=? AND e.event_at<?"
++        if cursor is not None:
++            condition += " AND (e.event_at>? OR (e.event_at=? AND e.edge_id>?))"
++            parameters.extend((cursor[0], cursor[0], cursor[1]))
++        with self._snapshot() as connection:
++            # Probe for corrupt missing internal binding before filtering by a
++            # device join (which otherwise could silently hide the bad edge).
++            if connection.execute("SELECT 1" + JOIN + " WHERE e.site_id=? AND e.event_at>=? AND e.event_at<? AND b.site_id IS NULL LIMIT 1",
++                                  (site_id, from_utc, to_utc)).fetchone():
++                raise ProjectionUnavailable()
++            rows = connection.execute(COLUMNS + JOIN + " WHERE " + condition + " ORDER BY e.event_at,e.edge_id LIMIT ?", parameters + [limit + 1]).fetchall()
++            items = [self._logical(row) for row in rows[:limit]]
++            return dict(items=items, next_cursor=(items[-1]["event_at"], items[-1]["edge_id"]) if len(rows) > limit else None)
++
++    def list_edges_by_device(self, site_id, device_id, from_utc, to_utc, *, limit=100, cursor=None):
++        try:
++            canonical_uuid(device_id)
++        except Exception:
++            raise ProjectionValidationError() from None
++        return self._list(site_id, from_utc, to_utc, limit, cursor, "b.device_id=? AND b.binding_state='authoritative'", device_id)
++
++    def list_edges_by_mac(self, site_id, client_mac, from_utc, to_utc, *, limit=100, cursor=None):
++        try:
++            if canonical_mac(client_mac) != client_mac:
++                raise ValueError
++        except Exception:
++            raise ProjectionValidationError() from None
++        return self._list(site_id, from_utc, to_utc, limit, cursor, "e.client_mac=?", client_mac)
++
++    def list_edges_by_observation(self, site_id, observation_id):
++        try:
++            validate_site_id(site_id)
++            canonical_uuid(observation_id, 5)
++        except Exception:
++            raise ProjectionValidationError() from None
++        with self._snapshot() as connection:
++            rows = connection.execute(COLUMNS + JOIN + " WHERE e.site_id=? AND e.source_observation_ref=? "
++                "ORDER BY CASE e.device_endpoint_role WHEN 'src' THEN 0 ELSE 1 END LIMIT 2", (site_id, observation_id)).fetchall()
++            return tuple(self._logical(row) for row in rows)
++
++    def get_status(self):
++        defaults = dict(enabled=self.enabled, store_state="unavailable" if self.enabled else "disabled",
++            runtime_state=None, safe_reason=None, schema_version=None, projection_contract_version=1,
++            projection_algorithm_version=ALGORITHM, last_projection_commit_at=None, last_registry_reconcile_at=None,
++            pending_attribution_count=0, checkpoint_count=0, db_bytes=0, capacity_limit_bytes=self.max_db_bytes)
++        if not self.enabled:
++            return defaults
++        try:
++            with self._snapshot() as connection:
++                row = connection.execute("SELECT * FROM projection_runtime_state WHERE singleton_id=1").fetchone()
++                for key in ("runtime_state", "safe_reason", "last_projection_commit_at", "last_registry_reconcile_at", "pending_attribution_count"):
++                    defaults[key] = row[key]
++                defaults["checkpoint_count"] = connection.execute("SELECT count(*) FROM projection_source_checkpoints").fetchone()[0]
++                total = 0
++                for suffix in ("", "-wal", "-shm", "-journal"):
++                    try:
++                        total += Path(self.db_path + suffix).stat().st_size
++                    except FileNotFoundError:
++                        pass
++                defaults.update(store_state="available", schema_version=1, db_bytes=total)
++        except (ProjectionUnavailable, OSError):
++            defaults["safe_reason"] = "projection_store_unavailable"
++        return defaults
+diff --git a/app/network_metadata_projection/registry_adapter.py b/app/network_metadata_projection/registry_adapter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a3ceb8932123f387315bdc3a6bb25154d83c9f7
+--- /dev/null
++++ b/app/network_metadata_projection/registry_adapter.py
+@@ -0,0 +1,66 @@
++"""Projection-local adapter of the EXISTING read-only Registry boundary."""
++from contextlib import closing
++from app.visitor_registry.registry_models import RegistryConfig
++from app.visitor_registry.registry_repository import VisitorRegistryRepository
++from app.visitor_registry.registry_read_service import VisitorRegistryReadService
++from app.visitor_registry.registry_service import VisitorRegistryService
++from app.network_metadata.validation import canonical_uuid
++from app.network_attribution.validation import canonical_mac
++from .models import RegistryEvaluation, ProjectionConflict
++
++
++class RegistryAdapter:
++    def __init__(self, db_path):
++        # No initialization, schema write, writer, provider, snapshot collector,
++        # or Device ID generation. source_log_path is unused by this read object.
++        config = RegistryConfig(False, db_path, "", 0, "UTC", 5, 10, 4194304)
++        self.repository = VisitorRegistryRepository(config)
++        self.reader = VisitorRegistryReadService(self.repository, VisitorRegistryService("UTC"), configured_enabled=False)
++
++    def _trust_probe(self):
++        # Metadata/singleton validation only, once for this batch. No whole-data
++        # integrity or snapshot-count audit; no reader_state inventory scan.
++        with closing(self.repository._connect(readonly=True)) as connection:
++            connection.execute("BEGIN")
++            if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
++                return False
++            self.repository._validate_schema(connection, audit_snapshot_counts=False)
++            row = connection.execute("SELECT state FROM registry_state WHERE singleton_id=1").fetchone()
++            return row is not None and row["state"] != "unavailable"
++
++    def evaluate_many(self, macs, *, stop_event=None):
++        requested = tuple(dict.fromkeys(macs))
++        if not requested:
++            return {}
++        try:
++            usable = self._trust_probe()
++        except Exception:
++            usable = False
++        if not usable:
++            return {mac: RegistryEvaluation("registry_unavailable", reason="registry_unavailable") for mac in requested}
++        evaluations = {}
++        for mac in requested:
++            if stop_event is not None and stop_event.is_set():
++                break
++            evaluations[mac] = self._evaluate_point(mac)
++        return evaluations
++
++    def evaluate(self, mac):
++        return self.evaluate_many((mac,))[mac]
++
++    def _evaluate_point(self, mac):
++        try:
++            if canonical_mac(mac) != mac:
++                raise ProjectionConflict("registry_identity_conflict")
++            row = self.reader.get_device_by_mac(mac)
++            if row is None:
++                return RegistryEvaluation("not_yet_registry_resolved")
++            if canonical_mac(row["mac"]) != mac:
++                raise ProjectionConflict("registry_identity_conflict")
++            device_id = canonical_uuid(row["device_id"])
++            return RegistryEvaluation("authoritative", device_id, row.get("updated_at"))
++        except ProjectionConflict:
++            raise
++        except Exception:
++            # Exceptions/Registry JSON must never reach projection logs.
++            return RegistryEvaluation("registry_unavailable", reason="registry_unavailable")
+diff --git a/app/network_metadata_projection/repository.py b/app/network_metadata_projection/repository.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa4964db93a0d6331b7b2d69491629018f377596
+--- /dev/null
++++ b/app/network_metadata_projection/repository.py
+@@ -0,0 +1,296 @@
++"""Single writer, atomic dispositions, monotonic Registry joins and hard cap."""
++import os
++import sqlite3
++import uuid
++from contextlib import contextmanager
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++from app.network_metadata.validation import digest, ni_timestamp
++from .config import configuration_digest
++from .models import (ALGORITHM, PROJECTION_TRANSACTION_HEADROOM_BYTES, ProjectionUnavailable,
++                     ProjectionCapacity, ProjectionConflict, RUNTIME_STATES)
++from .schema import TABLES, create_schema, validate_schema
++from .validation import timestamp, semantic_digest
++
++
++class ProjectionRepository:
++    def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None):
++        self.config, self.clock, self.crash_point = config, clock, crash_point
++        self.connection = self._writer_fd = None
++        self._retention_authorized = False
++        self.live_state, self.live_reason = "initializing", None
++        self.active_run_id = None
++
++    def footprint(self):
++        try:
++            total = 0
++            for suffix in ("", "-wal", "-shm", "-journal"):
++                try:
++                    total += Path(self.config.db_path + suffix).stat().st_size
++                except FileNotFoundError:
++                    pass
++            return total
++        except OSError:
++            raise ProjectionUnavailable() from None
++
++    def _lock(self):
++        self._writer_fd = os.open(self.config.db_path + ".writer.lock", os.O_CREAT | os.O_RDWR, 0o640)
++        if os.name == "nt":
++            import msvcrt
++            msvcrt.locking(self._writer_fd, msvcrt.LK_NBLCK, 1)
++        else:
++            import fcntl
++            fcntl.flock(self._writer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++
++    def initialize(self):
++        if not self.config.enabled:
++            raise ProjectionUnavailable("projection_disabled")
++        try:
++            self._lock()
++            path = Path(self.config.db_path)
++            if path.exists() and path.stat().st_size:
++                probe = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=.5)
++                try:
++                    probe.execute("PRAGMA foreign_keys=ON")
++                    validate_schema(probe, integrity=True)
++                finally:
++                    probe.close()
++            self.connection = sqlite3.connect(self.config.db_path, isolation_level=None, timeout=.5)
++            self.connection.row_factory = sqlite3.Row
++            self.connection.create_function("projection_retention_delete_authorized", 0, lambda: int(self._retention_authorized))
++            for pragma in ("foreign_keys=ON", "journal_mode=WAL", "synchronous=FULL", "busy_timeout=500", "wal_autocheckpoint=1000"):
++                self.connection.execute("PRAGMA " + pragma)
++            objects = self.connection.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
++            if objects == 0 and self.connection.execute("PRAGMA user_version").fetchone()[0] == 0:
++                with self.transaction():
++                    create_schema(self.connection, timestamp(self.clock()))
++            validate_schema(self.connection, integrity=True)
++            row = self.connection.execute("SELECT runtime_state,safe_reason FROM projection_runtime_state").fetchone()
++            self.live_state, self.live_reason = row
++            return self
++        except (sqlite3.Error, OSError, ProjectionUnavailable):
++            self.close()
++            raise ProjectionUnavailable() from None
++
++    def maintain_capacity(self, *, post_commit=False):
++        """PASSIVE after every commit; TRUNCATE only under headroom pressure.
++
++        Pinned readers defer writes, never rewind a durable disposition. Live
++        diagnostics deliberately need not be persisted when the cap forbids it.
++        """
++        try:
++            pressure = self.footprint() + PROJECTION_TRANSACTION_HEADROOM_BYTES > self.config.max_db_bytes
++            busy, frames, completed = self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
++            reader_blocked = bool(busy or frames > completed)
++            if pressure:
++                self.connection.execute("PRAGMA busy_timeout=0")
++                try:
++                    result = self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
++                    reader_blocked = bool(result[0])
++                except sqlite3.OperationalError as error:
++                    if str(error).lower() not in {"database is locked", "database table is locked"} and (getattr(error, "sqlite_errorcode", 0) & 255) not in (5, 6):
++                        raise
++                    reader_blocked = True
++                finally:
++                    self.connection.execute("PRAGMA busy_timeout=500")
++            current = self.footprint()
++            if current + PROJECTION_TRANSACTION_HEADROOM_BYTES > self.config.max_db_bytes:
++                self.live_state = "capacity_waiting_reader" if current <= self.config.max_db_bytes and reader_blocked else "capacity_halted"
++                self.live_reason = self.live_state
++                return False
++            if self.live_state in {"capacity_waiting_reader", "capacity_halted"}:
++                validate_schema(self.connection, integrity=True)
++                self.live_state, self.live_reason = "usable", None
++            return True
++        except (sqlite3.Error, OSError):
++            raise ProjectionUnavailable() from None
++
++    @contextmanager
++    def transaction(self, *, retention=False):
++        if self.connection is None:
++            raise ProjectionUnavailable()
++        if self.footprint() + PROJECTION_TRANSACTION_HEADROOM_BYTES > self.config.max_db_bytes:
++            if not self.maintain_capacity():
++                raise ProjectionCapacity(self.live_state)
++        try:
++            self.connection.execute("BEGIN IMMEDIATE")
++            self._retention_authorized = retention
++            yield
++            self.crash_point("before_commit")
++            self.connection.execute("COMMIT")
++            self.crash_point("after_commit")
++        except BaseException as error:
++            if self.connection.in_transaction:
++                self.connection.execute("ROLLBACK")
++            if isinstance(error, (sqlite3.Error, OSError)):
++                raise ProjectionUnavailable() from None
++            raise
++        finally:
++            self._retention_authorized = False
++        # Do not turn a committed batch into a pretend rollback on pressure.
++        self.maintain_capacity(post_commit=True)
++
++    def insert(self, table, values):
++        if table not in TABLES:
++            raise ProjectionUnavailable()
++        self.connection.execute(f"INSERT INTO {table} ({','.join(values)}) VALUES ({','.join('?' for _ in values)})", tuple(values.values()))
++
++    def create_run(self, identity):
++        digest(identity.artifact_sha, 40)
++        digest(identity.artifact_tree, 40)
++        run_id = str(uuid.uuid4())
++        with self.transaction():
++            self.insert("projection_runs", dict(projection_run_id=run_id, started_at_utc=timestamp(self.clock()),
++                repository_head=identity.artifact_sha, repository_tree=identity.artifact_tree,
++                projection_contract_version=1, projection_algorithm_version=ALGORITHM,
++                configuration_digest=configuration_digest(self.config)))
++        self.active_run_id = run_id
++        return run_id
++
++    def checkpoint(self, generation):
++        return self.connection.execute("SELECT * FROM projection_source_checkpoints WHERE source_generation_id=?", (generation,)).fetchone()
++
++    def existing_edges(self, observation):
++        return {row["device_endpoint_role"]: dict(row) for row in self.connection.execute(
++            "SELECT * FROM device_network_metadata_edges WHERE source_observation_ref=?", (observation,))}
++
++    def binding(self, site, mac):
++        return self.connection.execute("SELECT * FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?", (site, mac)).fetchone()
++
++    def _registry_binding(self, site, mac, evaluation, run_id, now, *, edge_at=None):
++        old = self.binding(site, mac)
++        state, device_id, bound = evaluation.state, evaluation.device_id, None
++        if evaluation.state == "authoritative":
++            known = self.connection.execute("SELECT * FROM projection_registry_identities WHERE client_mac=? OR device_id=?", (mac, device_id)).fetchall()
++            if any(row["client_mac"] != mac or row["device_id"] != device_id for row in known):
++                raise ProjectionConflict("registry_identity_conflict")
++            if old and old["binding_state"] == "authoritative" and old["device_id"] != device_id:
++                raise ProjectionConflict("registry_identity_conflict")
++            if not known:
++                self.insert("projection_registry_identities", dict(device_id=device_id, client_mac=mac,
++                    registry_schema_version=1, first_bound_at=now, last_verified_at=now, registry_record_updated_at=evaluation.record_updated_at))
++            else:
++                self.connection.execute("UPDATE projection_registry_identities SET last_verified_at=?,registry_record_updated_at=? WHERE device_id=?",
++                                        (now, evaluation.record_updated_at, device_id))
++            bound = old["authoritative_bound_at"] if old and old["binding_state"] == "authoritative" else now
++        elif old and old["binding_state"] == "authoritative":
++            state, device_id, bound = "authoritative", old["device_id"], old["authoritative_bound_at"]
++        if old is None:
++            if edge_at is None:
++                raise ProjectionUnavailable()
++            self.insert("projection_site_mac_bindings", dict(site_id=site, client_mac=mac, binding_state=state,
++                device_id=device_id, first_edge_at=edge_at, last_edge_at=edge_at, last_evaluated_at=now,
++                authoritative_bound_at=bound, last_safe_reason=evaluation.reason))
++        else:
++            self.connection.execute("UPDATE projection_site_mac_bindings SET binding_state=?,device_id=?,last_evaluated_at=?,authoritative_bound_at=?,last_safe_reason=? WHERE site_id=? AND client_mac=?",
++                (state, device_id, now, bound, evaluation.reason, site, mac))
++        if old is None or old["binding_state"] != state or old["last_safe_reason"] != evaluation.reason:
++            self.insert("projection_registry_binding_events", dict(site_id=site, client_mac=mac,
++                previous_state=None if old is None else old["binding_state"], new_state=state, device_id=device_id,
++                evaluated_at=now, registry_schema_version=1 if evaluation.state != "registry_unavailable" else None,
++                registry_record_updated_at=evaluation.record_updated_at, safe_reason=evaluation.reason, projection_run_id=run_id))
++
++    def runtime(self, state, reason=None, *, observation=None, **times):
++        if state not in RUNTIME_STATES or not set(times) <= {"last_source_poll_at", "last_projection_commit_at", "last_registry_reconcile_at", "last_retention_at"}:
++            raise ProjectionUnavailable()
++        self.live_state, self.live_reason = state, reason
++        values = dict(runtime_state=state, safe_reason=reason, blocked_observation_id=observation,
++                      updated_at_utc=timestamp(self.clock()), **times)
++        self.connection.execute("UPDATE projection_runtime_state SET " + ",".join(key + "=?" for key in values) +
++            ",pending_attribution_count=(SELECT count(*) FROM projection_pending_attribution) WHERE singleton_id=1", tuple(values.values()))
++
++    def set_failure(self, state, reason=None, *, observation=None):
++        self.live_state, self.live_reason = state, reason
++        try:
++            with self.transaction():
++                self.runtime(state, reason, observation=observation)
++        except ProjectionUnavailable:
++            # No status-only capacity exemption. Remain live fail-closed.
++            pass
++
++    def success_state(self, *, source_verified=False, **times):
++        if not source_verified and self.live_state in {"source_unavailable", "blocked_conflict"}:
++            self.runtime(self.live_state, self.live_reason, **times)
++        elif self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
++            self.runtime("attribution_unavailable", **times)
++        elif self.connection.execute("SELECT 1 FROM projection_site_mac_bindings WHERE binding_state='registry_unavailable' LIMIT 1").fetchone():
++            self.runtime("registry_degraded", **times)
++        else:
++            self.runtime("usable", **times)
++
++    def commit_dispositions(self, dispositions, evaluations, run_id, *, checkpoint=None):
++        if not 1 <= len(dispositions) <= 256:
++            raise ProjectionUnavailable()
++        now = timestamp(self.clock())
++        with self.transaction():
++            for source, edges, pending in dispositions:
++                for edge in edges:
++                    row = self.connection.execute("SELECT * FROM device_network_metadata_edges WHERE edge_id=?", (edge["edge_id"],)).fetchone()
++                    if row is not None:
++                        if row["edge_semantic_digest"] != edge["edge_semantic_digest"] or semantic_digest(dict(row)) != edge["edge_semantic_digest"]:
++                            raise ProjectionConflict("edge_semantic_conflict")
++                        continue
++                    self.insert("device_network_metadata_edges", edge)
++                    site, mac = edge["site_id"], edge["client_mac"]
++                    if self.binding(site, mac) is None:
++                        self._registry_binding(site, mac, evaluations[(site, mac)], run_id, now, edge_at=edge["event_at"])
++                    else:
++                        self.connection.execute("UPDATE projection_site_mac_bindings SET last_edge_at=max(last_edge_at,?) WHERE site_id=? AND client_mac=?",
++                                                (edge["event_at"], site, mac))
++                if pending is None:
++                    self.connection.execute("DELETE FROM projection_pending_attribution WHERE observation_id=?", (source.observation_id,))
++                else:
++                    prior = self.connection.execute("SELECT first_pending_at FROM projection_pending_attribution WHERE observation_id=?", (source.observation_id,)).fetchone()
++                    if prior:
++                        pending["first_pending_at"] = prior[0]
++                    columns = tuple(pending)
++                    self.connection.execute("INSERT INTO projection_pending_attribution (" + ",".join(columns) + ") VALUES(" +
++                        ",".join("?" for _ in columns) + ") ON CONFLICT(observation_id) DO UPDATE SET " +
++                        ",".join(name + "=excluded." + name for name in columns if name != "observation_id"), tuple(pending.values()))
++            if checkpoint is not None:
++                last = next(iter(dispositions[-1]))
++                old = self.checkpoint(last.source_generation_id)
++                if (old is not None and (checkpoint is None or old["last_record_start_byte_offset"] != checkpoint["after"])) or (old is None and checkpoint["after"] is not None):
++                    raise ProjectionConflict("checkpoint_source_conflict")
++                self.connection.execute("INSERT INTO projection_source_checkpoints VALUES(?,?,?,?,?) ON CONFLICT(source_generation_id) DO UPDATE SET "
++                    "last_record_start_byte_offset=excluded.last_record_start_byte_offset,last_observation_id=excluded.last_observation_id,"
++                    "last_source_ingested_at=excluded.last_source_ingested_at,updated_at_utc=excluded.updated_at_utc",
++                    (last.source_generation_id, last.record_start_byte_offset, last.observation_id, last.ingested_at, now))
++            times = {"last_projection_commit_at": now}
++            if checkpoint is not None:
++                times["last_source_poll_at"] = now
++            self.success_state(source_verified=checkpoint is not None, **times)
++
++    def reconcile_selection(self):
++        # Preselect once: transitions cannot re-enter this pass. Frozen V1 lanes.
++        limit, uq, aq = 500, 400, 100
++        unresolved = self.connection.execute("SELECT * FROM projection_site_mac_bindings WHERE binding_state!='authoritative' "
++            "ORDER BY CASE binding_state WHEN 'not_yet_registry_resolved' THEN 0 ELSE 1 END,last_evaluated_at,site_id,client_mac LIMIT ?", (limit,)).fetchall()
++        authoritative = self.connection.execute("SELECT * FROM projection_site_mac_bindings WHERE binding_state='authoritative' "
++            "ORDER BY last_evaluated_at,site_id,client_mac LIMIT ?", (limit,)).fetchall()
++        u, a = min(uq, len(unresolved)), min(aq, len(authoritative))
++        if u < uq:
++            a = min(len(authoritative), limit - u)
++        if a < aq:
++            u = min(len(unresolved), limit - a)
++        return tuple(unresolved[:u] + authoritative[:a])
++
++    def reconcile(self, selected, evaluations, run_id):
++        now = timestamp(self.clock())
++        with self.transaction():
++            for row in selected:
++                self._registry_binding(row["site_id"], row["client_mac"], evaluations[(row["site_id"], row["client_mac"])], run_id, now)
++            self.success_state(last_registry_reconcile_at=now)
++
++    def pending(self):
++        return self.connection.execute("SELECT * FROM projection_pending_attribution WHERE next_retry_at<=? ORDER BY next_retry_at,observation_id LIMIT ?",
++            (timestamp(self.clock()), self.config.attribution_retry_batch_size)).fetchall()
++
++    def close(self):
++        if self.connection is not None:
++            self.connection.close()
++            self.connection = None
++        if self._writer_fd is not None:
++            os.close(self._writer_fd)
++            self._writer_fd = None
+diff --git a/app/network_metadata_projection/retention.py b/app/network_metadata_projection/retention.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ffbca93e0f1dc5b24ff4b63dd1f94c4b449ccd49
+--- /dev/null
++++ b/app/network_metadata_projection/retention.py
+@@ -0,0 +1,50 @@
++"""Bounded retention; no capacity override and no live-evidence eviction."""
++from datetime import timedelta
++from .models import ProjectionCapacity
++from .validation import timestamp
++
++
++class ProjectionRetention:
++    def __init__(self, repository, source):
++        self.repository, self.source = repository, source
++
++    def run(self):
++        repo, totals = self.repository, {}
++        now = repo.clock()
++        cutoff = {days: timestamp(now - timedelta(days=days)) for days in (14, 30, 90)}
++        try:
++            visible = {item.source_generation_id for item in self.source.list_source_generations()}
++        except Exception:
++            visible = None  # Unknown source visibility cannot authorize GC.
++        categories = (
++            ("device_network_metadata_edges", "edge_id", "event_at<? OR source_ingested_at<?", (cutoff[14], cutoff[14])),
++            ("projection_pending_attribution", "observation_id", "event_at<? OR source_ingested_at<?", (cutoff[14], cutoff[14])),
++            ("projection_site_mac_bindings", "rowid", "NOT EXISTS(SELECT 1 FROM device_network_metadata_edges e WHERE e.site_id=projection_site_mac_bindings.site_id AND e.client_mac=projection_site_mac_bindings.client_mac)", ()),
++            ("projection_registry_identities", "device_id", "NOT EXISTS(SELECT 1 FROM projection_site_mac_bindings b WHERE b.device_id=projection_registry_identities.device_id)", ()),
++            ("projection_registry_binding_events", "binding_event_id", "evaluated_at<?", (cutoff[30],)),
++            ("projection_runs", "projection_run_id", "started_at_utc<? AND projection_run_id!=? AND NOT EXISTS(SELECT 1 FROM device_network_metadata_edges e WHERE e.projection_run_id=projection_runs.projection_run_id) AND NOT EXISTS(SELECT 1 FROM projection_registry_binding_events b WHERE b.projection_run_id=projection_runs.projection_run_id)", (cutoff[90], repo.active_run_id or "")),
++            ("projection_source_checkpoints", "source_generation_id", "updated_at_utc<? AND NOT EXISTS(SELECT 1 FROM projection_pending_attribution p WHERE p.source_generation_id=projection_source_checkpoints.source_generation_id) AND NOT EXISTS(SELECT 1 FROM device_network_metadata_edges e WHERE e.source_generation_id=projection_source_checkpoints.source_generation_id)", (cutoff[90],)),
++        )
++        remaining = repo.config.retention_max_batches_per_pass
++        for table, key, condition, parameters in categories:
++            totals[table] = 0
++            while remaining:
++                if table == "projection_source_checkpoints" and visible is None:
++                    break
++                rows = repo.connection.execute(f"SELECT {key} FROM {table} WHERE ({condition}) ORDER BY {key} LIMIT ?",
++                    (*parameters, repo.config.retention_batch_size)).fetchall()
++                ids = [row[0] for row in rows if table != "projection_source_checkpoints" or row[0] not in visible]
++                if not ids:
++                    break
++                try:
++                    with repo.transaction(retention=True):
++                        repo.connection.execute(f"DELETE FROM {table} WHERE {key} IN ({','.join('?' for _ in ids)})", ids)
++                except ProjectionCapacity:
++                    return totals
++                remaining -= 1
++                totals[table] += len(ids)
++            if remaining == 0:
++                return totals
++        with repo.transaction():
++            repo.success_state(last_retention_at=timestamp(now))
++        return totals
+diff --git a/app/network_metadata_projection/schema.py b/app/network_metadata_projection/schema.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..39b97e83e19c4174d28ef84cf66c734ec90719ad
+--- /dev/null
++++ b/app/network_metadata_projection/schema.py
+@@ -0,0 +1,105 @@
++"""Exact nine-table SQLite V1; no migrations or permissive schema repair."""
++import sqlite3
++from .models import ALGORITHM, ATTRIBUTION_STATES, RUNTIME_STATES, ProjectionUnavailable
++from .validation import timestamp
++from app.network_metadata.validation import ni_timestamp
++
++STATES = ",".join("'" + item + "'" for item in sorted(ATTRIBUTION_STATES))
++SNAPSHOT_STATES = ",".join("'" + item + "'" for item in sorted(ATTRIBUTION_STATES - {"invalid"}))
++VERSION = "projection_contract_version INTEGER NOT NULL CHECK(projection_contract_version=1), projection_algorithm_version TEXT NOT NULL CHECK(projection_algorithm_version='" + ALGORITHM + "')"
++TABLES = {
++"network_metadata_projection_schema": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), schema_version INTEGER NOT NULL CHECK(schema_version=1), " + VERSION + ", created_at_utc TEXT NOT NULL",
++"projection_runs": "projection_run_id TEXT PRIMARY KEY, started_at_utc TEXT NOT NULL, repository_head TEXT NOT NULL, repository_tree TEXT NOT NULL, " + VERSION + ", configuration_digest TEXT NOT NULL",
++"device_network_metadata_edges": """edge_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version=1),
++site_id TEXT NOT NULL, client_mac TEXT NOT NULL, event_at TEXT NOT NULL, source_ingested_at TEXT NOT NULL, projected_at TEXT NOT NULL,
++device_endpoint_role TEXT NOT NULL CHECK(device_endpoint_role IN ('src','dst')), device_ip TEXT NOT NULL,
++device_port INTEGER CHECK(device_port IS NULL OR device_port BETWEEN 0 AND 65535), peer_ip TEXT,
++peer_port INTEGER CHECK(peer_port IS NULL OR peer_port BETWEEN 0 AND 65535),
++transport_protocol TEXT CHECK(transport_protocol IS NULL OR transport_protocol IN ('TCP','UDP')),
++peer_scope TEXT NOT NULL CHECK(peer_scope IN ('local','external','unknown')),
++direction TEXT NOT NULL CHECK(direction IN ('outbound','inbound','local','unknown')),
++source_observation_ref TEXT NOT NULL, source_event_identity TEXT NOT NULL,
++source_event_family TEXT NOT NULL CHECK(source_event_family IN ('dns','tls','quic')),
++source_generation_id TEXT NOT NULL, record_start_byte_offset INTEGER NOT NULL CHECK(record_start_byte_offset>=0),
++capture_source_id TEXT NOT NULL, network_scope_id TEXT NOT NULL,
++network_scope_state TEXT NOT NULL CHECK(network_scope_state='within_intended_scope'), capture_scope_binding_digest TEXT NOT NULL,
++attribution_state TEXT NOT NULL CHECK(attribution_state='resolved'), attribution_source TEXT NOT NULL CHECK(attribution_source='trusted_dhcp_v4'),
++attribution_binding_id TEXT NOT NULL, attribution_valid_from TEXT NOT NULL, attribution_valid_until TEXT NOT NULL,
++peer_attribution_state TEXT NOT NULL CHECK(peer_attribution_state IN (""" + STATES + """)), peer_attribution_binding_id TEXT,
++""" + VERSION + """, projection_run_id TEXT NOT NULL REFERENCES projection_runs(projection_run_id), edge_semantic_digest TEXT NOT NULL,
++UNIQUE(source_observation_ref,device_endpoint_role), CHECK(peer_ip IS NOT NULL OR peer_port IS NULL),
++CHECK((peer_attribution_state='resolved' AND peer_attribution_binding_id IS NOT NULL) OR (peer_attribution_state!='resolved' AND peer_attribution_binding_id IS NULL))""",
++"projection_registry_identities": "device_id TEXT PRIMARY KEY, client_mac TEXT NOT NULL UNIQUE, registry_schema_version INTEGER NOT NULL CHECK(registry_schema_version=1), first_bound_at TEXT NOT NULL, last_verified_at TEXT NOT NULL, registry_record_updated_at TEXT",
++"projection_site_mac_bindings": """site_id TEXT NOT NULL, client_mac TEXT NOT NULL,
++binding_state TEXT NOT NULL CHECK(binding_state IN ('authoritative','not_yet_registry_resolved','registry_unavailable')),
++device_id TEXT REFERENCES projection_registry_identities(device_id), first_edge_at TEXT NOT NULL, last_edge_at TEXT NOT NULL,
++last_evaluated_at TEXT NOT NULL, authoritative_bound_at TEXT, last_safe_reason TEXT, PRIMARY KEY(site_id,client_mac),
++CHECK((binding_state='authoritative' AND device_id IS NOT NULL AND authoritative_bound_at IS NOT NULL) OR
++(binding_state IN ('not_yet_registry_resolved','registry_unavailable') AND device_id IS NULL AND authoritative_bound_at IS NULL))""",
++"projection_registry_binding_events": """binding_event_id INTEGER PRIMARY KEY, site_id TEXT NOT NULL, client_mac TEXT NOT NULL,
++previous_state TEXT, new_state TEXT NOT NULL, device_id TEXT, evaluated_at TEXT NOT NULL, registry_schema_version INTEGER,
++registry_record_updated_at TEXT, safe_reason TEXT, projection_run_id TEXT NOT NULL REFERENCES projection_runs(projection_run_id)""",
++"projection_source_checkpoints": "source_generation_id TEXT PRIMARY KEY, last_record_start_byte_offset INTEGER NOT NULL CHECK(last_record_start_byte_offset>=0), last_observation_id TEXT, last_source_ingested_at TEXT, updated_at_utc TEXT NOT NULL",
++"projection_pending_attribution": """observation_id TEXT PRIMARY KEY, site_id TEXT NOT NULL, source_generation_id TEXT NOT NULL,
++record_start_byte_offset INTEGER NOT NULL CHECK(record_start_byte_offset>=0), event_at TEXT NOT NULL, source_ingested_at TEXT NOT NULL,
++pending_src INTEGER NOT NULL CHECK(pending_src IN (0,1)), pending_dst INTEGER NOT NULL CHECK(pending_dst IN (0,1)),
++src_snapshot_state TEXT NOT NULL CHECK(src_snapshot_state IN (""" + SNAPSHOT_STATES + """)), src_snapshot_binding_id TEXT,
++dst_snapshot_state TEXT NOT NULL CHECK(dst_snapshot_state IN (""" + SNAPSHOT_STATES + """)), dst_snapshot_binding_id TEXT,
++first_pending_at TEXT NOT NULL, last_attempt_at TEXT NOT NULL, next_retry_at TEXT NOT NULL,
++CHECK(pending_src=1 OR pending_dst=1), CHECK(pending_src=(src_snapshot_state='unavailable')), CHECK(pending_dst=(dst_snapshot_state='unavailable')),
++CHECK((src_snapshot_state='resolved' AND src_snapshot_binding_id IS NOT NULL) OR (src_snapshot_state!='resolved' AND src_snapshot_binding_id IS NULL)),
++CHECK((dst_snapshot_state='resolved' AND dst_snapshot_binding_id IS NOT NULL) OR (dst_snapshot_state!='resolved' AND dst_snapshot_binding_id IS NULL))""",
++"projection_runtime_state": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), runtime_state TEXT NOT NULL CHECK(runtime_state IN (" + ",".join("'" + state + "'" for state in sorted(RUNTIME_STATES)) + ")), safe_reason TEXT, last_source_poll_at TEXT, last_projection_commit_at TEXT, last_registry_reconcile_at TEXT, last_retention_at TEXT, pending_attribution_count INTEGER NOT NULL CHECK(pending_attribution_count>=0), blocked_observation_id TEXT, updated_at_utc TEXT NOT NULL",
++}
++INDEXES = {
++"idx_projection_site_event": "device_network_metadata_edges(site_id,event_at,edge_id)",
++"idx_projection_mac_event": "device_network_metadata_edges(site_id,client_mac,event_at,edge_id)",
++"idx_projection_observation_role": "device_network_metadata_edges(source_observation_ref,device_endpoint_role)",
++"idx_projection_binding_evaluation": "projection_site_mac_bindings(binding_state,last_evaluated_at,site_id,client_mac)",
++"idx_projection_identity_mac": "projection_registry_identities(client_mac)",
++"idx_projection_binding_event": "projection_registry_binding_events(site_id,client_mac,evaluated_at,binding_event_id)",
++"idx_projection_retry": "projection_pending_attribution(next_retry_at,observation_id)",
++"idx_projection_checkpoint": "projection_source_checkpoints(updated_at_utc,source_generation_id)",
++"idx_projection_edge_expiry": "device_network_metadata_edges(event_at,edge_id)",
++"idx_projection_edge_ingest_expiry": "device_network_metadata_edges(source_ingested_at,edge_id)",
++"idx_projection_event_expiry": "projection_registry_binding_events(evaluated_at,binding_event_id)",
++}
++
++
++def create_schema(connection, now):
++    for name, ddl in TABLES.items():
++        connection.execute(f"CREATE TABLE {name} ({ddl})")
++    for name, ddl in INDEXES.items():
++        connection.execute(f"CREATE INDEX {name} ON {ddl}")
++    for table in ("device_network_metadata_edges", "projection_registry_binding_events"):
++        connection.execute(f"CREATE TRIGGER immutable_{table} BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT,'immutable_projection_fact'); END")
++        connection.execute(f"CREATE TRIGGER retained_{table} BEFORE DELETE ON {table} WHEN projection_retention_delete_authorized()!=1 BEGIN SELECT RAISE(ABORT,'projection_retention_required'); END")
++    connection.execute("INSERT INTO network_metadata_projection_schema VALUES(1,1,1,?,?)", (ALGORITHM, now))
++    connection.execute("INSERT INTO projection_runtime_state(singleton_id,runtime_state,pending_attribution_count,updated_at_utc) VALUES(1,'initializing',0,?)", (now,))
++    connection.execute("PRAGMA user_version=1")
++
++
++def signature(connection):
++    return tuple((kind, name, " ".join(sql.split())) for kind, name, sql in connection.execute(
++        "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
++
++
++def validate_schema(connection, *, integrity=False):
++    try:
++        with sqlite3.connect(":memory:") as reference:
++            create_schema(reference, "2000-01-01T00:00:00.000000Z")
++            expected = signature(reference)
++        rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
++        runtime = connection.execute("SELECT * FROM projection_runtime_state").fetchall()
++        if (connection.execute("PRAGMA user_version").fetchone()[0] != 1 or signature(connection) != expected
++                or len(rows) != 1 or tuple(rows[0])[:4] != (1, 1, 1, ALGORITHM)
++                or len(runtime) != 1 or runtime[0][0] != 1
++                or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
++                or connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"):
++            raise ValueError
++        ni_timestamp(rows[0][4], canonical=True)
++        if integrity and (connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
++                          or connection.execute("PRAGMA foreign_key_check").fetchone() is not None):
++            raise ValueError
++    except Exception:
++        raise ProjectionUnavailable() from None
+diff --git a/app/network_metadata_projection/service.py b/app/network_metadata_projection/service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..88bff4b770b9a6a765c0c5b1b95adf904ac9ed00
+--- /dev/null
++++ b/app/network_metadata_projection/service.py
+@@ -0,0 +1,316 @@
++"""Bounded offline projection/retry/reconciliation loop, upstream read-only."""
++import ipaddress
++import threading
++import time
++from datetime import timedelta
++from types import SimpleNamespace
++from app.device_fingerprint.validation import parse_utc
++from app.network_metadata.validation import ni_timestamp, canonical_uuid
++from app.network_metadata.canonical import observation_uuid, source_event_identity
++from app.network_attribution.models import NetworkMetadataAttributionResultV1
++from app.network_attribution.validation import canonical_mac
++from .models import (ALGORITHM, ATTRIBUTION_STATES, ProjectionConflict, ProjectionError,
++                     ProjectionUnavailable, RegistryEvaluation)
++from .models import NetworkMetadataProjectionResultV1, PreparedDisposition
++from .validation import edge_id, semantic_digest, timestamp
++
++
++class NetworkMetadataProjectionService:
++    def __init__(self, config, repository, source, attribution, registry, identity, *, telemetry=None,
++                 stop_event=None, monotonic=time.monotonic):
++        self.config, self.repository, self.source = config, repository, source
++        self.attribution, self.registry, self.identity = attribution, registry, identity
++        self.telemetry, self.stop_event, self.monotonic = telemetry, stop_event or threading.Event(), monotonic
++        self.run_id = None
++        self.last_retry = self.last_reconcile = self.last_retention = None
++
++    def emit(self, event, **fields):
++        if self.telemetry is not None:
++            self.telemetry.emit(event, **fields)
++
++    def stop(self):
++        self.stop_event.set()
++
++    def startup(self):
++        if not self.config.enabled:
++            return False
++        self.repository.initialize()
++        self.run_id = self.repository.create_run(self.identity)
++        return True
++
++    @staticmethod
++    def _source_identity(source):
++        try:
++            expected = source_event_identity(source.source_generation_id, source.record_start_byte_offset)
++            if (source.source_event_identity != expected or source.observation_id != observation_uuid(source.source_event_family, expected)):
++                raise ValueError
++        except Exception:
++            raise ProjectionConflict("source_observation_identity_conflict") from None
++
++    def _eligible(self, source):
++        cutoff = self.repository.clock() - timedelta(days=14)
++        return (source.sensitive_endpoint_presence_state == "observed_retained"
++                and ni_timestamp(source.event_at, canonical=True) >= cutoff
++                and ni_timestamp(source.ingested_at, canonical=True) >= cutoff)
++
++    def _resolve(self, source, role, horizon):
++        result = NetworkMetadataAttributionResultV1
++        address = getattr(source, role + "_ip")
++        if address is None:
++            return result("endpoint_absent")
++        if ipaddress.ip_address(address).version != 4:
++            return result("unsupported_address_family")
++        if horizon.state != "available":
++            return result("unavailable", "authority_horizon_unavailable")
++        instant = ni_timestamp(source.event_at, canonical=True)
++        if instant < max(parse_utc(horizon.first_usable_at), parse_utc(horizon.retained_from)):
++            return result("outside_historical_horizon")
++        try:
++            value = self.attribution.resolve_ipv4(source.site_id, address, source.event_at)
++        except Exception:
++            return result("unavailable", "attribution_store_unavailable")
++        if value.state not in ATTRIBUTION_STATES or value.state == "invalid":
++            raise ProjectionConflict("attribution_query_contract_invalid")
++        if value.state == "resolved":
++            try:
++                if (value.site_id != source.site_id or value.ipv4 != address or value.event_at != source.event_at
++                        or value.attribution_source != "trusted_dhcp_v4" or canonical_mac(value.client_mac) != value.client_mac):
++                    raise ValueError
++                canonical_uuid(value.binding_id, 4)
++                if not parse_utc(value.valid_from) <= instant < parse_utc(value.valid_until):
++                    raise ValueError
++            except Exception:
++                raise ProjectionConflict("attribution_query_contract_invalid") from None
++            if not any(ipaddress.IPv4Address(address) in ipaddress.IPv4Network(cidr) for cidr in source.capture_scope_ipv4_cidrs):
++                raise ProjectionConflict("resolved_endpoint_outside_capture_scope")
++        return value
++
++    def _edge(self, source, role, own, peer):
++        other = "dst" if role == "src" else "src"
++        address = getattr(source, other + "_ip")
++        scope = "unknown"
++        if address is not None and ipaddress.ip_address(address).version == 4:
++            scope = "local" if any(ipaddress.IPv4Address(address) in ipaddress.IPv4Network(cidr)
++                                     for cidr in source.capture_scope_ipv4_cidrs) else "external"
++        edge = dict(edge_id=edge_id(source.observation_id, role), schema_version=1, site_id=source.site_id,
++            client_mac=own.client_mac, event_at=source.event_at, source_ingested_at=source.ingested_at,
++            projected_at=timestamp(self.repository.clock()), device_endpoint_role=role,
++            device_ip=getattr(source, role + "_ip"), device_port=getattr(source, role + "_port"), peer_ip=address,
++            peer_port=None if address is None else getattr(source, other + "_port"), transport_protocol=source.transport_protocol,
++            peer_scope=scope, direction="local" if scope == "local" else ("outbound" if role == "src" else "inbound") if scope == "external" else "unknown",
++            source_observation_ref=source.observation_id, source_event_identity=source.source_event_identity,
++            source_event_family=source.source_event_family, source_generation_id=source.source_generation_id,
++            record_start_byte_offset=source.record_start_byte_offset, capture_source_id=source.capture_source_id,
++            network_scope_id=source.network_scope_id, network_scope_state=source.network_scope_state,
++            capture_scope_binding_digest=source.capture_scope_binding_digest, attribution_state="resolved",
++            attribution_source="trusted_dhcp_v4", attribution_binding_id=own.binding_id,
++            attribution_valid_from=own.valid_from, attribution_valid_until=own.valid_until,
++            peer_attribution_state=peer.state, peer_attribution_binding_id=peer.binding_id if peer.state == "resolved" else None,
++            projection_contract_version=1, projection_algorithm_version=ALGORITHM, projection_run_id=self.run_id)
++        edge["edge_semantic_digest"] = semantic_digest(edge)
++        return edge
++
++    def prepare(self, source, *, prior_pending=None):
++        self._source_identity(source)
++        if not self._eligible(source):
++            result = NetworkMetadataProjectionResultV1(source.observation_id,
++                prior_pending["src_snapshot_state"] if prior_pending is not None else "endpoint_absent",
++                prior_pending["dst_snapshot_state"] if prior_pending is not None else "endpoint_absent",
++                len(self.repository.existing_edges(source.observation_id)),
++                "expired_unresolved" if prior_pending is not None else "terminal_no_edge")
++            return PreparedDisposition(source, [], None, result)
++        if prior_pending is not None and any(prior_pending[key] != getattr(source, attribute) for key, attribute in (
++                ("site_id", "site_id"), ("source_generation_id", "source_generation_id"),
++                ("record_start_byte_offset", "record_start_byte_offset"), ("event_at", "event_at"), ("source_ingested_at", "ingested_at"))):
++            raise ProjectionConflict("source_observation_identity_conflict")
++        try:
++            horizon = self.attribution.get_authority_horizon(source.site_id)
++        except Exception:
++            horizon = SimpleNamespace(state="unavailable")
++        states = {}
++        for role in ("src", "dst"):
++            if prior_pending is not None and not prior_pending["pending_" + role]:
++                states[role] = NetworkMetadataAttributionResultV1(prior_pending[role + "_snapshot_state"],
++                    binding_id=prior_pending[role + "_snapshot_binding_id"])
++            else:
++                states[role] = self._resolve(source, role, horizon)
++        existing = self.repository.existing_edges(source.observation_id) if prior_pending is not None else {}
++        edges = []
++        for role in ("src", "dst"):
++            # R1: old edges are neither rebuilt nor re-digested on retry. Frozen
++            # counterpart state/binding is read from pending snapshots only.
++            if role not in existing and states[role].state == "resolved" and (prior_pending is None or prior_pending["pending_" + role]):
++                edges.append(self._edge(source, role, states[role], states["dst" if role == "src" else "src"]))
++        pending = None
++        if any(value.state == "unavailable" for value in states.values()):
++            now = self.repository.clock()
++            pending = dict(observation_id=source.observation_id, site_id=source.site_id,
++                source_generation_id=source.source_generation_id, record_start_byte_offset=source.record_start_byte_offset,
++                event_at=source.event_at, source_ingested_at=source.ingested_at,
++                first_pending_at=timestamp(now), last_attempt_at=timestamp(now),
++                next_retry_at=timestamp(now + timedelta(seconds=self.config.attribution_retry_interval_seconds)))
++            for role, value in states.items():
++                pending["pending_" + role] = int(value.state == "unavailable")
++                pending[role + "_snapshot_state"] = value.state
++                pending[role + "_snapshot_binding_id"] = value.binding_id if value.state == "resolved" else None
++        count = len(existing) + len(edges)
++        status = ("partial_pending" if count else "pending") if pending is not None else ("complete" if count else "terminal_no_edge")
++        result = NetworkMetadataProjectionResultV1(source.observation_id, states["src"].state, states["dst"].state, count, status)
++        return PreparedDisposition(source, edges, pending, result)
++
++    def _evaluations(self, dispositions):
++        keys = {}
++        for _, edges, _ in dispositions:
++            for edge in edges:
++                if self.stop_event.is_set():
++                    return {}
++                key = edge["site_id"], edge["client_mac"]
++                if key not in keys and self.repository.binding(*key) is None:
++                    keys[key] = None
++        by_mac = self.registry.evaluate_many((key[1] for key in keys), stop_event=self.stop_event)
++        if self.stop_event.is_set():
++            return {}
++        return {key: by_mac[key[1]] for key in keys}
++
++    def _checkpoint_verified(self, generation):
++        checkpoint = self.repository.checkpoint(generation.source_generation_id)
++        if checkpoint is None:
++            return None
++        offset = checkpoint["last_record_start_byte_offset"]
++        if not generation.generation_start_offset <= offset < generation.committed_byte_offset:
++            raise ProjectionConflict("checkpoint_source_conflict")
++        record = self.source.get_projection_source_record(checkpoint["last_observation_id"])
++        if record is None:
++            # Core retention may have removed this observation by event age even
++            # when delivery was recent. Verify the durable canonical lineage
++            # against the exact generation/offset, never a nearest source row.
++            identity = source_event_identity(generation.source_generation_id, offset)
++            if checkpoint["last_observation_id"] not in {observation_uuid(family, identity) for family in ("dns", "tls", "quic")}:
++                raise ProjectionConflict("checkpoint_source_conflict")
++            ni_timestamp(checkpoint["last_source_ingested_at"], canonical=True)
++        elif (record.source_generation_id != generation.source_generation_id or record.record_start_byte_offset != offset
++              or record.ingested_at != checkpoint["last_source_ingested_at"]):
++            raise ProjectionConflict("checkpoint_source_conflict")
++        return offset
++
++    def poll(self):
++        if self.stop_event.is_set() or self.repository.live_state == "blocked_conflict":
++            return
++        observation = None
++        try:
++            generations = self.source.list_source_generations()
++            for generation in generations:
++                after = self._checkpoint_verified(generation)
++                batch = self.source.read_projection_batch(generation.source_generation_id, after, self.config.batch_max_observations)
++                if batch:
++                    offsets = [source.record_start_byte_offset for source in batch]
++                    if offsets != sorted(set(offsets)) or (after is not None and offsets[0] <= after):
++                        raise ProjectionConflict("checkpoint_source_conflict")
++                    prepared = []
++                    for source in batch:
++                        if self.stop_event.is_set():
++                            return ()
++                        observation = source.observation_id
++                        prepared.append(self.prepare(source))
++                    evaluations = self._evaluations(prepared)
++                    if self.stop_event.is_set():
++                        return ()
++                    self.repository.commit_dispositions(prepared, evaluations, self.run_id, checkpoint={"after": after})
++                    self.emit("batch_committed", count=len(prepared))
++                    if self.repository.live_state.startswith("capacity_"):
++                        self.emit("projection_unavailable", reason_code=self.repository.live_reason)
++                    return tuple(item.result for item in prepared)  # One bounded batch, not unbounded catch-up.
++            with self.repository.transaction():
++                self.repository.success_state(source_verified=True, last_source_poll_at=timestamp(self.repository.clock()))
++        except ProjectionConflict as error:
++            self.repository.set_failure("blocked_conflict", error.reason, observation=observation)
++            self.emit("projection_conflict", reason_code=error.reason)
++            return (NetworkMetadataProjectionResultV1(observation, "invalid", "invalid", 0, "conflict", error.reason),) if observation else ()
++        except ProjectionError:
++            raise
++        except Exception:
++            self.repository.set_failure("source_unavailable", "source_unavailable")
++            self.emit("source_unavailable")
++
++    def retry(self):
++        selected = self.repository.pending()
++        results = []
++        for start in range(0, len(selected), 256):
++            prepared = []
++            for row in selected[start:start + 256]:
++                if self.stop_event.is_set():
++                    return tuple(results)
++                source = self.source.get_projection_source_record(row["observation_id"])
++                if source is None:
++                    result = NetworkMetadataProjectionResultV1(row["observation_id"], row["src_snapshot_state"], row["dst_snapshot_state"],
++                        len(self.repository.existing_edges(row["observation_id"])), "expired_unresolved")
++                    prepared.append(PreparedDisposition(SimpleNamespace(observation_id=row["observation_id"]), [], None, result))
++                    self.emit("expired_unresolved", observation_id=row["observation_id"])
++                else:
++                    prepared.append(self.prepare(source, prior_pending=row))
++            evaluations = self._evaluations(prepared)
++            if self.stop_event.is_set():
++                return tuple(results)
++            self.repository.commit_dispositions(prepared, evaluations, self.run_id)
++            results.extend(item.result for item in prepared)
++        return tuple(results)
++
++    def reconcile(self):
++        if self.stop_event.is_set():
++            return
++        selected = self.repository.reconcile_selection()
++        if self.stop_event.is_set():
++            return
++        by_mac = self.registry.evaluate_many((row["client_mac"] for row in selected), stop_event=self.stop_event)
++        if self.stop_event.is_set():
++            return
++        evaluations = {(row["site_id"], row["client_mac"]): by_mac[row["client_mac"]] for row in selected}
++        self.repository.reconcile(selected, evaluations, self.run_id)
++        self.emit("registry_reconciled", count=len(selected))
++
++    def tick(self):
++        if self.stop_event.is_set() or not self.config.enabled or self.repository.live_state == "blocked_conflict":
++            return
++        try:
++            if self.repository.live_state.startswith("capacity_") and not self.repository.maintain_capacity():
++                self.emit("projection_unavailable", reason_code=self.repository.live_reason)
++                return
++            self.poll()
++            if self.repository.live_state == "blocked_conflict":
++                return
++            now = self.monotonic()
++            for field, interval, action in (("last_retry", self.config.attribution_retry_interval_seconds, self.retry),
++                    ("last_reconcile", self.config.registry_reconcile_interval_seconds, self.reconcile),
++                    ("last_retention", self.config.retention_interval_seconds, self.retain)):
++                previous = getattr(self, field)
++                if self.stop_event.is_set() or self.repository.live_state.startswith("capacity_"):
++                    return
++                if previous is None or now - previous >= interval:
++                    action()
++                    setattr(self, field, now)
++        except ProjectionConflict as error:
++            self.repository.set_failure("blocked_conflict", error.reason)
++            self.emit("projection_conflict", reason_code=error.reason)
++        except ProjectionError as error:
++            self.emit("projection_unavailable", reason_code=error.reason)
++        except Exception:
++            self.repository.set_failure("source_unavailable", "source_unavailable")
++            self.emit("source_unavailable")
++
++    def retain(self):
++        if self.stop_event.is_set():
++            return
++        from .retention import ProjectionRetention
++        totals = ProjectionRetention(self.repository, self.source).run()
++        self.emit("retention_completed", count=sum(totals.values()))
++        return totals
++
++    def run(self):
++        if not self.startup():
++            return
++        try:
++            while not self.stop_event.is_set():
++                self.tick()
++                self.stop_event.wait(self.config.poll_interval_seconds)
++        finally:
++            self.repository.close()
+diff --git a/app/network_metadata_projection/telemetry.py b/app/network_metadata_projection/telemetry.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb033a91f2f283624f7dd54197e5837b4b4e9235
+--- /dev/null
++++ b/app/network_metadata_projection/telemetry.py
+@@ -0,0 +1,32 @@
++"""Closed, privacy-safe structured events; never serialize exception objects."""
++import json
++import logging
++from .models import CONFLICTS
++
++EVENTS = frozenset({"projection_conflict", "projection_unavailable", "source_unavailable", "expired_unresolved",
++                   "projection_started", "projection_stopped", "batch_committed", "registry_reconciled", "retention_completed"})
++FIELDS = frozenset({"observation_id", "edge_id", "source_generation_id", "site_id", "reason_code", "count"})
++
++
++class ProjectionTelemetry:
++    def __init__(self, logger=None):
++        self.logger = logger or logging.getLogger("network_metadata_projection")
++
++    def emit(self, event, **values):
++        if event not in EVENTS or not set(values) <= FIELDS:
++            raise ValueError("invalid_projection_telemetry")
++        # Closed token grammar: never interpolate an upstream error/value.
++        from app.network_metadata.validation import canonical_uuid, digest, integer
++        from app.device_fingerprint.validation import validate_site_id, validate_machine_id
++        for key, value in values.items():
++            if key in {"observation_id", "source_generation_id"}:
++                canonical_uuid(value)
++            elif key == "edge_id":
++                digest(value)
++            elif key == "site_id":
++                validate_site_id(value)
++            elif key == "count":
++                integer(value)
++            else:
++                validate_machine_id(value)
++        self.logger.info(json.dumps(dict(event=event, **values), sort_keys=True, separators=(",", ":")))
+diff --git a/app/network_metadata_projection/validation.py b/app/network_metadata_projection/validation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a390282d138b9a80289ee67a3c47039ae1b4fb91
+--- /dev/null
++++ b/app/network_metadata_projection/validation.py
+@@ -0,0 +1,41 @@
++"""Projection-local exact keys and immutable semantic digest."""
++import hashlib
++from app.network_metadata.canonical import ni01_canonical_json
++from app.network_metadata.validation import ni_timestamp, ni_format_utc, canonical_uuid, digest
++from app.network_attribution.validation import canonical_mac
++from app.device_fingerprint.validation import validate_site_id
++from .models import ProjectionValidationError
++
++
++def edge_id(observation_id, role):
++    canonical_uuid(observation_id, 5)
++    if role not in {"src", "dst"}:
++        raise ProjectionValidationError()
++    return hashlib.sha256(("device-network-metadata-edge-v1\0" + observation_id + "\0" + role).encode("utf-8")).hexdigest()
++
++
++def semantic_digest(edge):
++    excluded = {"device_id", "identity_binding_state", "identity_binding_evaluated_at", "device_id_bound_at",
++                "projected_at", "projection_run_id", "edge_semantic_digest"}
++    return hashlib.sha256(ni01_canonical_json({key: value for key, value in edge.items() if key not in excluded})).hexdigest()
++
++
++def read_window(site_id, from_utc, to_utc, limit, cursor):
++    try:
++        validate_site_id(site_id)
++        first, last = ni_timestamp(from_utc, canonical=True), ni_timestamp(to_utc, canonical=True)
++        if not 0 < (last - first).total_seconds() <= 14 * 86400 or type(limit) is not int or not 1 <= limit <= 500:
++            raise ValueError
++        if cursor is not None:
++            if type(cursor) is not tuple or len(cursor) != 2:
++                raise ValueError
++            instant = ni_timestamp(cursor[0], canonical=True)
++            digest(cursor[1])
++            if not first <= instant < last:
++                raise ValueError
++    except Exception:
++        raise ProjectionValidationError() from None
++
++
++def timestamp(value):
++    return ni_format_utc(value)
+diff --git a/deploy/network-metadata-projection/README.md b/deploy/network-metadata-projection/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc392be70cea210f3aec7940ef92207242230860
+--- /dev/null
++++ b/deploy/network-metadata-projection/README.md
+@@ -0,0 +1,27 @@
++# NI-02B deployment artifacts — NOT production activation
++
++The independent worker is OFF by default. Installing/enabling/starting it,
++creating a production DB, or changing upstream services requires separate
++Owner/Tech Lead authorization and capacity admission. No main Portal composition
++is changed. Stop the auxiliary service to roll back; upstream stores are never
++modified and the derived projection store must not be destructively recreated.
++
++The service runs as admin with fingerprint-sensor supplementary group solely
++for read access to the NI-02A store. Existing directory/file ACLs must allow
++read access; do not grant upstream write ownership to this service.
++
++SQLite uses WAL, FULL synchronous writes, a single writer lock and a combined
++main/WAL/SHM/journal hard cap (default 16 GiB, admitted range 64 MiB–64 GiB).
++Every write reserves the fixed 16 MiB transaction headroom. Held readers defer
++capacity recovery; they do not justify skipping checkpoints or deleting live
++evidence. Reader retention/timeout is a consumer operational responsibility.
++
++NI-01 source endpoints and Device edges have a maximum 14-day sensitive
++lifetime. DNS/SNI and raw EVE are not duplicated. Registry lookup is exact MAC
++only; late binding never mutates edge identity. NI-02A read-query interoperability
++preserves original event timestamps, without changing the authority writer.
++
++Copy the example environment only through an approved deployment procedure;
++there is no automated install/start action in this package. Required upstream
++configuration names are reused, not aliased. The service has ordering-only
++After dependencies, never Requires/BindsTo/PartOf relationships.
+diff --git a/deploy/network-metadata-projection/network-metadata-projection.env.example b/deploy/network-metadata-projection/network-metadata-projection.env.example
+new file mode 100644
+index 0000000000000000000000000000000000000000..09d421f219fe8dde674819f1b797dcb6e3a284f9
+--- /dev/null
++++ b/deploy/network-metadata-projection/network-metadata-projection.env.example
+@@ -0,0 +1,20 @@
++# Independent service. This example DOES NOT authorize production activation.
++NETWORK_METADATA_PROJECTION_ENABLED=false
++NETWORK_METADATA_PROJECTION_DB_PATH=/opt/CaptivePortal/data/network_metadata_projection.sqlite3
++NETWORK_METADATA_PROJECTION_MAX_DB_BYTES=17179869184
++NETWORK_METADATA_PROJECTION_BATCH_MAX_OBSERVATIONS=256
++NETWORK_METADATA_PROJECTION_POLL_INTERVAL_SECONDS=1
++NETWORK_METADATA_PROJECTION_ATTRIBUTION_RETRY_INTERVAL_SECONDS=30
++NETWORK_METADATA_PROJECTION_ATTRIBUTION_RETRY_BATCH_SIZE=500
++NETWORK_METADATA_PROJECTION_REGISTRY_RECONCILE_INTERVAL_SECONDS=60
++NETWORK_METADATA_PROJECTION_REGISTRY_RECONCILE_BATCH_SIZE=500
++NETWORK_METADATA_PROJECTION_RETENTION_INTERVAL_SECONDS=3600
++NETWORK_METADATA_PROJECTION_RETENTION_BATCH_SIZE=5000
++NETWORK_METADATA_PROJECTION_RETENTION_MAX_BATCHES_PER_PASS=20
++NETWORK_METADATA_PROJECTION_SHUTDOWN_TIMEOUT_SECONDS=20
++# Reuse existing upstream names; all upstream access is mode=ro/query_only.
++NETWORK_METADATA_DB_PATH=/opt/CaptivePortal/data/network_metadata.sqlite3
++NETWORK_ATTRIBUTION_ENABLED=false
++NETWORK_ATTRIBUTION_DB_PATH=/var/lib/captive-portal/fingerprint-sensor/network_attribution.sqlite3
++NETWORK_ATTRIBUTION_MAX_DB_BYTES=536870912
++VISITOR_REGISTRY_DB_PATH=/opt/CaptivePortal/data/visitor_registry.sqlite3
+diff --git a/deploy/network-metadata-projection/network-metadata-projection.service b/deploy/network-metadata-projection/network-metadata-projection.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..c63467bedbdcbdcf3ef9b3f8ba26cc41f91fe67c
+--- /dev/null
++++ b/deploy/network-metadata-projection/network-metadata-projection.service
+@@ -0,0 +1,26 @@
++[Unit]
++Description=Device-relative Network Metadata Projection (NI-02B)
++After=network-metadata.service fingerprint-sensor.service captive-portal.service
++
++[Service]
++Type=simple
++User=admin
++Group=admin
++SupplementaryGroups=fingerprint-sensor
++WorkingDirectory=/opt/CaptivePortal
++Environment=PYTHONDONTWRITEBYTECODE=1
++Environment=GIT_OPTIONAL_LOCKS=0
++EnvironmentFile=-/etc/captive-portal/network-metadata-projection.env
++ExecStart=/usr/bin/python3 -m app.network_metadata_projection.cli run
++Restart=on-failure
++RestartSec=30
++TimeoutStopSec=20
++NoNewPrivileges=yes
++PrivateTmp=yes
++ProtectSystem=strict
++ProtectHome=read-only
++ReadWritePaths=/opt/CaptivePortal/data
++UMask=0027
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/tests/network_attribution/test_read_timestamp_interoperability.py b/tests/network_attribution/test_read_timestamp_interoperability.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac1636fae80e3f910d4e4763323f43b61959ae89
+--- /dev/null
++++ b/tests/network_attribution/test_read_timestamp_interoperability.py
+@@ -0,0 +1,157 @@
++"""T1 exact NI-01 event-time queries against the unchanged ms writer."""
++from dataclasses import asdict
++from datetime import timedelta
++
++import pytest
++
++from app.network_attribution.models import NetworkAttributionValidationError
++from app.network_attribution.validation import make_fact, query_values, read_query_values, validate_fact
++from .test_authority import SITE, SOURCE, IP, MAC, T0, fact, store, ts
++
++
++def ack(repository, milliseconds, *, lease=1):
++    values = asdict(fact(0, lease=lease))
++    values.pop("fact_id")
++    values.pop("schema_version")
++    values["event_at"] = (T0 + timedelta(milliseconds=milliseconds)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
++    values["ingested_at"] = values["event_at"]
++    return repository.record(make_fact(**values))
++
++
++def micro(suffix):
++    return "2026-10-09T12:00:" + suffix + "Z"
++
++
++@pytest.mark.parametrize("suffix,state", [
++    ("00.122999", "unattributed"), ("00.123000", "resolved"),
++    ("00.123001", "resolved"), ("01.122999", "resolved"),
++    ("01.123000", "unattributed"), ("01.123001", "unattributed"),
++])
++def test_exact_half_open_binding_boundaries(store, suffix, state):
++    repository, reader, _ = store
++    binding = ack(repository, 123)
++    repository.confirm_capture(SITE, SOURCE, ts(2))
++    value = micro(suffix)
++    result = reader.resolve_ipv4(SITE, IP, value)
++    assert result.state == state
++    assert result.event_at == value
++    if state == "resolved":
++        assert result.event_at == value
++        assert result.binding_id == binding.binding_id
++        assert result.client_mac == MAC
++
++
++@pytest.mark.parametrize("suffix,state", [
++    ("00.122999", "resolved"), ("00.123000", "resolved"),
++    ("00.123001", "unavailable"),
++])
++def test_exact_open_watermark(store, suffix, state):
++    repository, reader, _ = store
++    repository.record(fact(0))
++    repository.confirm_capture(SITE, SOURCE, micro("00.123"))
++    result = reader.resolve_ipv4(SITE, IP, micro(suffix))
++    assert result.state == state
++    if state == "unavailable":
++        assert result.reason == "source_coverage_unavailable"
++
++
++@pytest.mark.parametrize("suffix,state", [
++    ("10.499999", "resolved"), ("10.500000", "unavailable"), ("10.500001", "unavailable"),
++    ("11.499999", "unavailable"), ("11.500000", "resolved"), ("11.500001", "resolved"),
++])
++def test_outage_and_recovery_half_open_boundaries(store, suffix, state):
++    repository, reader, _ = store
++    repository.record(fact(0))
++    repository.coverage(SITE, SOURCE, "unavailable", micro("10.500"), "capture_gap")
++    repository.coverage(SITE, SOURCE, "usable", micro("11.500"))
++    ack(repository, 11500, lease=100)
++    repository.confirm_capture(SITE, SOURCE, ts(12))
++    assert reader.resolve_ipv4(SITE, IP, micro(suffix)).state == state
++
++
++def test_recovery_without_new_ack_does_not_erase_historical_gap(store):
++    repository, reader, _ = store
++    repository.record(fact(0))
++    repository.coverage(SITE, SOURCE, "unavailable", ts(1), "capture_gap")
++    repository.coverage(SITE, SOURCE, "usable", ts(2))
++    repository.confirm_capture(SITE, SOURCE, ts(3))
++    assert reader.resolve_ipv4(SITE, IP, micro("02.000001")).reason == "source_coverage_gap"
++
++
++@pytest.mark.parametrize("suffix,state", [
++    ("00.122999", "outside_historical_horizon"),
++    ("00.123000", "resolved"), ("00.123001", "resolved"),
++])
++def test_exact_horizon(store, suffix, state):
++    repository, reader, _ = store
++    repository.record(fact(0))
++    repository.confirm_capture(SITE, SOURCE, ts(1))
++    repository.connection.execute("UPDATE authority_horizon SET first_usable_at=?,retained_from=?",
++                                  (micro("00.123"), micro("00.123")))
++    assert reader.resolve_ipv4(SITE, IP, micro(suffix)).state == state
++
++
++@pytest.mark.parametrize("suffix", ["00.123", "00.123000", "00.123456"])
++def test_read_accepts_only_two_canonical_precisions(suffix):
++    exact, floor = read_query_values(SITE, IP, micro(suffix))
++    assert floor == micro("00.123")
++    assert exact.microsecond == (123456 if suffix.endswith("123456") else 123000)
++
++
++@pytest.mark.parametrize("value", [
++    micro("00.1"), micro("00.12"), micro("00.1234"), micro("00.12345"), micro("00.1234567"),
++    "2026-10-09T12:00:00Z", "2026-10-09T12:00:00.123+00:00",
++    "2026-02-30T12:00:00.123000Z", "2026-10-09T24:00:00.123000Z",
++])
++def test_invalid_read_query_formats(store, value):
++    assert store[1].resolve_ipv4(SITE, IP, value).state == "invalid"
++    with pytest.raises(NetworkAttributionValidationError):
++        read_query_values(SITE, IP, value)
++
++
++def test_writer_stays_ms_only():
++    query_values(SITE, IP, micro("00.123"))
++    with pytest.raises(NetworkAttributionValidationError):
++        query_values(SITE, IP, micro("00.123000"))
++    values = asdict(fact(0))
++    values.pop("fact_id")
++    values.pop("schema_version")
++    values["event_at"] = micro("00.123456")
++    with pytest.raises(NetworkAttributionValidationError):
++        make_fact(**values)
++    validate_fact(fact(0))
++
++
++def test_millis_micros_equivalence_preserves_caller_representation(store):
++    repository, reader, _ = store
++    binding = ack(repository, 123)
++    repository.confirm_capture(SITE, SOURCE, ts(1))
++    ms, us = [reader.resolve_ipv4(SITE, IP, micro(value)) for value in ("00.123", "00.123000")]
++    assert ms.state == us.state == "resolved"
++    left, right = asdict(ms), asdict(us)
++    assert left.pop("event_at") == micro("00.123")
++    assert right.pop("event_at") == micro("00.123000")
++    assert left == right and ms.binding_id == binding.binding_id
++
++
++def test_horizon_is_read_only_bounded_and_disabled_safe(store, monkeypatch):
++    import sqlite3
++    from app.network_attribution.read_service import NetworkAttributionReadService
++    from app.network_attribution.models import NetworkAttributionConfig
++    repository, reader, _ = store
++    statements, original = [], sqlite3.connect
++    def connect(*args, **kwargs):
++        if args[0] != ":memory:":
++            assert args[0].endswith("?mode=ro")
++        connection = original(*args, **kwargs)
++        connection.set_trace_callback(statements.append)
++        return connection
++    monkeypatch.setattr(sqlite3, "connect", connect)
++    result = reader.get_authority_horizon(SITE)
++    assert result.state == "available" and result.first_usable_at == result.retained_from == ts()
++    assert "PRAGMA query_only=ON" in statements
++    assert not any("quick_check" in value or "foreign_key_check" in value for value in statements)
++    assert reader.get_authority_horizon("f" * 24).state == "unavailable"
++    assert NetworkAttributionReadService(NetworkAttributionConfig()).get_authority_horizon(SITE).reason == "attribution_disabled"
++    repository.connection.execute("PRAGMA user_version=2")
++    assert reader.get_authority_horizon(SITE).state == "unavailable"
+diff --git a/tests/network_metadata_projection/__init__.py b/tests/network_metadata_projection/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..17874f26b51332b26be6761ca78c6fe9bbcb5c72
+--- /dev/null
++++ b/tests/network_metadata_projection/__init__.py
+@@ -0,0 +1 @@
++"""NI-02B disposable, offline contract tests."""
+diff --git a/tests/network_metadata_projection/support.py b/tests/network_metadata_projection/support.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7f17bba6a1b9a11c713eb5ad126c6fcfa7bbf3d
+--- /dev/null
++++ b/tests/network_metadata_projection/support.py
+@@ -0,0 +1,110 @@
++"""Disposable exact source/authority/Registry data; no real network inputs."""
++from datetime import datetime, timedelta, timezone
++from types import SimpleNamespace
++from dataclasses import replace
++import uuid
++
++from app.network_metadata.config import make_capture_scope_binding
++from app.network_metadata.canonical import source_event_identity, observation_uuid
++from app.network_metadata.projection_source import NetworkMetadataProjectionSourceRecordV1
++from app.network_metadata.validation import ni_format_utc
++from app.network_attribution.models import NetworkMetadataAttributionResultV1, NetworkAttributionHorizonV1
++from app.device_fingerprint.validation import format_utc
++from app.network_metadata_projection.models import ProjectionConfig, RegistryEvaluation
++from app.network_metadata_projection.repository import ProjectionRepository
++from app.network_metadata_projection.service import NetworkMetadataProjectionService
++
++SITE = "6a64f17630da7c70d232187a"
++T0 = datetime(2026, 10, 9, 12, tzinfo=timezone.utc)
++GENERATION = "9412aebe-6e13-463b-9a93-d2e5c8475766"
++MAC = "00:11:22:33:44:55"
++OTHER_MAC = "00:11:22:33:44:66"
++IDENTITY = SimpleNamespace(artifact_sha="a" * 40, artifact_tree="b" * 40)
++
++
++class Clock:
++    def __init__(self):
++        self.value = T0 + timedelta(seconds=30)
++    def __call__(self):
++        return self.value
++    def advance(self, **kwargs):
++        self.value += timedelta(**kwargs)
++
++
++def source_record(offset=0, **changes):
++    binding = make_capture_scope_binding(dict(schema_version=1, capture_source_id="synthetic-sensor",
++        site_id=SITE, network_scope_id="synthetic-scope", ipv4_cidrs=["10.73.0.0/16"],
++        valid_from_utc="2026-01-01T00:00:00.000000Z"))
++    identity = source_event_identity(GENERATION, offset)
++    value = NetworkMetadataProjectionSourceRecordV1(observation_uuid("dns", identity), identity, "dns", GENERATION,
++        offset, SITE, binding.capture_source_id, binding.network_scope_id, "within_intended_scope", binding.binding_digest,
++        binding.ipv4_cidrs, "2026-10-09T12:00:00.123456Z", ni_format_utc(T0), "observed_retained",
++        "10.73.0.7", "10.73.0.8", 65535, 65535, "UDP")
++    return replace(value, **changes)
++
++
++class Source:
++    def __init__(self, records=()):
++        self.records = list(records)
++        self.fail = False
++    def list_source_generations(self):
++        if self.fail:
++            raise OSError("source-private-sentinel")
++        ids = sorted({record.source_generation_id for record in self.records})
++        return tuple(self.get_source_progress(item) for item in ids)
++    def get_source_progress(self, generation):
++        records = [value for value in self.records if value.source_generation_id == generation]
++        return SimpleNamespace(source_generation_id=generation, generation_start_offset=0,
++            committed_byte_offset=max((value.record_start_byte_offset for value in records), default=0) + 1)
++    def read_projection_batch(self, generation, after, limit):
++        return tuple(sorted((record for record in self.records if record.source_generation_id == generation
++            and (after is None or record.record_start_byte_offset > after)), key=lambda value: value.record_start_byte_offset)[:limit])
++    def get_projection_source_record(self, observation):
++        return next((item for item in self.records if item.observation_id == observation), None)
++
++
++class Attribution:
++    def __init__(self):
++        self.calls = []
++        self.states = {}
++        self.macs = {"10.73.0.7": MAC, "10.73.0.8": OTHER_MAC}
++        self.ids = {}
++    def get_authority_horizon(self, site):
++        return NetworkAttributionHorizonV1("available", site, format_utc(T0), format_utc(T0))
++    def resolve_ipv4(self, site, address, event):
++        self.calls.append((site, address, event))
++        state = self.states.get(address, "resolved")
++        if state != "resolved":
++            return NetworkMetadataAttributionResultV1(state)
++        return NetworkMetadataAttributionResultV1("resolved", site_id=site, client_mac=self.macs.get(address, MAC),
++            ipv4=address, event_at=event, binding_id=self.ids.setdefault(address, str(uuid.uuid4())),
++            valid_from=format_utc(T0), valid_until=format_utc(T0 + timedelta(hours=1)), attribution_source="trusted_dhcp_v4")
++
++
++class Registry:
++    def __init__(self):
++        self.calls, self.values = [], {}
++        self.batches = []
++    def evaluate_many(self, macs, *, stop_event=None):
++        requested = tuple(dict.fromkeys(macs))
++        self.batches.append(requested)
++        evaluations = {}
++        for mac in requested:
++            if stop_event is not None and stop_event.is_set():
++                break
++            evaluations[mac] = self.evaluate(mac)
++        return evaluations
++    def evaluate(self, mac):
++        self.calls.append(mac)
++        return self.values.get(mac, RegistryEvaluation("not_yet_registry_resolved"))
++
++
++def stack(tmp_path, records=None):
++    clock = Clock()
++    config = ProjectionConfig(True, str(tmp_path / "projection.sqlite3"), max_db_bytes=67108864)
++    repository = ProjectionRepository(config, clock=clock).initialize()
++    source, attribution, registry = Source(records or [source_record()]), Attribution(), Registry()
++    service = NetworkMetadataProjectionService(config, repository, source, attribution, registry, IDENTITY)
++    service.run_id = repository.create_run(IDENTITY)
++    return SimpleNamespace(clock=clock, config=config, repo=repository, source=source, attribution=attribution,
++                           registry=registry, service=service)
+diff --git a/tests/network_metadata_projection/test_capacity_config.py b/tests/network_metadata_projection/test_capacity_config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..de916b8dfb39809011e1d0198a9c0bbe49dd31c1
+--- /dev/null
++++ b/tests/network_metadata_projection/test_capacity_config.py
+@@ -0,0 +1,186 @@
++import os
++import sqlite3
++from dataclasses import replace
++from pathlib import Path
++from datetime import timedelta
++
++import pytest
++
++from app.network_metadata_projection.models import (PROJECTION_TRANSACTION_HEADROOM_BYTES as HEADROOM,
++    ProjectionConfig, ProjectionCapacity, ProjectionUnavailable, ProjectionValidationError, RegistryEvaluation)
++from app.network_metadata_projection.config import projection_config_from_env
++from app.network_metadata_projection.repository import ProjectionRepository
++from app.network_metadata_projection.cli import main
++from .support import stack, source_record, SITE, MAC, IDENTITY
++
++
++def test_default_off_no_db_lock_upstream_or_identity(tmp_path, monkeypatch):
++    from app.network_metadata_projection import cli
++    monkeypatch.setenv("NETWORK_METADATA_PROJECTION_ENABLED", "false")
++    monkeypatch.setenv("NETWORK_METADATA_PROJECTION_DB_PATH", str(tmp_path / "unused.sqlite3"))
++    def forbidden(*args, **kwargs):
++        pytest.fail("disabled runtime accessed dependency")
++    monkeypatch.setattr(cli, "capture_loaded_artifact_identity", forbidden)
++    monkeypatch.setattr(cli, "network_attribution_config_from_env", forbidden)
++    monkeypatch.setattr(cli, "ProjectionRepository", forbidden)
++    assert main(["run"]) == 0
++    assert not list(tmp_path.iterdir())
++    assert projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "false", "NETWORK_METADATA_PROJECTION_MAX_DB_BYTES": "bad"}) == ProjectionConfig()
++
++
++@pytest.mark.parametrize("value", ["0", "67108863", "68719476737", "NaN"])
++def test_closed_capacity_config(value):
++    with pytest.raises(ProjectionValidationError):
++        projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "true", "NETWORK_METADATA_PROJECTION_MAX_DB_BYTES": value})
++
++
++@pytest.mark.parametrize("name", ["batch_max_observations", "poll_interval_seconds",
++    "attribution_retry_interval_seconds", "attribution_retry_batch_size", "registry_reconcile_interval_seconds",
++    "registry_reconcile_batch_size", "retention_interval_seconds", "retention_batch_size",
++    "retention_max_batches_per_pass", "shutdown_timeout_seconds"])
++def test_processing_config_accepts_only_frozen_value(tmp_path, name):
++    default = getattr(ProjectionConfig(), name)
++    env = {"NETWORK_METADATA_PROJECTION_ENABLED": "true",
++        "NETWORK_METADATA_PROJECTION_DB_PATH": str(tmp_path / "projection.sqlite3"),
++        "NETWORK_METADATA_DB_PATH": str(tmp_path / "source.sqlite3"),
++        "VISITOR_REGISTRY_DB_PATH": str(tmp_path / "registry.sqlite3"),
++        "NETWORK_METADATA_PROJECTION_" + name.upper(): str(default)}
++    assert getattr(projection_config_from_env(env), name) == default
++    for changed in (default - 1, default + 1):
++        env["NETWORK_METADATA_PROJECTION_" + name.upper()] = str(changed)
++        with pytest.raises(ProjectionValidationError):
++            projection_config_from_env(env)
++        env["NETWORK_METADATA_PROJECTION_ENABLED"] = "false"
++        assert projection_config_from_env(env) == ProjectionConfig()
++        env["NETWORK_METADATA_PROJECTION_ENABLED"] = "true"
++
++
++@pytest.mark.parametrize("capacity", [67108864, 17179869184, 68719476736])
++def test_admitted_capacity_range_preserved(tmp_path, capacity):
++    env = {"NETWORK_METADATA_PROJECTION_ENABLED": "true",
++        "NETWORK_METADATA_PROJECTION_DB_PATH": str(tmp_path / "projection.sqlite3"),
++        "NETWORK_METADATA_DB_PATH": str(tmp_path / "source.sqlite3"),
++        "VISITOR_REGISTRY_DB_PATH": str(tmp_path / "registry.sqlite3"),
++        "NETWORK_METADATA_PROJECTION_MAX_DB_BYTES": str(capacity)}
++    assert projection_config_from_env(env).max_db_bytes == capacity
++
++
++@pytest.mark.parametrize("damage", ["CREATE TABLE foreign_table(value)", "PRAGMA user_version=2", "DROP TABLE projection_pending_attribution"])
++def test_foreign_schema_preserved_and_writer_lock(tmp_path, damage):
++    value = stack(tmp_path)
++    try:
++        with pytest.raises(ProjectionUnavailable):
++            ProjectionRepository(value.config).initialize()
++    finally:
++        value.repo.close()
++    with sqlite3.connect(value.config.db_path) as connection:
++        connection.execute(damage)
++    before = Path(value.config.db_path).read_bytes()
++    with pytest.raises(ProjectionUnavailable):
++        ProjectionRepository(value.config).initialize()
++    assert Path(value.config.db_path).read_bytes() == before
++
++
++@pytest.mark.skipif(os.name != "posix", reason="Mandatory Linux writer/WAL proof")
++def test_held_reader_pressure_defers_checkpoint_then_recovers(tmp_path):
++    value = stack(tmp_path)
++    reader = sqlite3.connect(value.config.db_path, isolation_level=None)
++    try:
++        reader.execute("BEGIN")
++        reader.execute("SELECT * FROM projection_runtime_state").fetchall()
++        value.service.poll()
++        before = dict(value.repo.checkpoint(value.source.records[0].source_generation_id))
++        # Unexpected journal is included in the real footprint, not an exemption.
++        journal = Path(value.config.db_path + "-journal")
++        journal.write_bytes(b"\0" * (value.config.max_db_bytes - value.repo.footprint() - HEADROOM + 1))
++        value.source.records.append(source_record(1))
++        with pytest.raises(ProjectionCapacity):
++            value.service.poll()
++        assert value.repo.live_state == "capacity_waiting_reader"
++        assert dict(value.repo.checkpoint(value.source.records[0].source_generation_id)) == before
++        assert value.repo.footprint() <= value.config.max_db_bytes
++        reader.close()
++        assert value.repo.maintain_capacity()
++        value.service.poll()
++        assert value.repo.checkpoint(value.source.records[0].source_generation_id)["last_record_start_byte_offset"] == 1
++    finally:
++        reader.close()
++        value.repo.close()
++
++
++def test_hard_cap_live_status_does_not_write_overflow(tmp_path):
++    value = stack(tmp_path)
++    try:
++        before = value.repo.connection.total_changes
++        Path(value.config.db_path + "-journal").write_bytes(b"\0" * value.config.max_db_bytes)
++        value.repo.set_failure("source_unavailable", "source_unavailable")
++        assert value.repo.live_state == "capacity_halted"
++        assert value.repo.connection.total_changes == before
++        assert value.repo.checkpoint(value.source.records[0].source_generation_id) is None
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.skipif(os.name != "posix", reason="Mandatory Linux post-commit capacity proof")
++def test_post_commit_pressure_keeps_durable_disposition_and_auto_recovers(tmp_path):
++    value = stack(tmp_path)
++    reader = sqlite3.connect(value.config.db_path, isolation_level=None)
++    journal = Path(value.config.db_path + "-journal")
++    try:
++        reader.execute("BEGIN")
++        reader.execute("SELECT * FROM projection_runtime_state").fetchall()
++        def sidecar_pressure(point):
++            if point == "after_commit":
++                journal.write_bytes(b"\0" * (value.config.max_db_bytes - value.repo.footprint() - HEADROOM + 1))
++        value.repo.crash_point = sidecar_pressure
++        value.service.poll()
++        assert value.repo.live_state == "capacity_waiting_reader"
++        checkpoint = dict(value.repo.checkpoint(value.source.records[0].source_generation_id))
++        assert checkpoint["last_record_start_byte_offset"] == 0
++        assert len(value.repo.existing_edges(value.source.records[0].observation_id)) == 2
++        value.repo.crash_point = lambda _: None
++        reader.close()
++        assert value.repo.maintain_capacity()
++        assert dict(value.repo.checkpoint(value.source.records[0].source_generation_id)) == checkpoint
++        assert value.repo.footprint() <= value.config.max_db_bytes
++    finally:
++        reader.close()
++        value.repo.close()
++
++
++@pytest.mark.skipif(os.name != "posix", reason="Mandatory Linux fixed 16 MiB growth proof")
++@pytest.mark.parametrize("pending", [False, True])
++def test_maximum_256_observation_transaction_growth_under_fixed_headroom(tmp_path, pending, record_property):
++    records = []
++    for index in range(256):
++        src = f"254.254.{100 + index // 78}.{100 + index % 78 * 2}"
++        dst = f"254.254.{100 + index // 78}.{101 + index % 78 * 2}"
++        records.append(source_record(9223372036854775550 + index, src_ip=src, dst_ip=dst,
++                                    capture_source_id="x" * 64, network_scope_id="y" * 64,
++                                    capture_scope_ipv4_cidrs=("0.0.0.0/0",)))
++    value = stack(tmp_path, records)
++    try:
++        for index, record in enumerate(records):
++            for role in ("src", "dst"):
++                address = getattr(record, role + "_ip")
++                number = index * 2 + (role == "dst")
++                mac = "00:12:34:56:" + f"{number // 256:02X}:{number % 256:02X}"
++                value.attribution.macs[address] = mac
++                value.registry.values[mac] = RegistryEvaluation("authoritative", f"00000000-0000-4000-8000-{number:012x}")
++                if pending and role == "dst":
++                    value.attribution.states[address] = "unavailable"
++        baseline, samples = value.repo.footprint(), []
++        value.repo.crash_point = lambda point: samples.append(value.repo.footprint())
++        value.service.poll()
++        samples.append(value.repo.footprint())
++        delta = max(samples) - baseline
++        assert value.repo.connection.execute("SELECT count(*) FROM device_network_metadata_edges").fetchone()[0] == (256 if pending else 512)
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_site_mac_bindings").fetchone()[0] == (256 if pending else 512)
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_registry_binding_events").fetchone()[0] == (256 if pending else 512)
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_pending_attribution").fetchone()[0] == (256 if pending else 0)
++        assert delta <= HEADROOM
++        record_property("max_footprint_growth_bytes", delta)
++        record_property("fixed_headroom_bytes", HEADROOM)
++        print(f"NI02B_MAX_TRANSACTION pending={pending} delta_bytes={delta} headroom_bytes={HEADROOM}")
++    finally:
++        value.repo.close()
+diff --git a/tests/network_metadata_projection/test_integration.py b/tests/network_metadata_projection/test_integration.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c3ad8aac6a45cfe2da20bbae9a009fb5d5a2562
+--- /dev/null
++++ b/tests/network_metadata_projection/test_integration.py
+@@ -0,0 +1,424 @@
++"""Real upstream read boundaries and frozen projection maintenance matrix."""
++import logging
++import sqlite3
++import uuid
++from dataclasses import asdict, replace
++from datetime import timedelta
++from pathlib import Path
++
++import pytest
++
++from app.network_attribution.validation import make_fact
++from app.network_metadata_projection.models import RegistryEvaluation, ProjectionConflict, ProjectionUnavailable
++from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
++from app.network_metadata_projection.registry_adapter import RegistryAdapter
++from app.network_metadata_projection.telemetry import ProjectionTelemetry
++from app.network_metadata_projection.validation import timestamp
++from tests.network_attribution.test_authority import store as authority_store, fact, SOURCE, ts
++from tests.visitor_registry.test_device_registry import make_stack, append_event, fixture_event, event_for
++from .support import stack, source_record, SITE, MAC, OTHER_MAC, GENERATION, T0
++
++
++def test_real_ms_authority_exact_original_microsecond_event(authority_store, tmp_path):
++    authority, reader, _ = authority_store
++    values = asdict(fact(0, lease=1))
++    values.pop("fact_id")
++    values.pop("schema_version")
++    values.update(ipv4="10.73.0.7", event_at="2026-10-09T12:00:00.123Z",
++                  ingested_at="2026-10-09T12:00:00.123Z")
++    admitted = authority.record(make_fact(**values))
++    authority.confirm_capture(SITE, SOURCE, ts(2))
++    value = stack(tmp_path, [source_record(dst_ip=None, dst_port=None)])
++    try:
++        calls = []
++        original = reader.resolve_ipv4
++        def resolve(site, address, event):
++            calls.append((site, address, event))
++            return original(site, address, event)
++        reader.resolve_ipv4 = resolve
++        value.service.attribution = reader
++        before = authority.connection.total_changes
++        result = value.service.poll()[0]
++        edge = value.repo.existing_edges(value.source.records[0].observation_id)["src"]
++        assert calls == [(SITE, "10.73.0.7", "2026-10-09T12:00:00.123456Z")]
++        assert edge["event_at"] == calls[0][2] and len(edge["event_at"]) == 27
++        assert edge["attribution_binding_id"] == admitted.binding_id
++        assert edge["attribution_valid_from"] == "2026-10-09T12:00:00.123Z"
++        assert result.projection_state == "complete" and result.emitted_edge_count == 1
++        assert authority.connection.total_changes == before
++    finally:
++        value.repo.close()
++
++
++def test_real_reassignment_uses_event_time_not_delivery(authority_store, tmp_path):
++    authority, reader, _ = authority_store
++    for milliseconds, mac in ((0, MAC), (1000, OTHER_MAC)):
++        values = asdict(fact(0))
++        values.pop("fact_id")
++        values.pop("schema_version")
++        values.update(ipv4="10.73.0.7", client_mac=mac, event_at=ts(milliseconds / 1000), ingested_at=ts(3))
++        authority.record(make_fact(**values))
++    authority.confirm_capture(SITE, SOURCE, ts(4))
++    records = [source_record(0, event_at="2026-10-09T12:00:00.999999Z", dst_ip=None, dst_port=None),
++               source_record(1, event_at="2026-10-09T12:00:01.000000Z", dst_ip=None, dst_port=None)]
++    value = stack(tmp_path, records)
++    try:
++        value.service.attribution = reader
++        value.service.poll()
++        before = value.repo.existing_edges(records[0].observation_id)["src"]
++        after = value.repo.existing_edges(records[1].observation_id)["src"]
++        assert before["client_mac"] == MAC and after["client_mac"] == OTHER_MAC
++        assert before["attribution_binding_id"] != after["attribution_binding_id"]
++        assert before["attribution_valid_until"] == after["attribution_valid_from"] == ts(1)
++    finally:
++        value.repo.close()
++
++
++def test_real_registry_adapter_exact_authority_no_initialization_or_write(tmp_path):
++    config, _, repository, reader, _ = make_stack(tmp_path)
++    adapter = RegistryAdapter(config.db_path)
++    assert adapter.evaluate("02:11:22:33:44:55").state == "not_yet_registry_resolved"
++    append_event(config.source_log_path, fixture_event())
++    assert reader.scan().complete
++    expected = repository.get_device_by_mac("02:11:22:33:44:55")
++    before = Path(config.db_path).read_bytes()
++    result = adapter.evaluate(expected["mac"])
++    assert result == RegistryEvaluation("authoritative", expected["device_id"], expected["updated_at"])
++    assert adapter.reader.get_status()["available"]
++    assert Path(config.db_path).read_bytes() == before
++    assert repository.get_device_by_mac(expected["mac"]) == expected
++    with sqlite3.connect(config.db_path) as connection:
++        connection.execute("PRAGMA user_version=2")
++    assert adapter.evaluate(expected["mac"]).state == "registry_unavailable"
++    absent = tmp_path / "absent.sqlite3"
++    assert RegistryAdapter(str(absent)).evaluate(MAC).state == "registry_unavailable"
++    assert not absent.exists()
++
++
++def test_two_sites_same_mac_same_device_and_cross_mac_conflict(tmp_path):
++    records = [source_record(dst_ip=None, dst_port=None),
++               source_record(1, site_id="f" * 24, dst_ip=None, dst_port=None)]
++    value = stack(tmp_path, records)
++    try:
++        device_id = str(uuid.uuid4())
++        value.registry.values[MAC] = RegistryEvaluation("authoritative", device_id)
++        value.service.poll()
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_registry_identities").fetchone()[0] == 1
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_site_mac_bindings").fetchone()[0] == 2
++        read = DeviceNetworkMetadataReadService(value.config.db_path)
++        for record in records:
++            items = read.list_edges_by_device(record.site_id, device_id, timestamp(T0), timestamp(T0 + timedelta(hours=1)))["items"]
++            assert len(items) == 1 and items[0]["site_id"] == record.site_id
++        value.source.records.append(source_record(2, src_ip="10.73.0.8", dst_ip=None, dst_port=None))
++        value.registry.values[OTHER_MAC] = RegistryEvaluation("authoritative", device_id)
++        value.service.poll()
++        assert value.repo.live_reason == "registry_identity_conflict"
++        assert value.repo.checkpoint(GENERATION)["last_record_start_byte_offset"] == 1
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("unresolved,authoritative,expected_u,expected_a", [
++    (450, 150, 400, 100), (50, 500, 50, 450), (500, 50, 450, 50), (0, 501, 0, 500), (501, 0, 500, 0)])
++def test_reconcile_two_lanes_deterministic_spillover(tmp_path, unresolved, authoritative, expected_u, expected_a):
++    value = stack(tmp_path)
++    try:
++        now = timestamp(value.clock())
++        with value.repo.transaction():
++            for number in range(unresolved + authoritative):
++                mac = f"00:10:20:30:{number // 256:02X}:{number % 256:02X}"
++                resolved = number >= unresolved
++                evaluation = RegistryEvaluation("authoritative", str(uuid.uuid4())) if resolved else RegistryEvaluation(
++                    "registry_unavailable" if number % 2 else "not_yet_registry_resolved",
++                    reason="registry_unavailable" if number % 2 else None)
++                value.repo._registry_binding(SITE, mac, evaluation, value.service.run_id, now, edge_at=now)
++        selected = value.repo.reconcile_selection()
++        assert len(selected) == expected_u + expected_a <= 500
++        keys = [(row["site_id"], row["client_mac"]) for row in selected]
++        assert len(set(keys)) == len(keys)
++        assert sum(row["binding_state"] == "authoritative" for row in selected) == expected_a
++        unresolved_rows = selected[:expected_u]
++        assert list(unresolved_rows) == sorted(unresolved_rows, key=lambda row: (
++            row["binding_state"] != "not_yet_registry_resolved", row["last_evaluated_at"], row["site_id"], row["client_mac"]))
++        assert keys == [(row["site_id"], row["client_mac"]) for row in value.repo.reconcile_selection()]
++        evaluations = {key: RegistryEvaluation("authoritative", str(uuid.uuid4())) if row["binding_state"] != "authoritative"
++            else RegistryEvaluation("authoritative", row["device_id"]) for key, row in zip(keys, selected)}
++        value.repo.reconcile(selected, evaluations, value.service.run_id)
++        assert all(value.repo.binding(*key)["binding_state"] == "authoritative" for key in keys)
++        # The already-preselected pass visits each identity exactly once.
++        assert len(keys) == len(evaluations)
++    finally:
++        value.repo.close()
++
++
++def test_read_keyset_exact_contract_readonly_no_upstream(tmp_path):
++    value = stack(tmp_path, [source_record(index, dst_ip=None, dst_port=None) for index in range(4)])
++    try:
++        value.service.poll()
++        def forbidden(*args, **kwargs):
++            pytest.fail("query-time upstream access")
++        value.attribution.resolve_ipv4 = value.registry.evaluate = value.registry.evaluate_many = value.source.get_projection_source_record = forbidden
++        read = DeviceNetworkMetadataReadService(value.config.db_path)
++        before = value.repo.connection.total_changes
++        cursor, ids = None, []
++        while True:
++            page = read.list_edges_by_mac(SITE, MAC, timestamp(T0), timestamp(T0 + timedelta(hours=1)), limit=1, cursor=cursor)
++            ids.extend(item["edge_id"] for item in page["items"])
++            assert set(page["items"][0]["device_endpoint"]) == {"ip", "port", "transport_protocol"}
++            assert "record_start_byte_offset" not in page["items"][0]
++            cursor = page["next_cursor"]
++            if cursor is None:
++                break
++        assert len(ids) == len(set(ids)) == 4 and ids == sorted(ids)
++        with read._snapshot() as connection:
++            assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
++            with pytest.raises(sqlite3.OperationalError):
++                connection.execute("DELETE FROM projection_source_checkpoints")
++        assert value.repo.connection.total_changes == before
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("point,committed", [("before_commit", False), ("after_commit", True)])
++def test_retry_crash_atomicity(tmp_path, point, committed):
++    value = stack(tmp_path)
++    class Crash(BaseException):
++        pass
++    try:
++        value.attribution.states = {"10.73.0.7": "resolved", "10.73.0.8": "unavailable"}
++        value.service.poll()
++        old = value.repo.existing_edges(value.source.records[0].observation_id)["src"]
++        checkpoint = dict(value.repo.checkpoint(GENERATION))
++        value.clock.advance(seconds=30)
++        value.attribution.states.clear()
++        def crash(stage):
++            if stage == point:
++                raise Crash()
++        value.repo.crash_point = crash
++        with pytest.raises(Crash):
++            value.service.retry()
++        current = value.repo.existing_edges(value.source.records[0].observation_id)
++        assert ("dst" in current) == committed and current["src"] == old
++        assert dict(value.repo.checkpoint(GENERATION)) == checkpoint
++        value.repo.crash_point = lambda _: None
++        value.service.retry()
++        assert len(value.repo.existing_edges(value.source.records[0].observation_id)) == 2
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("age_field", ["event_at", "ingested_at"])
++def test_exact_sensitive_cutoff_not_extended_by_projection_binding(tmp_path, age_field):
++    value = stack(tmp_path)
++    try:
++        boundary = value.clock() - timedelta(days=14)
++        record = source_record(**{age_field: timestamp(boundary)})
++        value.source.records = [record]
++        # A read-only horizon earlier than this fixture permits exact-boundary projection.
++        value.attribution.get_authority_horizon = lambda site: type("H", (), {
++            "state": "available", "first_usable_at": "2026-01-01T00:00:00.000Z", "retained_from": "2026-01-01T00:00:00.000Z"})()
++        if age_field == "event_at":
++            original = value.attribution.resolve_ipv4
++            value.attribution.resolve_ipv4 = lambda site, address, event: replace(original(site, address, event),
++                valid_from="2026-01-01T00:00:00.000Z", valid_until="2026-12-01T00:00:00.000Z")
++        value.service.poll()
++        assert len(value.repo.existing_edges(record.observation_id)) == 2
++        value.service.retain()
++        assert len(value.repo.existing_edges(record.observation_id)) == 2
++        value.clock.advance(microseconds=1)
++        value.registry.values[MAC] = RegistryEvaluation("authoritative", str(uuid.uuid4()))
++        value.service.reconcile()
++        value.service.retain()
++        assert value.repo.existing_edges(record.observation_id) == {}
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("source_state,expected", [("not_observed", "terminal_no_edge"), ("expired", "terminal_no_edge")])
++def test_ineligible_source_no_attribution_or_private_reconstruction(tmp_path, source_state, expected):
++    value = stack(tmp_path, [source_record(sensitive_endpoint_presence_state=source_state, src_ip=None, dst_ip=None)])
++    try:
++        assert value.service.poll()[0].projection_state == expected
++        assert value.attribution.calls == []
++        assert not value.repo.existing_edges(value.source.records[0].observation_id)
++    finally:
++        value.repo.close()
++
++
++def test_failure_diagnostics_survive_maintenance_and_no_sensitive_logs(tmp_path, caplog):
++    value = stack(tmp_path)
++    try:
++        value.service.telemetry = ProjectionTelemetry(logging.getLogger("ni02b-test"))
++        value.source.fail = True
++        with caplog.at_level(logging.INFO):
++            value.service.tick()
++        assert value.repo.live_state == "source_unavailable"
++        assert "source-private-sentinel" not in caplog.text
++        for secret in (MAC, "10.73.0.7", "10.73.0.8"):
++            assert secret not in caplog.text
++        with pytest.raises(ValueError):
++            value.service.telemetry.emit("batch_committed", src_ip="10.73.0.7")
++        for table in ("device_network_metadata_edges", "projection_pending_attribution"):
++            fields = {row[1] for row in value.repo.connection.execute("PRAGMA table_info(" + table + ")")}
++            assert not {"dns", "sni", "raw_json", "raw_dhcp_frame"} & fields
++        value.source.fail = False
++        value.attribution.get_authority_horizon = lambda _: type("H", (), {"state": "unavailable"})()
++        value.service.poll()
++        assert value.repo.live_state == "attribution_unavailable" and value.repo.pending() == []  # not due yet
++        value.registry.values[MAC] = RegistryEvaluation("registry_unavailable", reason="registry_unavailable")
++        value.service.reconcile()
++        assert value.repo.live_state == "attribution_unavailable"
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("role", ["src", "dst"])
++def test_private_outside_scope_peer_is_external_not_automatically_local(tmp_path, role):
++    changes = {("dst" if role == "src" else "src") + "_ip": "192.168.50.2"}
++    value = stack(tmp_path, [source_record(**changes)])
++    try:
++        value.attribution.states["192.168.50.2"] = "unattributed"
++        value.service.poll()
++        edge = value.repo.existing_edges(value.source.records[0].observation_id)[role]
++        assert edge["peer_scope"] == "external"
++        assert edge["direction"] == ("outbound" if role == "src" else "inbound")
++    finally:
++        value.repo.close()
++
++
++def test_pending_terminal_result_preserves_previously_created_edge(tmp_path):
++    value = stack(tmp_path)
++    try:
++        value.attribution.states["10.73.0.8"] = "unavailable"
++        assert value.service.poll()[0].projection_state == "partial_pending"
++        old = value.repo.existing_edges(value.source.records[0].observation_id)
++        value.clock.advance(seconds=30)
++        value.attribution.states["10.73.0.8"] = "ambiguous"
++        result = value.service.retry()[0]
++        assert result.projection_state == "complete" and result.emitted_edge_count == 1
++        assert value.repo.existing_edges(value.source.records[0].observation_id) == old
++        assert not value.repo.pending()
++    finally:
++        value.repo.close()
++
++
++def test_registry_outage_does_not_block_first_edges_or_checkpoint(tmp_path):
++    value = stack(tmp_path)
++    try:
++        value.registry.values = {mac: RegistryEvaluation("registry_unavailable", reason="registry_unavailable") for mac in (MAC, OTHER_MAC)}
++        value.service.poll()
++        assert len(value.repo.existing_edges(value.source.records[0].observation_id)) == 2
++        assert value.repo.checkpoint(GENERATION)["last_record_start_byte_offset"] == 0
++        assert value.repo.live_state == "registry_degraded"
++        value.registry.values[MAC] = RegistryEvaluation("authoritative", str(uuid.uuid4()))
++        value.service.reconcile()
++        assert value.repo.binding(SITE, MAC)["binding_state"] == "authoritative"
++    finally:
++        value.repo.close()
++
++
++def test_before_authority_horizon_no_fabrication(tmp_path):
++    value = stack(tmp_path)
++    try:
++        value.attribution.get_authority_horizon = lambda site: type("H", (), {
++            "state": "available", "first_usable_at": ts(1), "retained_from": ts(1)})()
++        result = value.service.poll()[0]
++        assert result.src_attribution_state == result.dst_attribution_state == "outside_historical_horizon"
++        assert result.projection_state == "terminal_no_edge"
++        assert value.attribution.calls == []
++        assert value.repo.checkpoint(GENERATION)["last_record_start_byte_offset"] == 0
++    finally:
++        value.repo.close()
++
++
++def test_stop_during_preparation_has_no_partial_transaction(tmp_path):
++    value = stack(tmp_path, [source_record(index) for index in range(3)])
++    try:
++        original = value.attribution.resolve_ipv4
++        def stop(site, address, event):
++            value.service.stop()
++            return original(site, address, event)
++        value.attribution.resolve_ipv4 = stop
++        assert value.service.poll() == ()
++        assert value.repo.checkpoint(GENERATION) is None
++        assert value.repo.connection.execute("SELECT count(*) FROM device_network_metadata_edges").fetchone()[0] == 0
++        assert value.service.poll() is None
++    finally:
++        value.repo.close()
++
++
++def test_projection_db_failure_does_not_call_upstream_writers(tmp_path):
++    value = stack(tmp_path)
++    try:
++        before = list(value.source.records)
++        value.repo.connection.execute("PRAGMA query_only=ON")
++        with pytest.raises(ProjectionUnavailable):
++            value.service.poll()
++        assert value.repo.checkpoint(GENERATION) is None
++        assert value.source.records == before
++        assert not value.repo.existing_edges(before[0].observation_id)
++    finally:
++        value.repo.close()
++
++
++def test_checkpoint_conflict_no_later_record_advance(tmp_path):
++    value = stack(tmp_path)
++    try:
++        value.service.poll()
++        value.source.records.append(source_record(1))
++        value.repo.connection.execute("UPDATE projection_source_checkpoints SET last_observation_id=?", (str(uuid.uuid4()),))
++        value.source.records = value.source.records[1:]
++        value.service.poll()
++        assert value.repo.live_reason == "checkpoint_source_conflict"
++        assert value.repo.checkpoint(GENERATION)["last_record_start_byte_offset"] == 0
++        assert value.repo.existing_edges(value.source.records[0].observation_id) == {}
++    finally:
++        value.repo.close()
++
++
++def test_reopen_durable_projection_checkpoint_and_no_replay_refresh(tmp_path):
++    from app.network_metadata_projection.repository import ProjectionRepository
++    value = stack(tmp_path)
++    try:
++        value.service.poll()
++        original = value.repo.existing_edges(value.source.records[0].observation_id)
++        checkpoint = dict(value.repo.checkpoint(GENERATION))
++        value.repo.close()
++        value.repo = ProjectionRepository(value.config, clock=value.clock).initialize()
++        value.service.repository = value.repo
++        value.clock.advance(seconds=30)
++        value.service.poll()
++        assert dict(value.repo.checkpoint(GENERATION)) == checkpoint
++        assert value.repo.existing_edges(value.source.records[0].observation_id) == original
++        value.source.records.append(source_record(1))
++        value.service.poll()
++        assert value.repo.checkpoint(GENERATION)["last_record_start_byte_offset"] == 1
++        assert value.repo.existing_edges(value.source.records[0].observation_id) == original
++    finally:
++        value.repo.close()
++
++
++def test_binding_event_30d_run_and_invisible_checkpoint_90d_gc(tmp_path):
++    value = stack(tmp_path)
++    try:
++        value.service.poll()
++        run_id = value.service.run_id
++        value.clock.advance(days=30)
++        value.service.retain()
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_registry_binding_events").fetchone()[0] == 2
++        value.clock.advance(microseconds=1)
++        value.service.retain()
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_registry_binding_events").fetchone()[0] == 0
++        value.clock.advance(days=60)
++        value.service.retain()
++        assert value.repo.checkpoint(GENERATION) is not None  # still-visible source generation
++        assert value.repo.connection.execute("SELECT 1 FROM projection_runs WHERE projection_run_id=?", (run_id,)).fetchone() is not None
++        # The live worker still references its run. A later startup releases it.
++        value.service.run_id = value.repo.create_run(type("I", (), {"artifact_sha": "a" * 40, "artifact_tree": "b" * 40})())
++        value.service.retain()
++        assert value.repo.connection.execute("SELECT 1 FROM projection_runs WHERE projection_run_id=?", (run_id,)).fetchone() is None
++        value.source.records = []
++        value.service.retain()
++        assert value.repo.checkpoint(GENERATION) is None
++    finally:
++        value.repo.close()
+diff --git a/tests/network_metadata_projection/test_projection.py b/tests/network_metadata_projection/test_projection.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..75bab4d47789d030d0b1d06764d11960c3a844b4
+--- /dev/null
++++ b/tests/network_metadata_projection/test_projection.py
+@@ -0,0 +1,219 @@
++import sqlite3
++import uuid
++from dataclasses import replace
++from datetime import timedelta
++
++import pytest
++
++from app.network_metadata_projection.models import ProjectionConflict, RegistryEvaluation, ProjectionUnavailable, ProjectionValidationError
++from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
++from app.network_metadata_projection.schema import TABLES
++from .support import stack, source_record, SITE, MAC, OTHER_MAC, GENERATION, T0
++
++
++@pytest.fixture
++def state(tmp_path):
++    value = stack(tmp_path)
++    try:
++        yield value
++    finally:
++        value.repo.close()
++
++
++def edges(state):
++    return [dict(row) for row in state.repo.connection.execute("SELECT * FROM device_network_metadata_edges ORDER BY device_endpoint_role DESC")]
++
++
++@pytest.mark.parametrize("src,dst,count", [("resolved", "resolved", 2), ("resolved", "unattributed", 1),
++    ("unattributed", "resolved", 1), ("ambiguous", "unattributed", 0), ("unavailable", "resolved", 1)])
++def test_zero_one_two_edges_and_terminal_peer(state, src, dst, count):
++    state.attribution.states = {"10.73.0.7": src, "10.73.0.8": dst}
++    state.service.poll()
++    assert len(edges(state)) == count
++    assert state.repo.checkpoint(GENERATION)["last_record_start_byte_offset"] == 0
++    assert all(call[2] == state.source.records[0].event_at for call in state.attribution.calls)
++
++
++def test_same_mac_two_roles_replay_and_immutability(state):
++    state.attribution.macs["10.73.0.8"] = MAC
++    prepared = state.service.prepare(state.source.records[0])
++    state.repo.commit_dispositions([prepared], state.service._evaluations([prepared]), state.service.run_id)
++    before = edges(state)
++    assert len(before) == 2 and len({row["edge_id"] for row in before}) == 2
++    state.clock.advance(seconds=5)
++    state.repo.commit_dispositions([state.service.prepare(state.source.records[0])], {}, state.service.run_id)
++    assert edges(state) == before
++    assert state.registry.calls == [MAC]
++    for statement in ("UPDATE device_network_metadata_edges SET client_mac='bad'", "DELETE FROM device_network_metadata_edges"):
++        with pytest.raises(sqlite3.Error):
++            state.repo.connection.execute(statement)
++    changed = state.service.prepare(replace(state.source.records[0], src_port=1))
++    with pytest.raises(ProjectionConflict, match="edge_semantic_conflict"):
++        state.repo.commit_dispositions([changed], {}, state.service.run_id)
++    assert edges(state) == before
++
++
++@pytest.mark.parametrize("initial,first_retry,second_retry", [
++    (("resolved", "unavailable"), None, None),
++    (("unattributed", "unavailable"), None, None),
++    (("unavailable", "unavailable"), "src", "dst"),
++])
++def test_r1_partial_retry_preserves_old_counterpart_snapshot(state, initial, first_retry, second_retry):
++    state.attribution.states = dict(zip(("10.73.0.7", "10.73.0.8"), initial))
++    state.service.poll()
++    old = edges(state)
++    pending = state.repo.connection.execute("SELECT * FROM projection_pending_attribution").fetchone()
++    assert pending["src_snapshot_state"] == initial[0] and pending["dst_snapshot_state"] == initial[1]
++    columns = {row[1] for row in state.repo.connection.execute("PRAGMA table_info(projection_pending_attribution)")}
++    assert not {"src_ip", "dst_ip", "client_mac", "device_id", "src_port", "dst_port"} & columns
++    state.clock.advance(seconds=30)
++    state.attribution.calls.clear()
++    if first_retry:
++        state.attribution.states["10.73.0.7"] = "resolved"
++        state.service.retry()
++        first = edges(state)
++        assert first[0]["peer_attribution_state"] == "unavailable"
++        state.clock.advance(seconds=30)
++        state.attribution.calls.clear()
++        old = first
++    state.attribution.states["10.73.0.8"] = "resolved"
++    # Opposite authority changes must NOT be queried again by partial retry.
++    state.attribution.states["10.73.0.7"] = "ambiguous"
++    state.service.retry()
++    assert [call[1] for call in state.attribution.calls] == ["10.73.0.8"]
++    final = edges(state)
++    assert all(row in final for row in old)
++    dst = next(row for row in final if row["device_endpoint_role"] == "dst")
++    expected = "resolved" if first_retry or initial[0] == "resolved" else "unattributed"
++    assert dst["peer_attribution_state"] == expected
++    assert state.repo.connection.execute("SELECT count(*) FROM projection_pending_attribution").fetchone()[0] == 0
++
++
++def test_both_pending_resolve_in_one_retry_have_mutual_refs(state):
++    state.attribution.states = {"10.73.0.7": "unavailable", "10.73.0.8": "unavailable"}
++    state.service.poll()
++    state.attribution.states.clear()
++    state.clock.advance(seconds=30)
++    state.service.retry()
++    left, right = edges(state)
++    assert left["peer_attribution_binding_id"] == right["attribution_binding_id"]
++    assert right["peer_attribution_binding_id"] == left["attribution_binding_id"]
++
++
++def test_pending_terminal_and_expired_dependency(state):
++    state.attribution.states = {"10.73.0.7": "unavailable", "10.73.0.8": "unavailable"}
++    state.service.poll()
++    state.clock.advance(seconds=30)
++    state.attribution.states = {"10.73.0.7": "unattributed", "10.73.0.8": "unavailable"}
++    state.service.retry()
++    state.source.records = [replace(state.source.records[0], sensitive_endpoint_presence_state="expired", src_ip=None, dst_ip=None)]
++    state.clock.advance(seconds=30)
++    state.service.retry()
++    assert edges(state) == []
++    assert not state.repo.pending()
++
++
++def test_late_registry_binding_exact_site_join_monotonic_and_conflict(state):
++    state.service.poll()
++    old = edges(state)
++    reader = DeviceNetworkMetadataReadService(state.config.db_path)
++    start, end = "2026-10-09T12:00:00.000000Z", "2026-10-09T13:00:00.000000Z"
++    assert reader.list_edges_by_mac(SITE, MAC, start, end)["items"][0]["device_id"] is None
++    device_id = str(uuid.uuid4())
++    state.registry.values[MAC] = RegistryEvaluation("authoritative", device_id)
++    state.service.reconcile()
++    item = reader.list_edges_by_device(SITE, device_id, start, end)["items"][0]
++    assert item["device_id"] == device_id and item["identity_binding_state"] == "authoritative"
++    state.registry.values[MAC] = RegistryEvaluation("registry_unavailable", reason="registry_unavailable")
++    state.service.reconcile()
++    assert state.repo.binding(SITE, MAC)["device_id"] == device_id
++    assert edges(state) == old
++    assert reader.list_edges_by_device("f" * 24, device_id, start, end)["items"] == []
++    state.registry.values[MAC] = RegistryEvaluation("authoritative", str(uuid.uuid4()))
++    with pytest.raises(ProjectionConflict, match="registry_identity_conflict"):
++        state.service.reconcile()
++    assert edges(state) == old
++
++
++@pytest.mark.parametrize("offset,state_name", [(0, "unattributed"), (50, "unavailable")])
++def test_first_checkpoint_zero_or_nonzero_atomic_zero_edge_disposition(tmp_path, offset, state_name):
++    value = stack(tmp_path, [source_record(offset)])
++    try:
++        assert value.repo.checkpoint(GENERATION) is None
++        value.attribution.states = {"10.73.0.7": state_name, "10.73.0.8": state_name}
++        value.service.poll()
++        assert value.repo.checkpoint(GENERATION)["last_record_start_byte_offset"] == offset
++        assert edges(value) == []
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("point,committed", [("before_commit", False), ("after_commit", True)])
++def test_crash_checkpoint_atomicity(state, point, committed):
++    class Crash(BaseException):
++        pass
++    def crash(stage):
++        if stage == point:
++            raise Crash()
++    state.repo.crash_point = crash
++    with pytest.raises(Crash):
++        state.service.poll()
++    assert (state.repo.checkpoint(GENERATION) is not None) == committed
++    assert bool(edges(state)) == committed
++    state.repo.crash_point = lambda _: None
++    state.service.poll()
++    assert len(edges(state)) == 2
++
++
++@pytest.mark.parametrize("kind", ["invalid", "outside_scope", "source_identity"])
++def test_conflict_no_checkpoint_and_upstream_unmodified(state, kind):
++    if kind == "invalid":
++        state.attribution.states["10.73.0.7"] = "invalid"
++    elif kind == "outside_scope":
++        state.source.records = [replace(state.source.records[0], src_ip="10.74.0.7")]
++    else:
++        state.source.records = [replace(state.source.records[0], source_event_identity="bad")]
++    state.service.poll()
++    assert state.repo.live_state == "blocked_conflict"
++    assert state.repo.checkpoint(GENERATION) is None
++    assert edges(state) == []
++
++
++def test_ipv6_endpoint_absence_scope_direction_and_reader_validation(state):
++    state.source.records = [replace(state.source.records[0], dst_ip="2001:db8::1")]
++    state.service.poll()
++    assert len(state.attribution.calls) == 1
++    assert edges(state)[0]["peer_attribution_state"] == "unsupported_address_family"
++    assert edges(state)[0]["direction"] == "unknown"
++    reader = DeviceNetworkMetadataReadService(state.config.db_path)
++    observation = state.source.records[0].observation_id
++    assert len(reader.list_edges_by_observation(SITE, observation)) == 1
++    assert reader.list_edges_by_observation("f" * 24, observation) == ()
++    for limits in (0, 501, True):
++        with pytest.raises(ProjectionValidationError):
++            reader.list_edges_by_mac(SITE, MAC, "2026-10-09T00:00:00.000000Z", "2026-10-10T00:00:00.000000Z", limit=limits)
++    with pytest.raises(ProjectionValidationError):
++        reader.list_edges_by_mac(SITE, MAC, "2026-10-01T00:00:00.000000Z", "2026-10-16T00:00:00.000000Z")
++
++
++def test_retention_uses_event_and_ingested_not_projection_or_binding(state):
++    state.service.poll()
++    state.clock.advance(days=14)
++    # source_ingested_at is already strictly older than 14d (clock began +30s).
++    state.service.reconcile()
++    state.service.retain()
++    assert edges(state) == []
++    assert state.repo.connection.execute("SELECT count(*) FROM projection_site_mac_bindings").fetchone()[0] == 0
++    assert state.repo.connection.execute("SELECT count(*) FROM projection_registry_identities").fetchone()[0] == 0
++
++
++def test_exact_schema_missing_join_fail_closed_and_source_failure(state):
++    assert {row[0] for row in state.repo.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")} == set(TABLES)
++    state.source.fail = True
++    state.service.poll()
++    assert state.repo.live_state == "source_unavailable" and state.repo.checkpoint(GENERATION) is None
++    state.source.fail = False
++    state.service.poll()
++    state.repo.connection.execute("DELETE FROM projection_site_mac_bindings")
++    with pytest.raises(ProjectionUnavailable):
++        DeviceNetworkMetadataReadService(state.config.db_path).list_edges_by_observation(SITE, state.source.records[0].observation_id)
+diff --git a/tests/network_metadata_projection/test_projection_source.py b/tests/network_metadata_projection/test_projection_source.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..322239118711fcef208c186b8d95851f9e64f47e
+--- /dev/null
++++ b/tests/network_metadata_projection/test_projection_source.py
+@@ -0,0 +1,120 @@
++from dataclasses import asdict
++
++import pytest
++
++from app.network_metadata.projection_source import NetworkMetadataProjectionSourceReadService
++from app.network_metadata.models import NetworkMetadataStorageUnavailable
++from app.network_metadata.retention import RetentionPolicy
++from tests.network_metadata import store, outcome, record, source_event
++
++
++def seed(state, count=1):
++    data = record()
++    items = [outcome(state.config.capture_scope_binding, data, start=index * (len(data) + 1),
++                     generation=state.generation.source_generation_id) for index in range(count)]
++    state.repo.ingest_batch(items, state.run, state.health, state.anchor)
++    return NetworkMetadataProjectionSourceReadService(state.config.db_path)
++
++
++def test_exact_source_record_batch_offset_zero_and_retention(tmp_path):
++    with store(tmp_path, source=(record() + b"\n") * 3) as state:
++        reader = seed(state, 3)
++        generation = reader.list_source_generations()[0]
++        first = reader.read_projection_batch(generation.source_generation_id, None, 1)[0]
++        assert first.record_start_byte_offset == 0
++        assert first.event_at == "2026-10-07T12:00:00.123456Z"
++        assert first.src_ip == "10.73.0.7" and first.dst_ip == "2001:db8::93"
++        assert first.capture_scope_ipv4_cidrs == ("10.73.0.0/24",)
++        assert reader.get_projection_source_record(first.observation_id) == first
++        assert reader.get_source_progress(generation.source_generation_id).committed_byte_offset > 0
++        rest = reader.read_projection_batch(generation.source_generation_id, 0, 256)
++        assert len(rest) == 2 and all(item.record_start_byte_offset > 0 for item in rest)
++        assert not any(key in asdict(first) for key in ("dns", "sni", "raw_payload"))
++        state.clock.advance(days=15)
++        RetentionPolicy(state.repo).run()
++        expired = reader.get_projection_source_record(first.observation_id)
++        assert expired.sensitive_endpoint_presence_state == "expired"
++        assert expired.src_ip is expired.dst_ip is expired.src_port is expired.dst_port is None
++
++
++@pytest.mark.parametrize("damage", [
++    "PRAGMA user_version=2", "CREATE TABLE extra(value)",
++    "DELETE FROM network_metadata_sensitive_endpoints",
++    "UPDATE network_metadata_capture_scope_bindings SET ipv4_cidrs_json='[\"10.74.0.0/24\"]'",
++    "UPDATE network_metadata_observations SET source_event_identity='bad'",
++    "UPDATE network_metadata_observations SET event_at='2026-10-07T12:00:00.123Z'",
++    "UPDATE network_metadata_observations SET site_id='ffffffffffffffffffffffff'",
++    "UPDATE network_metadata_source_generations SET logical_source_id='other-source'",
++    "DELETE FROM network_metadata_capture_scope_bindings",
++    "DELETE FROM network_metadata_source_health",
++    "DELETE FROM network_metadata_ingest_runs",
++    "UPDATE network_metadata_source_health SET source_generation_id=NULL",
++    "UPDATE network_metadata_source_health SET capture_source_id='different-source'",
++    "UPDATE network_metadata_ingest_runs SET normalizer_version='different-version'",
++])
++def test_untrusted_source_fails_without_mutation(tmp_path, damage):
++    with store(tmp_path) as state:
++        reader = seed(state)
++        # Damage only this disposable source; point reads must detect broken FKs.
++        state.repo.connection.execute("PRAGMA foreign_keys=OFF")
++        state.repo.connection.execute(damage)
++        before = state.repo.connection.total_changes
++        with pytest.raises(NetworkMetadataStorageUnavailable):
++            reader.read_projection_batch(state.generation.source_generation_id, None, 256)
++        assert state.repo.connection.total_changes == before
++
++
++@pytest.mark.parametrize("method", ["list_source_generations", "read_projection_batch",
++    "get_projection_source_record", "get_source_progress"])
++def test_source_connections_read_only_and_no_raw_payload_tables(tmp_path, monkeypatch, method, record_property):
++    import sqlite3
++    with store(tmp_path) as state:
++        reader = seed(state)
++        observation = reader.read_projection_batch(state.generation.source_generation_id, None, 1)[0]
++        calls, statements, original = [], [], sqlite3.connect
++        def connect(*args, **kwargs):
++            calls.append(args[0])
++            connection = original(*args, **kwargs)
++            connection.set_trace_callback(statements.append)
++            return connection
++        monkeypatch.setattr(sqlite3, "connect", connect)
++        arguments = {"list_source_generations": (),
++            "read_projection_batch": (state.generation.source_generation_id, None, 1),
++            "get_projection_source_record": (observation.observation_id,),
++            "get_source_progress": (state.generation.source_generation_id,)}
++        getattr(reader, method)(*arguments[method])
++        assert all(value == ":memory:" or value.endswith("?mode=ro") for value in calls)
++        assert "PRAGMA query_only=ON" in statements
++        assert "PRAGMA foreign_keys=ON" in statements and "PRAGMA busy_timeout=500" in statements
++        assert "BEGIN" in statements
++        for pragma in ("foreign_key_check", "quick_check", "integrity_check"):
++            count = sum(value.lower().startswith("pragma " + pragma) for value in statements)
++            record_property(pragma + "_count", count)
++            assert count == 0
++        selects = [value.lower() for value in statements if value.lower().startswith("select")]
++        assert not any("from network_metadata_dns" in value or "from network_metadata_source_records" in value for value in selects)
++
++
++def test_not_observed_does_not_reconstruct_endpoints(tmp_path):
++    with store(tmp_path) as state:
++        reader = seed(state)
++        # Disposable schema-valid retained-state fixture, not a normalizer change.
++        state.repo.connection.execute("UPDATE network_metadata_observations SET sensitive_endpoint_presence_state='not_observed'")
++        state.repo.connection.execute("DELETE FROM network_metadata_sensitive_endpoints")
++        result = reader.read_projection_batch(state.generation.source_generation_id, None, 1)[0]
++        assert result.sensitive_endpoint_presence_state == "not_observed"
++        assert result.src_ip is result.dst_ip is None
++
++
++def test_source_generation_order_is_opened_time_then_identity(tmp_path):
++    from tests.network_metadata import BOOT
++    with store(tmp_path) as state:
++        reader = seed(state)
++        state.repo.transition_generation(binding=state.config.capture_scope_binding, boot_id=BOOT,
++            physical=(1, 2), close_reason="rotation")
++        state.clock.advance(seconds=1)
++        state.repo.transition_generation(binding=state.config.capture_scope_binding, boot_id=BOOT,
++            physical=(1, 3), close_reason="rotation")
++        generations = reader.list_source_generations()
++        keys = [(item.opened_at_utc, item.source_generation_id) for item in generations]
++        assert len(keys) == 3 and keys == sorted(keys)
+diff --git a/tests/network_metadata_projection/test_registry_hot_path.py b/tests/network_metadata_projection/test_registry_hot_path.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c21e98ddfa974decb4de976b4c142d660bc1ea0b
+--- /dev/null
++++ b/tests/network_metadata_projection/test_registry_hot_path.py
+@@ -0,0 +1,134 @@
++"""Bounded real Registry trust/authority tracing; disposable inputs only."""
++import sqlite3
++
++import pytest
++
++from app.network_metadata_projection.models import ProjectionConflict, RegistryEvaluation
++from app.network_metadata_projection.registry_adapter import RegistryAdapter
++from tests.visitor_registry.test_device_registry import make_stack, append_event, event_for
++from .support import stack, source_record, SITE, MAC, OTHER_MAC
++
++
++def test_real_500_row_reconciliation_one_trust_probe(tmp_path, monkeypatch, record_property):
++    (tmp_path / "registry").mkdir()
++    config, _, registry_repository, reader, _ = make_stack(tmp_path / "registry")
++    macs = tuple("02:10:00:" + ":".join(f"{part:02X}" for part in number.to_bytes(3, "big")) for number in range(500))
++    for number, mac in enumerate(macs):
++        append_event(config.source_log_path, event_for(session_id=f"synthetic-{number}", mac=mac))
++    assert reader.scan().complete
++    (tmp_path / "projection").mkdir()
++    value = stack(tmp_path / "projection")
++    try:
++        now = "2026-10-09T12:00:00.000000Z"
++        with value.repo.transaction():
++            for mac in macs:
++                value.repo._registry_binding(SITE, mac, RegistryEvaluation("not_yet_registry_resolved"),
++                    value.service.run_id, now, edge_at=now)
++        adapter = RegistryAdapter(config.db_path)
++        value.service.registry = adapter
++        statements, probes, authority_calls = [], [], []
++        connect, probe, point = sqlite3.connect, adapter._trust_probe, adapter.reader.get_device_by_mac
++        def traced_connect(*args, **kwargs):
++            connection = connect(*args, **kwargs)
++            connection.set_trace_callback(statements.append)
++            return connection
++        def counted_probe():
++            probes.append(True)
++            return probe()
++        def counted_point(mac):
++            authority_calls.append(mac)
++            return point(mac)
++        monkeypatch.setattr(sqlite3, "connect", traced_connect)
++        monkeypatch.setattr(adapter, "_trust_probe", counted_probe)
++        monkeypatch.setattr(adapter.reader, "get_device_by_mac", counted_point)
++        value.service.reconcile()
++        assert len(probes) == 1
++        assert len(authority_calls) == 500 and set(authority_calls) == set(macs)
++        assert all(value.repo.binding(SITE, mac)["binding_state"] == "authoritative" for mac in macs)
++        for pragma in ("quick_check", "foreign_key_check", "integrity_check"):
++            count = sum(sql.lower().startswith("pragma " + pragma) for sql in statements)
++            record_property("registry_500_row_" + pragma + "_count", count)
++            assert count == 0
++        record_property("registry_trust_probes_per_500_row_pass", len(probes))
++        record_property("registry_exact_authority_point_reads", len(authority_calls))
++        assert sum(sql.lower() == "pragma user_version" for sql in statements) == 1
++        assert not any("group by" in sql.lower() or "from reader_state" in sql.lower() for sql in statements)
++        assert all(registry_repository.get_device_by_mac(mac) is not None for mac in macs)
++    finally:
++        value.repo.close()
++
++
++def test_initial_new_site_mac_evaluations_use_one_batch(tmp_path):
++    value = stack(tmp_path, [source_record(), source_record(1, site_id="f" * 24)])
++    try:
++        value.service.poll()
++        assert value.registry.batches == [(MAC, OTHER_MAC)]
++        assert value.registry.calls == [MAC, OTHER_MAC]
++        assert value.repo.binding(SITE, MAC) is not None
++        assert value.repo.binding("f" * 24, MAC) is not None
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("damage", ["PRAGMA user_version=2", "DROP INDEX idx_visitor_devices_last_seen",
++    "UPDATE registry_state SET state='unavailable'", "DELETE FROM registry_state"])
++def test_batch_untrusted_registry_returns_unavailable_without_authority_reads(tmp_path, monkeypatch, damage):
++    config, _, _, _, _ = make_stack(tmp_path)
++    with sqlite3.connect(config.db_path) as connection:
++        connection.execute(damage)
++    adapter = RegistryAdapter(config.db_path)
++    def forbidden(*args):
++        pytest.fail("untrusted Registry reached authority lookup")
++    monkeypatch.setattr(adapter.reader, "get_device_by_mac", forbidden)
++    assert {item.state for item in adapter.evaluate_many((MAC, OTHER_MAC)).values()} == {"registry_unavailable"}
++
++
++def test_unreadable_registry_batch_is_safe(tmp_path):
++    path = tmp_path / "invalid.sqlite3"
++    path.write_bytes(b"not a SQLite database")
++    before = path.read_bytes()
++    assert {item.state for item in RegistryAdapter(str(path)).evaluate_many((MAC, OTHER_MAC)).values()} == {"registry_unavailable"}
++    assert path.read_bytes() == before
++
++
++def test_individual_point_failure_and_returned_identity_validation(tmp_path, monkeypatch):
++    config, _, _, _, _ = make_stack(tmp_path)
++    adapter = RegistryAdapter(config.db_path)
++    def point(mac):
++        if mac == MAC:
++            raise sqlite3.OperationalError("private Registry exception")
++        return {"mac": mac, "device_id": "00000000-0000-4000-8000-000000000123", "updated_at": None,
++            "last_ip": "ignored", "last_site_id": "ignored"}
++    monkeypatch.setattr(adapter.reader, "get_device_by_mac", point)
++    results = adapter.evaluate_many((MAC, OTHER_MAC))
++    assert results[MAC] == RegistryEvaluation("registry_unavailable", reason="registry_unavailable")
++    assert results[OTHER_MAC].state == "authoritative"
++    monkeypatch.setattr(adapter.reader, "get_device_by_mac", lambda mac: {"mac": OTHER_MAC, "device_id": "invalid"})
++    with pytest.raises(ProjectionConflict, match="registry_identity_conflict"):
++        adapter.evaluate(MAC)
++    monkeypatch.setattr(adapter.reader, "get_device_by_mac", lambda mac: {"mac": mac, "device_id": "invalid"})
++    assert adapter.evaluate(MAC).state == "registry_unavailable"
++
++
++def test_stop_between_registry_points_does_not_commit_reconciliation(tmp_path, monkeypatch):
++    config, _, _, _, _ = make_stack(tmp_path)
++    value = stack(tmp_path)
++    try:
++        with value.repo.transaction():
++            for mac in (MAC, OTHER_MAC):
++                value.repo._registry_binding(SITE, mac, RegistryEvaluation("not_yet_registry_resolved"),
++                    value.service.run_id, "2026-10-09T12:00:00.000000Z", edge_at="2026-10-09T12:00:00.000000Z")
++        before = value.repo.connection.total_changes
++        adapter = RegistryAdapter(config.db_path)
++        value.service.registry = adapter
++        calls = []
++        def point(mac):
++            calls.append(mac)
++            value.service.stop_event.set()
++            return None
++        monkeypatch.setattr(adapter.reader, "get_device_by_mac", point)
++        value.service.reconcile()
++        assert len(calls) == 1
++        assert value.repo.connection.total_changes == before
++    finally:
++        value.repo.close()

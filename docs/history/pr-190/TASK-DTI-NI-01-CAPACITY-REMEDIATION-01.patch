@@ -1,0 +1,83 @@
+diff --git a/app/network_metadata/config.py b/app/network_metadata/config.py
+index 478aeb030bef63fb3b623a76bc59302419449c25..644691ba69ecbc59ec682889fc13913e25096d0a 100644
+--- a/app/network_metadata/config.py
++++ b/app/network_metadata/config.py
+@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
+ from app.device_fingerprint.validation import validate_machine_id, validate_site_id
+ from .canonical import semantic_digest
+ from .models import (CaptureScopeBindingV1, NetworkMetadataConfig, NetworkMetadataConfigError,
+-    NetworkMetadataValidationError, MAX_DB_BYTES, MIN_DB_BYTES, MAX_RECORD_BYTES,
++    NetworkMetadataValidationError, DEFAULT_MAX_DB_BYTES, MAX_DB_BYTES, MIN_DB_BYTES, MAX_RECORD_BYTES,
+     MIN_RECORD_BYTES, MAX_BATCH_RECORDS, MAX_BATCH_BYTES, LOGICAL_SOURCE_ID,
+     NORMALIZER_VERSION, SOURCE_CONTRACT_VERSION)
+ from .validation import absolute_path, integer, ni_timestamp, ni_format_utc, strict_json, text
+@@ -73,7 +73,7 @@ def network_metadata_config_from_env(environ=None):
+         binding = make_capture_scope_binding(strict_json(env.get("NETWORK_METADATA_CAPTURE_SCOPE_BINDING_JSON")))
+         record_limit = number("NETWORK_METADATA_MAX_RECORD_BYTES", MAX_RECORD_BYTES, MIN_RECORD_BYTES, MAX_RECORD_BYTES)
+         config = NetworkMetadataConfig(True, source, db, binding,
+-            number("NETWORK_METADATA_MAX_DB_BYTES", MAX_DB_BYTES, MIN_DB_BYTES, MAX_DB_BYTES),
++            number("NETWORK_METADATA_MAX_DB_BYTES", DEFAULT_MAX_DB_BYTES, MIN_DB_BYTES, MAX_DB_BYTES),
+             record_limit, number("NETWORK_METADATA_BATCH_MAX_RECORDS", MAX_BATCH_RECORDS, 1, MAX_BATCH_RECORDS),
+             number("NETWORK_METADATA_BATCH_MAX_BYTES", MAX_BATCH_BYTES, record_limit, MAX_BATCH_BYTES),
+             number("NETWORK_METADATA_POLL_INTERVAL_SECONDS", 1, 1))
+diff --git a/app/network_metadata/models.py b/app/network_metadata/models.py
+index f59dc885a6f778540c3352aee7e73163a9ddee83..137253c6ae86d6e173e5a90074537d30def9b711 100644
+--- a/app/network_metadata/models.py
++++ b/app/network_metadata/models.py
+@@ -8,7 +8,8 @@ SOURCE_CONTRACT_VERSION = "suricata-eve-v1"
+ LOGICAL_SOURCE_ID = "suricata-dti-ni-v1"
+ NORMALIZER_VERSION = "network-metadata-normalizer-v1"
+ NI01_OBSERVATION_NAMESPACE_UUID = "ce2387da-5bc4-5c4e-9e6a-6de970889764"
+-MAX_DB_BYTES = 8589934592
++DEFAULT_MAX_DB_BYTES = 8589934592
++MAX_DB_BYTES = 68719476736
+ MIN_DB_BYTES = 67108864
+ MAX_RECORD_BYTES = 1048576
+ MIN_RECORD_BYTES = 4096
+@@ -113,7 +114,7 @@ class NetworkMetadataConfig:
+     source_path: str | None = None
+     db_path: str | None = None
+     capture_scope_binding: CaptureScopeBindingV1 | None = None
+-    max_db_bytes: int = MAX_DB_BYTES
++    max_db_bytes: int = DEFAULT_MAX_DB_BYTES
+     max_record_bytes: int = MAX_RECORD_BYTES
+     batch_max_records: int = MAX_BATCH_RECORDS
+     batch_max_bytes: int = MAX_BATCH_BYTES
+diff --git a/tests/network_metadata/test_config.py b/tests/network_metadata/test_config.py
+index 807fcf24d9abb92309ac145ec56154603e50bac2..16320b2903e56b10938b640ca7eb6166e4aebe5a 100644
+--- a/tests/network_metadata/test_config.py
++++ b/tests/network_metadata/test_config.py
+@@ -2,7 +2,7 @@ import json
+ import pytest
+ from app.network_metadata.config import make_capture_scope_binding, network_metadata_config_from_env
+ from app.network_metadata.canonical import semantic_digest
+-from app.network_metadata.models import NetworkMetadataConfigError, NetworkMetadataValidationError
++from app.network_metadata.models import NetworkMetadataConfig, NetworkMetadataConfigError, NetworkMetadataValidationError
+ from . import binding_input, configuration
+ 
+ 
+@@ -11,13 +11,23 @@ def test_disabled_zero_parsing():
+     assert not network_metadata_config_from_env({"NETWORK_METADATA_ENABLED": "false", "NETWORK_METADATA_MAX_DB_BYTES": "not-a-number"}).enabled
+ 
+ 
++def test_default_max_db_bytes(tmp_path):
++    assert NetworkMetadataConfig().max_db_bytes == 8589934592
++    assert configuration(tmp_path).max_db_bytes == 8589934592
++
++
++@pytest.mark.parametrize("value", [8589934593, 51539607552, 68719476736])
++def test_admitted_max_db_bytes(tmp_path, value):
++    assert configuration(tmp_path, NETWORK_METADATA_MAX_DB_BYTES=str(value)).max_db_bytes == value
++
++
+ @pytest.mark.parametrize("value", ["TRUE", "False", "1", " true", "false ", "", [], True])
+ def test_strict_enabled(value):
+     with pytest.raises(NetworkMetadataConfigError):
+         network_metadata_config_from_env({"NETWORK_METADATA_ENABLED": value})
+ 
+ 
+-@pytest.mark.parametrize("key,value", [("MAX_DB_BYTES", "67108863"), ("MAX_DB_BYTES", "8589934593"),
++@pytest.mark.parametrize("key,value", [("MAX_DB_BYTES", "67108863"), ("MAX_DB_BYTES", "68719476737"),
+     ("MAX_RECORD_BYTES", "4095"), ("MAX_RECORD_BYTES", "1048577"), ("BATCH_MAX_RECORDS", "257"),
+     ("BATCH_MAX_BYTES", "4096"), ("POLL_INTERVAL_SECONDS", "0"), ("POLL_INTERVAL_SECONDS", "1.0"),
+     ("BATCH_MAX_RECORDS", " 1"), ("BATCH_MAX_RECORDS", "+1"), ("BATCH_MAX_RECORDS", "١")])
