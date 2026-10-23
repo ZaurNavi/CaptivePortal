@@ -65,12 +65,13 @@ class SensorRuntime:
         self._attribution = None
         # No I/O at composition; absent/unprovisioned channel stays fail-closed.
         self._operations_metadata = None
+        self._spool_workload = None
         try:
             from .operations_metadata import SensorMetadataPublisher
             self._operations_metadata = SensorMetadataPublisher({
                 "sensor_spool": config.spool_path,
                 "network_attribution": attribution_config.db_path if attribution_config is not None and attribution_config.enabled else None,
-            }, health_provider=self._operations_health)
+            }, health_provider=self._operations_health, workload_provider=self._operations_workload)
         except Exception:
             pass  # Optional metadata composition cannot prevent Sensor startup.
         self._capture_preflight_passed = False
@@ -378,7 +379,19 @@ class SensorRuntime:
             self.telemetry.emit("fingerprint_sensor_metrics", runtime_state=self.state, **fields)
 
     def _emit_metrics(self) -> None:
+        self._spool_workload = None
         metrics = self.spool.metrics()
+        # Reuse the sole existing sample after its spool lock has been released.
+        # A tuple is published by one assignment; no lock crosses report I/O.
+        try:
+            from .operations_metadata import SpoolWorkloadSample, integer, require
+            require(integer(metrics['oldest_spool_age']))
+            sample = SpoolWorkloadSample(self.monotonic(), metrics["rows"], metrics["spool_bytes"],
+                None if metrics["rows"] == 0 else metrics["oldest_spool_age"])
+            sample.project(self.monotonic())
+            self._spool_workload = sample
+        except Exception:
+            pass
         counters = dict(self.normalizer.counters)
         counters["eve_datagram_truncated"] = getattr(self.eve, "truncated", 0)
         counters["eve_json_invalid"] = getattr(self.eve, "invalid", 0) + counters.get("eve_json_invalid", 0)
@@ -394,6 +407,13 @@ class SensorRuntime:
             **self._take_routine_aggregate(),
             **counters, **resource_snapshot(),
         )
+
+    def _operations_workload(self):
+        from .operations_metadata import sensor_workload
+        try:
+            return self._spool_workload.project(self.monotonic())
+        except Exception:
+            return sensor_workload()
 
     @staticmethod
     def _valid_stats(value: dict[str, Any]) -> bool:

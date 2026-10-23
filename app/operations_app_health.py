@@ -13,11 +13,21 @@ from datetime import datetime, timezone
 
 from app.device_fingerprint_sensor import operations_metadata as m
 from app.operations_verification_report import configured_channel as startup_channel
-from app.operations_health import CLASSIFICATION_UNIT, OWNER_UNITS, validate_owner
+from app.operations_health import CLASSIFICATION_UNIT, NI04_UNIT, OWNER_UNITS, validate_owner
 
 SCHEMA = "captivprod.ops.owner-app-health.v1"
+SCHEMA_V2 = "captivprod.ops.owner-app-health.v2"
 REPORT = "app-health.json"
 PROVENANCE = "source_self_reported_shared_uid"
+
+
+def ni04_workload(value=None):
+    if value is None:
+        return dict(feed_backlog_entries=None)
+    m.require(type(value) is dict and set(value) == {'feed_backlog_entries'})
+    count = value['feed_backlog_entries']
+    m.require(count is None or m.integer(count))
+    return dict(value)
 
 
 def configured_channel(unit):
@@ -39,9 +49,14 @@ def decode(raw, unit):
         return result
     def invalid(_):raise m.MetadataUnavailable()
     value = json.loads(raw.decode('utf-8'), object_pairs_hook=pairs, parse_constant=invalid)
+    v2 = type(value) is dict and value.get('schema_version') == SCHEMA_V2
     m.require(type(value) is dict and set(value) == {'schema_version', 'producer_unit', 'producer',
-        'epoch', 'sequence', 'sample_time_utc', 'sample_boottime_ns', 'application_health'})
-    m.require(value['schema_version'] == SCHEMA and value['producer_unit'] == unit)
+        'epoch', 'sequence', 'sample_time_utc', 'sample_boottime_ns', 'application_health'} | ({'workload'} if v2 else set()))
+    m.require(value['schema_version'] in {SCHEMA, SCHEMA_V2} and value['producer_unit'] == unit)
+    if v2:
+        m.require(unit == NI04_UNIT)
+        m.require(type(value['workload']) is dict)
+        ni04_workload(value['workload'])
     producer = value['producer']
     m.require(type(producer) is dict and set(producer) == {'boot_id', 'pid', 'start_ticks'})
     for item in (producer['boot_id'], value['epoch']):
@@ -91,6 +106,10 @@ class HealthPublisher:
             value = dict(schema_version=SCHEMA, producer_unit=self.unit, producer=self.identity(pid, source.uid),
                 epoch=self.epoch, sequence=sequence, sample_time_utc=m.stamp(self.now()),
                 sample_boottime_ns=self.boottime(), application_health=health)
+            if self.unit == NI04_UNIT:
+                # Architect #6376326800: feed sequence equality does not bind
+                # NI02 source epoch. Numeric delivery is HOLD_PARTIAL.
+                value.update(schema_version=SCHEMA_V2, workload=ni04_workload())
             raw = json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode('ascii')
             decode(raw, self.unit)
             try:
@@ -157,7 +176,8 @@ class HealthReader:
             if max(age, boot_age) > m.TTL:return dict(status='stale', reason='report_stale')
             return dict(status='fresh', health=value['application_health'], producer=producer,
                 observed_at=value['sample_time_utc'], age=max(age, boot_age),
-                expires_boottime_ns=sample_boot + int(m.TTL*1e9))
+                expires_boottime_ns=sample_boot + int(m.TTL*1e9),
+                **({'workload': value['workload']} if value['schema_version'] == SCHEMA_V2 else {}))
         except Exception:return dict(status='unknown', reason='report_unavailable')
         finally:
             if fd is not None:

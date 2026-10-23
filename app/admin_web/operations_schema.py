@@ -92,3 +92,27 @@ def validate_v3(model):
     v2["api_version"] = "admin.operations.db-services.v2"
     validate_v2(v2)
     return model
+
+
+def validate_v4(model):
+    """V3 remains the full base contract, with two closed workload additions."""
+    from .operations_service import OperationsError
+    from app.device_fingerprint_sensor.operations_metadata import sensor_workload
+    from app.operations_app_health import ni04_workload
+    if type(model) is not dict or model.get('api_version') != 'admin.operations.db-services.v4':
+        raise OperationsError()
+    workload = model.get('workload')
+    if type(workload) is not dict or set(workload) != {
+            'network_metadata_projection', 'fingerprint_sensor', 'network_service_recognition'}:
+        raise OperationsError()
+    try:
+        if type(workload['fingerprint_sensor']) is not dict or type(workload['network_service_recognition']) is not dict:
+            raise ValueError()
+        sensor_workload(workload['fingerprint_sensor'])
+        ni04_workload(workload['network_service_recognition'])
+    except (ValueError, TypeError, KeyError):
+        raise OperationsError() from None
+    v3 = dict(model, api_version='admin.operations.db-services.v3',
+        workload={'network_metadata_projection': workload['network_metadata_projection']})
+    validate_v3(v3)
+    return model

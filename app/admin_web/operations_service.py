@@ -29,6 +29,7 @@ from app.operations_verification import opaque_identity,project as project_verif
 API_VERSION = "admin.operations.db-services.v1"
 API_VERSION_V2 = "admin.operations.db-services.v2"
 API_VERSION_V3 = "admin.operations.db-services.v3"
+API_VERSION_V4 = "admin.operations.db-services.v4"
 RESAMPLE_SECONDS = 30.0
 STALE_SECONDS = 90.0
 FIRST_WAIT_SECONDS = 0.250
@@ -343,7 +344,7 @@ class AdminOperationsReadService:
             self._condition.notify_all()
 
     def read(self, request_id, *, version=1):
-        if version not in (1, 2, 3):
+        if version not in (1, 2, 3, 4):
             raise OperationsError()
         with self._condition:
             now = self._monotonic()
@@ -390,7 +391,7 @@ class AdminOperationsReadService:
             sample_status="stale" if stale else "fresh")
         result["summary"] = summarize(result["services"], result["databases"])
         result["topology"] = topology_snapshot()
-        if version in (2, 3):
+        if version in (2, 3, 4):
             result["api_version"] = API_VERSION_V2
             for row in result["services"]:
                 record = health_records.get(row["id"])
@@ -422,7 +423,7 @@ class AdminOperationsReadService:
                 unknown_or_stale=sum(r["operational_state"] in {"unknown", "stale"}
                     or r["application_health"] in {"unknown", "stale"} for r in result["services"])
                     + result["summary"]["databases"]["unknown_or_stale"])
-        if version == 3:
+        if version in (3, 4):
             result["api_version"] = API_VERSION_V3
             record = health_records.get("network_metadata_projection") or {}
             count = record.get("pending_count")
@@ -431,6 +432,23 @@ class AdminOperationsReadService:
                     type(count) is not int or not 0 <= count <= 2**53-1):
                 count = None
             result["workload"] = {"network_metadata_projection": {"pending_attribution_count": count}}
+        if version == 4:
+            from app.device_fingerprint_sensor.operations_metadata import sensor_workload
+            from app.operations_app_health import ni04_workload
+            result['api_version'] = API_VERSION_V4
+            # Current Phase 1 has no NI02 source-epoch proof. Never promote a
+            # native/cached numeric value to an attested backlog in this release.
+            result['workload']['network_service_recognition'] = ni04_workload()
+            for key, project in (('fingerprint_sensor', sensor_workload),):
+                record = health_records.get(key) or {}
+                row = next(item for item in result['services'] if item['id'] == key)
+                expiry = record.get('expires')
+                current = (not stale and type(expiry) is int and boot_ns() <= expiry
+                    and record.get('key') == (row['main_pid'], row['started_at_utc'])
+                    and row['operational_state'] == 'running')
+                try:workload = project(record.get('workload') if current else None)
+                except (ValueError, TypeError, KeyError):workload = project()
+                result['workload'][key] = workload
         if len(json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_LIMIT:
             raise OperationsError()
         return result

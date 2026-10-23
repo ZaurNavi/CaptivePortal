@@ -197,6 +197,89 @@ def test_optional_exporter_composition_failure_cannot_change_sensor_startup(monk
     assert runtime._operations_metadata is None and runtime.state == 'initializing'
 
 
+def workload_report():
+    from app.operations_health import sensor_health, SENSOR_UNIT, DEPENDENCIES
+    value = report()
+    value.update(schema_version=m.SCHEMA_V4,
+        application_health=sensor_health('ready', dict.fromkeys(DEPENDENCIES[SENSOR_UNIT], True)),
+        store_checks=dict(instance=value['epoch'], checks={'sensor_spool': dict(status='passed',
+            scope=['schema_version'], checked_at_utc=m.stamp(NOW), checked_store_id='a'*64,
+            observed_store_id='a'*64, reason='startup_check')}),
+        workload=dict(spool_pending_rows=12, spool_bytes=1048576, oldest_spool_age_seconds=42))
+    return value
+
+
+@pytest.mark.parametrize('count', [None, 0, 1, m.MAXIMUM])
+def test_phase1_sensor_v4_roundtrip_and_old_protocols(count):
+    value = workload_report()
+    value['workload'] = (m.sensor_workload() if count is None else dict(spool_pending_rows=count,
+        spool_bytes=1048576, oldest_spool_age_seconds=None if count == 0 else count))
+    assert m.decode(encoded(value)) == value
+    assert len(encoded(value)) < m.LIMIT
+    for schema in (m.SCHEMA_V3, m.SCHEMA_V2, m.SCHEMA):
+        old = dict(value, schema_version=schema)
+        old.pop('workload')
+        if schema != m.SCHEMA_V3:old.pop('store_checks')
+        if schema == m.SCHEMA:old.pop('application_health')
+        assert m.decode(encoded(old)) == old
+
+
+@pytest.mark.parametrize('field', ['spool_pending_rows', 'spool_bytes', 'oldest_spool_age_seconds'])
+@pytest.mark.parametrize('bad', [True, -1, 2**53, 1.0, '1', None])
+def test_phase1_sensor_v4_rejects_mixed_or_invalid_numbers(field, bad):
+    value = workload_report(); value['workload'][field] = bad
+    with pytest.raises(ValueError):m.decode(encoded(value))
+
+
+@pytest.mark.parametrize('fault', ['extra', 'missing', 'null', 'empty-checks', 'no-checks', 'zero-age'])
+def test_phase1_sensor_v4_exact_workload_and_real_v3_prerequisites(fault):
+    value = workload_report()
+    if fault == 'extra':value['workload']['private'] = 'PRIVATE'
+    elif fault == 'missing':value['workload'].pop('spool_bytes')
+    elif fault == 'null':value['workload'] = None
+    elif fault == 'empty-checks':value['store_checks']['checks'] = {}
+    elif fault == 'no-checks':value.pop('store_checks')
+    elif fault == 'zero-age':value['workload']['spool_pending_rows'] = 0
+    with pytest.raises(ValueError):m.decode(encoded(value))
+
+
+def test_phase1_memory_sample_expires_without_io_or_previous_numeric():
+    sample = m.SpoolWorkloadSample(100, 0, 8192, None)
+    assert sample.project(280) == dict(spool_pending_rows=0, spool_bytes=8192, oldest_spool_age_seconds=None)
+    for tick in (99, 280.001, float('inf'), float('nan')):
+        with pytest.raises(ValueError):sample.project(tick)
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='Linux/POSIX Sensor native openat report contract')
+@pytest.mark.parametrize('checks_present', [False, True])
+def test_phase1_publisher_never_relabels_v2_without_checks_or_reads_spool(tmp_path, monkeypatch, checks_present):
+    from app import operations_verification
+    value = workload_report(); tick = [0.0]; calls = []
+    checks = copy.deepcopy(value['store_checks'])
+    if not checks_present:checks['checks'] = {}
+    monkeypatch.setattr(operations_verification, 'snapshot', lambda *a, **kw:checks)
+    class TestChannel:
+        sensor_uid = os.geteuid()
+        def open(self):return os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        def validate_file(self, info):m.Channel(self.sensor_uid, os.getgid()).validate_file(info)
+    def workload():calls.append('memory'); return value['workload']
+    p = m.SensorMetadataPublisher(dict(sensor_spool=None, network_attribution=None), enabled=True,
+        channel=TestChannel, monotonic=lambda:tick[0], now=lambda:NOW, boottime=lambda:100_000_000_000,
+        identity=lambda pid, uid:dict(value['producer'], pid=pid), health_provider=lambda:value['application_health'],
+        workload_provider=workload)
+    assert p.publish(threading.Event())
+    result = m.decode((tmp_path/m.REPORT).read_bytes())
+    assert result['schema_version'] == (m.SCHEMA_V4 if checks_present else m.SCHEMA_V2)
+    assert ('workload' in result) == checks_present
+    assert calls == (['memory'] if checks_present else [])
+    tick[0] = 59; assert not p.publish(threading.Event())
+    assert calls == (['memory'] if checks_present else [])
+    if checks_present:
+        p.workload_provider = lambda: (_ for _ in ()).throw(RuntimeError('PRIVATE'))
+        tick[0] = 60; assert p.publish(threading.Event())
+        assert m.decode((tmp_path/m.REPORT).read_bytes())['workload'] == m.sensor_workload()
+
+
 @pytest.mark.parametrize('uid,gid,accepted',[(994,995,True),(0,995,False),(994,0,False),(994,993,False)])
 def test_configured_reader_group_must_not_alias_sensor_raw_primary_group(monkeypatch,uid,gid,accepted):
     import sys

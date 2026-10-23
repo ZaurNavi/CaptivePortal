@@ -27,7 +27,19 @@ directory, paths = sys.argv[1], json.loads(sys.argv[2])
 p = SensorMetadataPublisher(paths, channel=lambda:Channel(os.getuid(), 62034, directory), enabled=True)
 if len(sys.argv)>3:
     from app.operations_health import sensor_health, DEPENDENCIES, SENSOR_UNIT
-    p.health_provider=lambda:sensor_health(sys.argv[3],dict.fromkeys(DEPENDENCIES[SENSOR_UNIT],True))
+    p.health_provider=lambda:sensor_health('ready' if sys.argv[3]=='v4' else sys.argv[3],dict.fromkeys(DEPENDENCIES[SENSOR_UNIT],True))
+    if sys.argv[3]=='v4':
+        from app import operations_verification as verification
+        verification.snapshot=lambda *a,**kw:dict(instance=p.epoch,checks={'sensor_spool':dict(
+            status='passed',scope=['schema_version'],checked_at_utc=None,checked_store_id='a'*64,
+            observed_store_id='a'*64,reason='startup_check')})
+        # Same strict synthetic startup check shape, sampled before publication.
+        from app.device_fingerprint_sensor.operations_metadata import stamp
+        from datetime import datetime,timezone
+        checks=verification.snapshot()
+        checks['checks']['sensor_spool']['checked_at_utc']=stamp(datetime.now(timezone.utc))
+        verification.snapshot=lambda *a,**kw:checks
+        p.workload_provider=lambda:dict(spool_pending_rows=12,spool_bytes=1048576,oldest_spool_age_seconds=42)
 def blocked(*args,**kwargs): raise AssertionError("DB/fsync forbidden for metadata")
 sqlite3.connect = blocked
 os.fsync = os.fdatasync = blocked
@@ -130,6 +142,8 @@ def channel(request):
         report_file = child / m.REPORT
         value = json.loads(report_file.read_bytes())
         service = dict(operational_state="running", main_pid=first['pid'], started_at_utc=value['sample_time_utc'])
+        if variant == 'v4':
+            service['started_at_utc'] = value['store_checks']['checks']['sensor_spool']['checked_at_utc']
         yield dict(folder=folder, child=child, report=report_file, paths=paths, process=process, env=env, service=service, value=value, accounting=first,variant=variant)
         assert {p:hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in initial} == initial
     finally:
@@ -148,6 +162,25 @@ def portal(channel, uid=PORTAL, groups=None):
         preexec_fn=demote(uid, PRIVATE+1, [READERS] if groups is None else groups),
         capture_output=True, text=True, timeout=2, check=True)
     return json.loads(result.stdout)
+
+
+@native
+@pytest.mark.parametrize('channel', ['v4'], indirect=True)
+@pytest.mark.parametrize('fault', ['valid', 'pid', 'boot', 'start', 'extra', 'bool', 'sequence'])
+def test_phase1_v4_uses_same_native_principal_channel_and_single_read(channel, fault):
+    value = channel['value']; assert value['schema_version'] == m.SCHEMA_V4
+    assert value['workload'] == dict(spool_pending_rows=12, spool_bytes=1048576, oldest_spool_age_seconds=42)
+    if fault == 'pid':value['producer']['pid'] += 1
+    elif fault == 'boot':value['producer']['boot_id'] = '33333333-3333-4333-8333-333333333333'
+    elif fault == 'start':value['producer']['start_ticks'] += 1
+    elif fault == 'extra':value['workload']['private'] = 1
+    elif fault == 'bool':value['workload']['spool_pending_rows'] = True
+    elif fault == 'sequence':value['sequence'] = 0
+    if fault != 'valid':channel['report'].write_text(json.dumps(value), encoding='utf-8')
+    result = portal(channel)
+    assert result['raw_denied'] is True
+    assert result['report']['status'] == ('fresh' if fault == 'valid' else 'unknown')
+    assert ('workload' in result['report']) == (fault == 'valid')
 
 
 @native

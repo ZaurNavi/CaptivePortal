@@ -50,17 +50,37 @@ def test_dedicated_javascript_behaviour_with_exact_backend_snapshot(tmp_path, sc
     assert "PASS" in result.stdout
 
 
-def test_css_is_page_scoped_and_precedes_old_ni03_suffix():
-    root = Path(__file__).parents[2]
-    css = (root / "app/admin_web/static/admin.css").read_text(encoding="utf-8")
+def assert_operations_css_scope(css):
+    start = "/* DB-SERVICES-01: global Operations page only. */"
+    end = "/* #296: two independent materialized sections inside the actual Visit card. */"
+    assert css.count(start) == css.count(end) == 1
+    assert css.index(start) < css.index(end) < css.index("#device-service-intelligence")
     assert css.index("/* DB-SERVICES-01: global Operations page only. */") < css.index("#device-service-intelligence") < css.index("/* NI-03 presentation only;")
-    section = css.split("/* DB-SERVICES-01: global Operations page only. */", 1)[1].split("#device-service-intelligence", 1)[0]
+    section = css.split(start, 1)[1].split(end, 1)[0]
     for line in section.splitlines():
         if "{" in line and not line.startswith("@media"):
             assert line.lstrip().startswith("#db-services-page"), line
+    return section
+
+
+def test_css_is_page_scoped_and_precedes_old_ni03_suffix():
+    root = Path(__file__).parents[2]
+    css = (root / "app/admin_web/static/admin.css").read_text(encoding="utf-8")
+    section = assert_operations_css_scope(css)
     assert "min-width: 0" in section and "grid-template-columns: minmax(0, 1fr)" in section
     assert '[data-state="present_unverified"]' not in section  # neutral default, no false green override
     assert '[data-family="service"][data-state="running"]' in section
+
+
+@pytest.mark.parametrize('fault', ['unscoped-rule', 'duplicate-boundary', 'reversed-boundary'])
+def test_operations_css_scope_canary_rejects_leakage_and_ambiguous_boundaries(fault):
+    css = (Path(__file__).parents[2] / 'app/admin_web/static/admin.css').read_text(encoding='utf-8')
+    start = '/* DB-SERVICES-01: global Operations page only. */'
+    end = '/* #296: two independent materialized sections inside the actual Visit card. */'
+    if fault == 'unscoped-rule':css = css.replace(start, start + '\n.unscoped { color: red; }', 1)
+    elif fault == 'duplicate-boundary':css += end
+    else:css = css.replace(start, '__START__', 1).replace(end, start, 1).replace('__START__', end, 1)
+    with pytest.raises(AssertionError):assert_operations_css_scope(css)
 
 
 def test_static_page_has_accessible_sections_and_dedicated_controller():
