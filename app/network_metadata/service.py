@@ -43,11 +43,22 @@ class NetworkMetadataService:
         self.run_id = self.boot_id = None
         self.started = self.storage_failed = False
         self.last_health_tick = self.last_retention_tick = 0
+        from app.operations_app_health import HealthPublisher
+        from app.operations_health import NI01_UNIT
+        self._app_health = HealthPublisher(NI01_UNIT, monotonic=monotonic)
         if config.telemetry_aggregation_enabled and repository.telemetry is not None:
             repository.telemetry.enable_aggregation(monotonic=monotonic)
 
     def stop(self):
         self.stop_event.set()
+
+    def _publish_app_health(self, *, stopping=False):
+        from app.operations_health import owner_health, NI01_UNIT
+        try:
+            value = (dict(state='unknown', reason='source_stopping') if stopping
+                     else owner_health(NI01_UNIT, self.health))
+            self._app_health.publish(value, force=stopping)
+        except Exception:pass
 
     def close(self):
         if self.fd is not None:
@@ -91,6 +102,7 @@ class NetworkMetadataService:
         repo.emit("service_started", ingest_run_id=self.run_id, artifact_sha=self.identity.artifact_sha,
                   artifact_tree=self.identity.artifact_tree, service_name="network-metadata.service",
                   process_started_at=self.identity.process_started_at)
+        self._publish_app_health()
 
     def _path_info(self):
         try:
@@ -378,6 +390,9 @@ class NetworkMetadataService:
                 self.last_retention_tick = tick
             repo.wal_maintenance(retention_ran=retained)
         except NetworkMetadataStorageCorrupt:
+            # Native fatal outcome, not a report-driven probe or state rewrite.
+            try:self._app_health.publish(dict(state='unavailable', reason='source_unavailable'))
+            except Exception:pass
             raise
         except NetworkMetadataStorageLimit:
             self.health.unavailable("storage_capacity_headroom_exhausted")
@@ -390,6 +405,7 @@ class NetworkMetadataService:
             self.storage_failed = True
             self.health.unavailable("storage_unavailable")
             repo.emit("storage_unavailable", reason_code="storage_unavailable")
+        self._publish_app_health()
         return did_work
 
     def run_forever(self):
@@ -402,5 +418,6 @@ class NetworkMetadataService:
                 if not work:
                     self.stop_event.wait(self.config.poll_interval_seconds)
         finally:
+            self._publish_app_health(stopping=True)
             self.close()
             self.repository.emit("service_stopped", ingest_run_id=self.run_id)

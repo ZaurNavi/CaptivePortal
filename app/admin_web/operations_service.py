@@ -20,6 +20,8 @@ from .operations_health import SensorHealthEvidence, project as project_health, 
 from app.operations_health import unknown_evidence
 from app.network_metadata_projection.operations_health import HealthReader, PROVENANCE
 from app.operations_health import NI02_UNIT
+from app.operations_health import OWNER_SERVICES
+from app.operations_app_health import HealthReader as OwnerHealthReader
 from .operations_verification import OwnerChecks
 from app.operations_verification import opaque_identity,project as project_verification
 
@@ -271,13 +273,17 @@ def summarize(services, databases):
 
 class AdminOperationsReadService:
     def __init__(self, inventory, *, acquire=acquire_systemd, lstat=os.lstat, monotonic=time.monotonic, now=utc_now,
-                 sensor_metadata=None, ni02_health=None,owner_checks=None):
+                 sensor_metadata=None, ni02_health=None,owner_checks=None,owner_health_readers=None):
         self.inventory, self._acquire, self._lstat = inventory, acquire, lstat
         self._monotonic, self._now = monotonic, now
         self._sensor_metadata = sensor_metadata if sensor_metadata is not None else SensorMetadataReader()
         self._sensor_health = SensorHealthEvidence(self._sensor_metadata)
         self._ni02_report = ni02_health if ni02_health is not None else HealthReader()
         self._ni02_health = SensorHealthEvidence(self._ni02_report,unit=NI02_UNIT,source=PROVENANCE)
+        self._owner_health_readers = (owner_health_readers if owner_health_readers is not None
+            else {key: OwnerHealthReader(unit) for key, unit in OWNER_SERVICES.items()})
+        self._owner_health = {key: SensorHealthEvidence(self._owner_health_readers[key], unit=unit, source=PROVENANCE)
+            for key, unit in OWNER_SERVICES.items()}
         self._owner_checks=owner_checks if owner_checks is not None else OwnerChecks()
         self._condition = threading.Condition()
         self._cancel = threading.Event()
@@ -425,6 +431,15 @@ class AdminOperationsReadService:
         except Exception:
             ni02_report = dict(status="unknown")
         health_records["network_metadata_projection"] = self._ni02_health.collect(ni02_report,ni02,self._now())
+        # Existing sampler only: consume owner memory reports, never initiate
+        # owner checks/SQLite work from an Admin request.
+        for key in OWNER_SERVICES:
+            row = next(row for row in services if row['id'] == key)
+            try:
+                report = self._owner_health_readers[key].read(row,self._now(),deadline=deadline,
+                    monotonic=self._monotonic,cancel=self._cancel)
+            except Exception:report = dict(status='unknown')
+            health_records[key] = self._owner_health[key].collect(report,row,self._now())
         verification=self._owner_checks.collect(services,sensor_report,ni02_report,self._now(),
             deadline=deadline,monotonic=self._monotonic,cancel=self._cancel)
         databases, storage_ids = [], {}
