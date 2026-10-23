@@ -97,6 +97,18 @@
     const count = model.workload?.network_metadata_projection?.pending_attribution_count;
     return `Pending attribution: ${model.sample_status === "fresh" && Number.isSafeInteger(count) && count >= 0 ? count : "Unknown"}`;
   }
+  function workloadLabels(id, model) {
+    const fresh=model.sample_status === "fresh", metrics=model.workload?.[id];
+    const count=(value)=>fresh && Number.isSafeInteger(value) && value>=0 ? value : null;
+    const show=(value)=>value===null ? "Unknown" : value;
+    if(id==="fingerprint_sensor") {
+      const rows=count(metrics?.spool_pending_rows), size=count(metrics?.spool_bytes), age=count(metrics?.oldest_spool_age_seconds);
+      return [`Spool pending: ${show(rows)}`, `Spool size: ${size===null ? "Unknown" : bytes(size)}`,
+        `Oldest pending: ${age===null ? "Unknown" : age+"s"}`];
+    }
+    // Phase 1-B numeric acceptance is HOLD until NI02 source epoch is bound.
+    return id==="network_service_recognition" ? ["Feed backlog: Unknown"] : [];
+  }
   function details(entries) {
     const node = element("details", null, "ops-details");
     node.append(element("summary", "Details"));
@@ -255,6 +267,7 @@
             const appBadge=badge(row.application_health,"application");appBadge.textContent=`App: ${display(row.application_health)}`;
             node.append(badge(row.operational_state,"service"),appBadge);
             if(row.id==="network_metadata_projection") node.append(element("small",pendingLabel(model)));
+            workloadLabels(row.id, model).forEach(label=>node.append(element("small",label)));
             if(row.application_health_evidence?.reason==="backfilling_incomplete_coverage")
               node.append(element("small",healthReasons.backfilling_incomplete_coverage));
             if(phaseBNotice(row))node.append(element("small",phaseBNotice(row)));
@@ -310,7 +323,7 @@
   }
   function render(model) {
     root.dataset.outdated = model.sample_status === "stale" ? "true" : "false";
-    const summary = model.summary, v2 = ["admin.operations.db-services.v2","admin.operations.db-services.v3"].includes(model.api_version);
+    const summary = model.summary, v2 = ["admin.operations.db-services.v2","admin.operations.db-services.v3","admin.operations.db-services.v4"].includes(model.api_version);
     // V1 already provides each app-health state. Keep these axes separate from
     // backend process/store status counts; never add overlapping unknowns.
     const health = {healthy:0, degraded:0, unavailable:0, unknown:0, stale:0};
@@ -345,6 +358,7 @@
       if(phaseBNotice(row))states.append(element("span",phaseBNotice(row)));
       const process = element("div", null, "ops-process");
       process.append(field("PID", row.main_pid), field("Uptime", uptime(row.uptime_seconds)), field("Restarts", row.n_restarts));
+      workloadLabels(row.id, model).forEach(label=>process.append(element("span",label)));
       article.append(identity, states, process, field("Expected", display(row.expected_mode)), details([
         ["Stable ID", row.id], ["ActiveState", row.active_state], ["SubState", row.sub_state],
         ["Started at", row.started_at_utc], ["Sampled at", row.sampled_at_utc], ["Reason", reason(row.reason_code)]
@@ -391,7 +405,8 @@
     updated.textContent = Number.isFinite(age) ? `Updated ${age} sec ago` : "Sample time unavailable";
   }
   let timer = null, inFlight = false, controller = null, disposed = false, last = null;
-  let apiVersion = root.dataset.apiV3 === "/admin/api/v3/operations/db-services" ? 3 :
+  let apiVersion = root.dataset.apiV4 === "/admin/api/v4/operations/db-services" ? 4 :
+    root.dataset.apiV3 === "/admin/api/v3/operations/db-services" ? 3 :
     root.dataset.apiV2 === "/admin/api/v2/operations/db-services" ? 2 : 1;
   const checkScopes = {schema_version:"schema version",schema_signature:"schema structure",quick_check:"SQLite quick_check",
     foreign_key_check:"foreign key check",integrity_check:"full SQLite integrity_check"};
@@ -492,6 +507,19 @@
     const count=model.workload.network_metadata_projection.pending_attribution_count;
     return (count===null || Number.isSafeInteger(count) && count>=0) && validV2(model);
   }
+  function validV4(model) {
+    const keys=(value,expected)=>value && typeof value==="object" && !Array.isArray(value) && Object.keys(value).sort().join(",")===expected;
+    const bounded=value=>value===null || Number.isSafeInteger(value) && value>=0;
+    if(!keys(model.workload,"fingerprint_sensor,network_metadata_projection,network_service_recognition") ||
+        !keys(model.workload.fingerprint_sensor,"oldest_spool_age_seconds,spool_bytes,spool_pending_rows") ||
+        !keys(model.workload.network_service_recognition,"feed_backlog_entries")) return false;
+    const s=model.workload.fingerprint_sensor, values=[s.spool_pending_rows,s.spool_bytes,s.oldest_spool_age_seconds];
+    if(!values.every(bounded) || !bounded(model.workload.network_service_recognition.feed_backlog_entries)) return false;
+    if(!values.every(value=>value===null) && (s.spool_pending_rows===null || s.spool_bytes===null ||
+        (s.spool_pending_rows===0 ? s.oldest_spool_age_seconds!==null : s.oldest_spool_age_seconds===null))) return false;
+    return validV3({...model,api_version:"admin.operations.db-services.v3",
+      workload:{network_metadata_projection:model.workload.network_metadata_projection}});
+  }
   function schedule() {
     if (timer !== null) clearTimeout(timer);
     timer = null;
@@ -506,7 +534,7 @@
     refresh.disabled = true;
     controller = new AbortController();
     try {
-      const url=()=>apiVersion===3 ? root.dataset.apiV3 : apiVersion===2 ? root.dataset.apiV2 : root.dataset.apiBase;
+      const url=()=>apiVersion===4 ? root.dataset.apiV4 : apiVersion===3 ? root.dataset.apiV3 : apiVersion===2 ? root.dataset.apiV2 : root.dataset.apiBase;
       let response = await fetchSnapshot(url());
       while (apiVersion>1 && response.status === 404) {
         // Sticky negotiation ONLY on unsupported version. Never hide faults.
@@ -524,7 +552,7 @@
       if (model.api_version !== `admin.operations.db-services.v${apiVersion}` || model.scope !== "global" || !model.summary ||
           !Array.isArray(model.services) || model.services.length !== 9 || !Array.isArray(model.databases) || model.databases.length !== 17 ||
           !Array.isArray(model.partial_failures) || model.partial_failures.length > 32 || !validTopology(model) ||
-          (apiVersion===3 ? !validV3(model) : apiVersion===2 && !validV2(model))) throw new Error("invalid_snapshot");
+          (apiVersion===4 ? !validV4(model) : apiVersion===3 ? !validV3(model) : apiVersion===2 && !validV2(model))) throw new Error("invalid_snapshot");
       render(model);
       last = model;
     } catch (_error) {
@@ -536,6 +564,10 @@
       if (last && (title.textContent === "Unavailable" || title.textContent === "Collecting operational snapshot…")) {
         const age = Math.max(0, Math.floor((Date.now() - Date.parse(last.sampling_completed_at_utc)) / 1000));
         const failedTitle=title.textContent;
+        if(last.api_version==="admin.operations.db-services.v4") render({...last,workload:{
+          network_metadata_projection:last.workload.network_metadata_projection,
+          fingerprint_sensor:{spool_pending_rows:null,spool_bytes:null,oldest_spool_age_seconds:null},
+          network_service_recognition:{feed_backlog_entries:null}}});
         if(age>90) render({...last,sample_status:"stale"});
         root.dataset.outdated = age > 90 ? "true" : "false";
         title.textContent=age>90 ? "Stale data" : failedTitle;

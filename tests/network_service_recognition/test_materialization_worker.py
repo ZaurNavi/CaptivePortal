@@ -62,6 +62,52 @@ def test_background_positive_no_admin_request(lane):
     assert lane.repo.checkpoint(lane.worker.generation_id)['backfill_state']=='complete'
 
 
+@pytest.mark.skipif(__import__('os').name != 'posix', reason='Linux/POSIX native owner report openat contract')
+@pytest.mark.parametrize('scenario', ['equal', 'positive-distance', 'no-retained', 'different-source-incarnation',
+    'source-reset', 'replacement', 'restart', 'generation-switch', 'backfill', 'recovery', 'gap', 'stale-source',
+    'invalid-source', 'before-commit', 'after-commit'])
+def test_phase1_no_epoch_proof_always_publishes_null_without_probe(lane, tmp_path, monkeypatch, scenario):
+    from unittest.mock import Mock
+    from app import operations_app_health as h
+    from app.operations_health import NI04_UNIT, owner_health
+    from tests.test_operations_app_health import TestChannel, report, NOW as NATIVE_NOW
+    # Simulated producer-side states, NOT a claim to exercise a destructive
+    # source reset. No source epoch exists in the current delivery bounds DTO.
+    assert set(RecognitionFeedBoundsV1.__dataclass_fields__) == {'min_retained_feed_seq', 'max_feed_seq'}
+    lane.worker.cycle()
+    generation = lane.worker.generation_id
+    cursor = lane.repo.checkpoint(generation)['last_edge_feed_seq']
+    state = 'usable'
+    if scenario in {'source-reset', 'replacement'}:
+        lane.projection = Projection(lane.projection.fact); lane.worker.projection = lane.projection
+    if scenario == 'restart':
+        lane.worker = ServiceMaterializationWorker(lane.repo, lane.projection, Source((lane.source,)), bundle())
+    elif scenario == 'generation-switch':lane.worker.generation_id = None
+    elif scenario in {'backfill', 'recovery', 'gap'}:state = 'backfilling' if scenario == 'backfill' else 'lagging'
+    elif scenario in {'stale-source', 'invalid-source', 'before-commit', 'after-commit'}:state = 'source_unavailable'
+    lane.repo.live_state = state
+    high = cursor + int(scenario == 'positive-distance')
+    bounds = RecognitionFeedBoundsV1(None if scenario == 'no-retained' else 1, high)
+    lane.projection.recognition_feed_bounds = Mock(return_value=bounds)
+    # Same counts in a different incarnation must not be misrepresented as 0.
+    lane.projection.synthetic_source_incarnation = scenario
+    lane.repo.checkpoint = Mock(side_effect=AssertionError('No workload checkpoint SELECT'))
+    lane.worker.source.verify_available = Mock(side_effect=AssertionError('No workload source probe'))
+    statements = []; lane.repo.connection.set_trace_callback(statements.append)
+    lane.worker._app_health = h.HealthPublisher(NI04_UNIT, enabled=True,
+        channel=lambda unit:TestChannel(tmp_path), monotonic=lambda:0, now=lambda:NATIVE_NOW,
+        boottime=lambda:100_000_000_000, identity=lambda pid, uid:dict(report()['producer'], pid=pid))
+    lane.worker._publish_app_health()
+    payload = h.decode((tmp_path/h.REPORT).read_bytes(), NI04_UNIT)
+    assert payload['schema_version'] == h.SCHEMA_V2
+    assert payload['workload'] == {'feed_backlog_entries': None}
+    assert payload['application_health'] == owner_health(NI04_UNIT, state)
+    assert statements == []
+    lane.projection.recognition_feed_bounds.assert_not_called()
+    lane.repo.checkpoint.assert_not_called()
+    lane.worker.source.verify_available.assert_not_called()
+
+
 def test_live_atomic_and_idempotent_overlap(lane):
     lane.projection.history=()
     lane.worker.cycle()

@@ -29,6 +29,17 @@ class SensorHealthEvidence:
                             or not 0 <= report["age"] <= TTL or type(report["expires_boottime_ns"]) is not int):
                         raise ValueError()
                     current["pending_count"] = report["health"]["pending_count"]
+                if self.unit == SENSOR_UNIT:
+                    from app.device_fingerprint_sensor.operations_metadata import parse_stamp, sensor_workload
+                    # Workload is private, current-report evidence, not retained
+                    # degradation or part of the seven-key public health DTO.
+                    if (parse_stamp(report['observed_at']) >= parse_stamp(service['started_at_utc'])
+                            and type(report['age']) in {int, float} and 0 <= report['age'] <= TTL
+                            and type(report['expires_boottime_ns']) is int):
+                        try:
+                            current['workload'] = sensor_workload(report.get('workload'))
+                        except (ValueError, TypeError, KeyError):
+                            pass
                 self.last = copy.deepcopy(current)
             except Exception:
                 current = None
@@ -45,6 +56,7 @@ class SensorHealthEvidence:
                     current = copy.deepcopy(self.last)
                     if self.unit == NI02_UNIT:
                         current["pending_count"] = None  # Cached degradation is not current workload proof.
+                    current.pop('workload', None)
             except Exception:
                 self.last = None
         if current is not None:

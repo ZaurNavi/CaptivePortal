@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 SCHEMA = "captivprod.ops.sensor-metadata.v1"
 SCHEMA_V2 = "captivprod.ops.sensor-metadata.v2"
 SCHEMA_V3 = "captivprod.ops.sensor-metadata.v3"
+SCHEMA_V4 = "captivprod.ops.sensor-metadata.v4"
 UNIT = "fingerprint-sensor.service"
 DIRECTORY = "/run/captiveportal-operations"
 CHILD = "sensor"
@@ -43,6 +44,33 @@ def require(condition):
 
 def integer(value, maximum=MAXIMUM, minimum=0):
     return type(value) is int and minimum <= value <= maximum
+
+
+def sensor_workload(value=None):
+    """Closed memory-only workload projection; never opens the spool."""
+    empty = dict(spool_pending_rows=None, spool_bytes=None, oldest_spool_age_seconds=None)
+    if value is None:
+        return empty
+    require(type(value) is dict and set(value) == set(empty))
+    rows, size, age = (value[key] for key in empty)
+    if all(item is None for item in (rows, size, age)):
+        return empty
+    require(integer(rows) and integer(size))
+    require(age is None if rows == 0 else integer(age))
+    return dict(value)
+
+
+@dataclass(frozen=True)
+class SpoolWorkloadSample:
+    observed: float
+    rows: int
+    size: int
+    age: int | None
+
+    def project(self, tick):
+        require(0 <= tick - self.observed <= TTL)
+        return sensor_workload(dict(spool_pending_rows=self.rows, spool_bytes=self.size,
+            oldest_spool_age_seconds=self.age))
 
 
 def boot_ns():
@@ -194,11 +222,15 @@ def decode(raw):
         raise MetadataUnavailable()
     value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
     require(type(value) is dict)
-    v3 = value.get('schema_version') == SCHEMA_V3
-    v2 = value.get("schema_version") in {SCHEMA_V2,SCHEMA_V3}
+    v4 = value.get('schema_version') == SCHEMA_V4
+    v3 = value.get('schema_version') in {SCHEMA_V3, SCHEMA_V4}
+    v2 = value.get("schema_version") in {SCHEMA_V2,SCHEMA_V3,SCHEMA_V4}
     require(set(value) == {"schema_version", "producer_unit", "producer", "epoch", "sequence",
-        "sample_time_utc", "sample_boottime_ns", "source_status", "stores"} | ({"application_health"} if v2 else set()) | ({'store_checks'} if v3 else set()))
-    require(value["schema_version"] in {SCHEMA, SCHEMA_V2,SCHEMA_V3} and value["producer_unit"] == UNIT)
+        "sample_time_utc", "sample_boottime_ns", "source_status", "stores"} | ({"application_health"} if v2 else set()) | ({'store_checks'} if v3 else set()) | ({'workload'} if v4 else set()))
+    require(value["schema_version"] in {SCHEMA, SCHEMA_V2,SCHEMA_V3,SCHEMA_V4} and value["producer_unit"] == UNIT)
+    if v4:
+        require(type(value['workload']) is dict)
+        sensor_workload(value['workload'])
     if v2:
         from app.operations_health import validate
         validate(value["application_health"], UNIT)
@@ -212,6 +244,7 @@ def decode(raw):
     if v3:
         from app.operations_verification import validate_checks
         validate_checks(value['store_checks'],UNIT,parse_stamp(value['sample_time_utc']))
+        if v4:require(bool(value['store_checks']['checks']))
     require(type(value["stores"]) is dict and set(value["stores"]) == set(COMPONENTS))
     partial = False
     for identity, components in COMPONENTS.items():
@@ -233,12 +266,13 @@ def decode(raw):
 class SensorMetadataPublisher:
     def __init__(self, paths, *, channel=configured_channel, monotonic=time.monotonic,
                  now=lambda: datetime.now(timezone.utc), boottime=boot_ns, identity=process_identity, enabled=None,
-                 health_provider=None):
+                 health_provider=None, workload_provider=None):
         self.paths = dict(paths)
         self.channel, self.monotonic, self.now, self.boottime, self.identity = channel, monotonic, now, boottime, identity
         self.epoch, self.sequence, self.last_attempt = str(uuid.uuid4()), 0, None
         self.lock = threading.Lock()
         self.health_provider = health_provider
+        self.workload_provider = workload_provider
         # The SAME existing Operations startup flag; no second enable switch.
         # Sensor's deployment environment must explicitly opt in too.
         self.enabled = os.environ.get("WEB_ADMIN_DB_SERVICES_ENABLED", "false") == "true" if enabled is None else enabled is True
@@ -271,7 +305,12 @@ class SensorMetadataPublisher:
                 value.update(schema_version=SCHEMA_V2, application_health=health)
                 from app.operations_verification import snapshot
                 checks=snapshot(UNIT,observed=current_ids,paths=self.paths)
-                if checks['checks']:value.update(schema_version=SCHEMA_V3,store_checks=checks)
+                if checks['checks']:
+                    value.update(schema_version=SCHEMA_V3,store_checks=checks)
+                    if self.workload_provider is not None:
+                        try:workload = sensor_workload(self.workload_provider())
+                        except Exception:workload = sensor_workload()
+                        value.update(schema_version=SCHEMA_V4, workload=workload)
             raw = json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("ascii")
             decode(raw)
             require(not cancel.is_set() and self.monotonic() < deadline)
@@ -363,6 +402,7 @@ class SensorMetadataReader:
             self.last = producer, value["epoch"], value["sequence"], digest, sampled, value["sample_boottime_ns"]
             return {"status": "fresh", "reason": None, "stores": value["stores"],
                     "expires_boottime_ns": value["sample_boottime_ns"] + int(TTL * 1_000_000_000),
+                    **({'workload': value['workload']} if value['schema_version'] == SCHEMA_V4 else {}),
                     **({'checks':checks} if checks is not None else {}),
                     **({"health": value["application_health"], "observed_at": value["sample_time_utc"],
                         "age": max(age, boot_age), "producer": producer} if "application_health" in value else {})}

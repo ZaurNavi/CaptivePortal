@@ -115,6 +115,42 @@ class Producer:
     def deliver_once(self): raise RuntimeError
 
 
+@pytest.mark.parametrize('rows', [0, 1, 2**53-1])
+def test_phase1_workload_reuses_one_metrics_call_and_clears_on_failure(rows):
+    from unittest.mock import Mock
+    from app.device_fingerprint_sensor.operations_metadata import sensor_workload
+    config = sensor_config_from_env({'DEVICE_FINGERPRINT_SENSOR_ENABLED':'true'})
+    spool = Spool(); tick = [10.0]
+    spool.metrics = Mock(return_value=dict(rows=rows, spool_bytes=8192, oldest_spool_age=37))
+    runtime = SensorRuntime(config, telemetry=SensorTelemetry(Log()), spool=spool, capture=Capture(),
+        eve=Eve(), producer=Producer(), preflight=Preflight(), monotonic=lambda:tick[0])
+    assert runtime._operations_workload() == sensor_workload()
+    runtime._emit_metrics()
+    assert spool.metrics.call_count == 1
+    expected = dict(spool_pending_rows=rows, spool_bytes=8192, oldest_spool_age_seconds=None if rows == 0 else 37)
+    for _ in range(10):assert runtime._operations_workload() == expected
+    assert spool.metrics.call_count == 1
+    tick[0] += 180.001
+    assert runtime._operations_workload() == sensor_workload()
+    spool.metrics.side_effect = RuntimeError('SYNTHETIC')
+    with pytest.raises(RuntimeError):runtime._emit_metrics()
+    assert runtime._operations_workload() == sensor_workload()
+    assert spool.metrics.call_count == 2
+
+
+@pytest.mark.parametrize('bad', [True, -1, 2**53, '1', 1.5])
+def test_phase1_invalid_metrics_never_become_workload(bad):
+    from unittest.mock import Mock
+    from app.device_fingerprint_sensor.operations_metadata import sensor_workload
+    config = sensor_config_from_env({'DEVICE_FINGERPRINT_SENSOR_ENABLED':'true'})
+    spool = Spool(); spool.metrics = Mock(return_value=dict(rows=bad, spool_bytes=8192, oldest_spool_age=37))
+    runtime = SensorRuntime(config, telemetry=SimpleNamespace(emit=lambda *a, **kw:None), spool=spool,
+        capture=Capture(), eve=Eve(), producer=Producer(), preflight=Preflight())
+    runtime._emit_metrics()
+    assert runtime._operations_workload() == sensor_workload()
+    assert spool.metrics.call_count == 1
+
+
 def test_preflight_failure_spools_all_source_health_without_capture():
     config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
     spool = Spool()

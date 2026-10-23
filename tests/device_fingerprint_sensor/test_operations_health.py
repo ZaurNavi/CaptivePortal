@@ -51,17 +51,24 @@ def test_sensor_v2_explicit_version_evolution_preserves_strict_v1():
     with pytest.raises(ValueError):metadata.decode(encoded(v2))
 
 
-@pytest.mark.parametrize('native,pending,expected,reason',[
-    ('usable',0,'healthy','source_ready'), ('usable',None,'unknown','dependencies_unconfirmed'),
-    ('attribution_unavailable',2143,'degraded','pending_attribution'),
-    ('attribution_unavailable',None,'degraded','source_degraded'),
-    ('source_unavailable',2143,'unavailable','source_unavailable'),
-    ('blocked_conflict',0,'unavailable','blocked_conflict'),
-    ('registry_degraded',0,'degraded','registry_degraded'),
-    ('capacity_halted',0,'degraded','capacity_limited'),('stopping',0,'unknown','source_stopping')])
-def test_ni02_mapping_uses_precomputed_state_and_confirmed_pending(native,pending,expected,reason):
-    deps=dependencies(NI02_UNIT,pending=pending is not None)
-    value=ni02_health(native,deps,pending)
+@pytest.mark.parametrize('native,pending,native_reason,attribution,expected,reason',[
+    ('usable',0,None,True,'healthy','source_ready'),
+    ('usable',None,None,True,'unknown','dependencies_unconfirmed'),
+    # Accepted #324 / PR326: queued work alone is not degradation. Explicit
+    # pending-only reason and all independent dependencies are still required.
+    ('attribution_unavailable',2143,'pending_attribution',True,'healthy','source_ready'),
+    ('attribution_unavailable',None,'pending_attribution',True,'unknown','dependencies_unconfirmed'),
+    ('attribution_unavailable',2143,None,True,'unknown','dependencies_unconfirmed'),
+    ('attribution_unavailable',None,'attribution_authority_unavailable',False,'degraded','source_degraded'),
+    ('attribution_unavailable',2143,'attribution_authority_unavailable',False,'degraded','source_degraded'),
+    ('source_unavailable',2143,None,True,'unavailable','source_unavailable'),
+    ('blocked_conflict',0,None,True,'unavailable','blocked_conflict'),
+    ('registry_degraded',0,None,True,'degraded','registry_degraded'),
+    ('capacity_halted',0,None,True,'degraded','capacity_limited'),
+    ('stopping',0,None,True,'unknown','source_stopping')])
+def test_ni02_mapping_uses_precomputed_state_and_confirmed_pending(native,pending,native_reason,attribution,expected,reason):
+    deps=dependencies(NI02_UNIT,pending=pending is not None,attribution=attribution)
+    value=ni02_health(native,deps,pending,native_reason=native_reason)
     assert value['state']==expected and value['reason']==reason
 
 
