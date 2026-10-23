@@ -1183,3 +1183,106 @@ def test_04K_no_deadline_authenticated_socket_wait_uses_actual_packet_or_EOF(mon
         assert left.gettimeout() is None
     finally:
         right.close();left.close()
+
+
+def test_04K_R1_all_R4_send_and_receive_sites_are_explicitly_unbounded():
+    import ast
+    root=Path(__file__).resolve().parents[2]/'app/db_audit_coordinator'
+    sends=[];receives=[]
+    for filename in ('child_bootstrap.py','r4_release.py','r4_owner_helper.py'):
+        tree=ast.parse((root/filename).read_text(encoding='utf-8'))
+        if filename=='child_bootstrap.py':
+            tree=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='execute_r4')
+        for node in ast.walk(tree):
+            if not (isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute)
+                    and isinstance(node.func.value,ast.Name) and node.func.value.id=='r4_ipc'):continue
+            if node.func.attr not in {'send','receive'}:continue
+            seconds=[kw.value for kw in node.keywords if kw.arg=='seconds']
+            assert len(seconds)==1 and isinstance(seconds[0],ast.Constant) and seconds[0].value is None
+            if node.func.attr=='send':sends.append(node.args[1].value)
+            else:receives.append(filename)
+    assert sorted(sends)==sorted(['gate_ready','t3_done','released','cancel','begin','snapshot','cancel',
+                                  'release','owner_ready','owner_done'])
+    assert len(receives)==4
+    tree=ast.parse((root/'r4_release.py').read_text())
+    joins=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='join']
+    assert len(joins)==1 and joins[0].args==[] and joins[0].keywords==[]
+
+
+@POSIX
+@pytest.mark.parametrize('peer',['alive','closed'])
+def test_04K_R1_delayed_authenticated_cancel_send_has_no_one_second_cap(peer,record_property):
+    from app.db_audit_coordinator import r4_ipc
+    left,right=r4_ipc.pair();clock=[0.0];settings=[]
+    class DelayedEndpoint:
+        def settimeout(self,value):settings.append(value);left.settimeout(value)
+        def sendmsg(self,*args):
+            clock[0]+=2.0  # Controlled scheduling delay, not a real wall wait.
+            assert left.gettimeout() is None and clock[0]>1
+            return left.sendmsg(*args)  # Actual authenticated kernel transport.
+    try:
+        if peer=='closed':right.close()
+        if peer=='alive':
+            r4_ipc.send(DelayedEndpoint(),'cancel','a'*64,{},seconds=None)
+            assert r4_ipc.receive(right,'a'*64,os.geteuid(),os.getpid(),seconds=None)==('cancel',{},None)
+        else:
+            with pytest.raises(OSError):r4_ipc.send(DelayedEndpoint(),'cancel','a'*64,{},seconds=None)
+        assert settings==[None]
+        record_property('04k_r1_delayed_send',json.dumps(dict(simulated_delay=clock[0],seconds=None,peer=peer)))
+    finally:left.close();right.close()
+
+
+@POSIX
+@pytest.mark.parametrize('possible_method',['R4','legacy'])
+def test_04K_R1_pre_auth_300s_is_unresolved_before_method_can_be_trusted(monkeypatch,possible_method,record_property):
+    """Exact existing FIFO reader: same entry capability cannot distinguish jobs.
+
+    The bytes are deliberately not adopted as authorization; r4_fd presence
+    must NEVER act as a trusted timeout switch. No protocol/source alteration.
+    """
+    from app.db_audit_coordinator import child_bootstrap as worker
+    read,write=os.pipe();clock=[0.0];payload=c.encode({'r4_fd':42} if possible_method=='R4' else {})
+    native_select=worker.select.select;decoded=[]
+    monkeypatch.setattr(worker.time,'monotonic',lambda:clock[0])
+    def delayed_ready(*args):
+        clock[0]=301.0  # Scheduling resumes after the fixed bootstrap budget.
+        return native_select(*args[:-1],0)
+    monkeypatch.setattr(worker.select,'select',delayed_ready)
+    decode=worker.c.decode
+    monkeypatch.setattr(worker.c,'decode',lambda *args:decoded.append(True) or decode(*args))
+    try:
+        os.write(write,payload);os.close(write);write=None
+        with pytest.raises(c.CoordinatorError) as error:worker.pipe_data(read,300)
+        assert error.value.code=='unauthorized' and decoded==[]
+        record_property('04k_r1_bootstrap_hold',json.dumps(dict(method_not_yet_trusted=possible_method,
+            resumed_seconds=clock[0],result=error.value.code,status='UNRESOLVED_PRE_ADMISSION')))
+    finally:
+        os.close(read)
+        if write is not None:os.close(write)
+
+
+@pytest.mark.skipif(sys.platform!='linux' or getattr(os,'geteuid',lambda:0)()==0,
+    reason='actual nonroot sealed worker claim; root cannot impersonate its worker profile')
+def test_04K_R1_eligible_sealed_R4_claim_rejected_only_after_bootstrap_clock_jump(monkeypatch,record_property):
+    from app.db_audit_coordinator import child_bootstrap as worker
+    # Existing genuine sealed-claim fixture first proves this method is eligible,
+    # including current UID/GID, parent, nonce, pipe identity and exact metadata.
+    test_04C_sealed_job_store_change_cannot_reuse_another_source_authority(False)
+    native_select=worker.select.select;clock=[0.0]
+    monkeypatch.setattr(worker.time,'monotonic',lambda:clock[0])
+    def late(*args):clock[0]=301.0;return native_select(*args[:-1],0)
+    monkeypatch.setattr(worker.select,'select',late)
+    before=set(os.listdir('/proc/self/fd'))
+    try:
+        with pytest.raises(c.CoordinatorError) as error:
+            test_04C_sealed_job_store_change_cannot_reuse_another_source_authority(False)
+        assert error.value.code=='unauthorized'
+        record_property('04k_r1_eligible_bootstrap_hold',json.dumps(dict(
+            genuine_sealed_R4_without_jump='AUTHORIZED',clock_jump_s=301,
+            with_jump='unauthorized_before_auth',status='UNRESOLVED_PRE_ADMISSION')))
+    finally:
+        # authorize closes auth FD only after pipe_data returns. The deliberate
+        # pre-read failure retains that one fixture-owned FIFO; close it here.
+        for number in set(os.listdir('/proc/self/fd'))-before:
+            try:os.close(int(number))
+            except OSError:pass

@@ -704,6 +704,9 @@ elif len(sys.argv)>3 and sys.argv[3].startswith('04j_'):
 elif len(sys.argv)>3 and sys.argv[3]=='04k_age':
  from tests.db_audit_coordinator.test_qio226_r4_native import install_04K_worker_clock
  install_04K_worker_clock()
+elif len(sys.argv)>3 and sys.argv[3]=='04k_r1':
+ from tests.db_audit_coordinator.test_qio226_r4_native import install_04K_worker_clock
+ install_04K_worker_clock()
 try:os._exit(worker.execute(int(sys.argv[1])))
 except BaseException:traceback.print_exc();os._exit(3)
 '''
@@ -868,7 +871,7 @@ if scenario.startswith('04f_'):
   if filename=='file:/source/input.sqlite3?mode=ro':kwargs['factory']=CallbackSource
   return native_connect(filename,*args,**kwargs)
  helper.sqlite3.connect=callback_connect
-if scenario=='04k_age':
+if scenario in {'04k_age','04k_r1'}:
  from tests.db_audit_coordinator.test_qio226_r4_native import install_04K_owner_clock
  install_04K_owner_clock(helper)
 if len(sys.argv)>3 and sys.argv[3]=='helper_death':
@@ -1835,3 +1838,62 @@ def test_04K_aged_root_owner_worker_Backup_T3_IPC_naturally_complete_with_real_r
     assert [e['kind'] for e in waits]==['snapshot','release']*3
     assert all(e['deadline'] is None for e in waits)
     record_property('04k_age_native',json.dumps(dict(result=result,backup=backup,t3=t3,waits=waits,roots=roots),sort_keys=True))
+
+
+def install_04K_R1_late_join():
+    """QA proxy around existing threads: simulate >1s late scheduling, no sleep.
+
+    Unbounded join joins the genuine thread to actual termination. No new
+    threads or synthetic Child.wait/reap/cleanup authorization are introduced.
+    """
+    from app.db_audit_coordinator.r4_release import Session
+    watch=Session.watch
+    class LateThread:
+        def __init__(self,thread):self.thread=thread;self.pending=True
+        def join(self,timeout=None):
+            if timeout is not None:return
+            self.thread.join();self.pending=False
+            assert not self.thread.is_alive()
+            print(json.dumps(dict(event='04k_r1_actual_join',simulated_delay_s=2,
+                timeout=None,actual_terminated=True)),file=sys.stderr,flush=True)
+        def is_alive(self):return self.pending or self.thread.is_alive()
+    def watching(self,*args):
+        count=len(self.threads);watch(self,*args)
+        self.threads[count:]=[LateThread(thread) for thread in self.threads[count:]]
+    Session.watch=watching
+
+
+def pipeline_04K_R1_driver():
+    code=pipeline_04K_driver()
+    old='from tests.db_audit_coordinator.test_qio226_r4_native import WORKER_DRIVER,OWNER_DRIVER'
+    assert code.count(old)==1
+    return code.replace(old,old+'\nfrom tests.db_audit_coordinator.test_qio226_r4_native import install_04K_R1_late_join\ninstall_04K_R1_late_join()',1)
+
+
+@NATIVE
+def test_04K_R1_delayed_real_reader_reaper_termination_and_aged_ABC_release(record_property):
+    import inspect
+    source=inspect.getsource(run_04I_readable_pipeline)
+    assert source.count('pipeline_04I_driver()')==1
+    source=source.replace('def run_04I_readable_pipeline(', 'def qualified_R1_pipeline(',1)
+    source=source.replace('pipeline_04I_driver()', 'pipeline_04K_R1_driver()',1)
+    namespace=dict(globals());exec(source,namespace)
+    process,blobs=namespace['qualified_R1_pipeline'](ROOT,'04k_r1')
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout)
+    assert result['states']==['completed']*3 and result['source_hashes_unchanged']
+    assert result['uids']==[0,995,1003] and len(blobs)>0
+    for proof in result['proofs']:
+        assert proof['helper_reaped'] and proof['gatekeeper_reaped'] and proof['cleanup_complete']
+        assert proof['shmem_zero'] and proof['empty_observations']==2
+        assert proof['source_pre_sha256']==proof['source_post_sha256']
+        assert proof['memory_observations']['swap_current']==0
+    events=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{')]
+    joins=[e for e in events if e.get('event')=='04k_r1_actual_join']
+    waits=[e for e in events if e.get('event')=='04k_worker_wait']
+    assert len(joins)==12 and all(e['actual_terminated'] and e['timeout'] is None for e in joins)
+    assert [e['kind'] for e in waits]==['snapshot','release']*3
+    assert [e['age'] for e in waits]==[1201,5401]*3
+    assert len([e for e in events if e.get('event')=='04k_owner_backup' and e['age']==5401])==3
+    assert len([e for e in events if e.get('event')=='04k_worker_T3' and e['age']==5401])==3
+    record_property('04k_r1_native_join_release',json.dumps(dict(result=result,joins=joins,waits=waits),sort_keys=True))

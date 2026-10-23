@@ -221,7 +221,7 @@ def execute_r4(data,job,profile,policy):
     received=None
     try:
         verify_origin(profile);gate.acquire();guard()
-        r4_ipc.send(channel,'gate_ready',binding,dict(lock_fd=gate.fd,namespace=namespace))
+        r4_ipc.send(channel,'gate_ready',binding,dict(lock_fd=gate.fd,namespace=namespace),seconds=None)
         kind,payload,received=receive(snapshot=True)
         outcome=dict(result='incomplete',reason_code='canceled',snapshot_metadata=None)
         trace=live_sqlite.T3Trace()
@@ -241,11 +241,11 @@ def execute_r4(data,job,profile,policy):
                         dict(result='incomplete',reason_code='preflight_denied',snapshot_metadata=None))
         else:require(kind=='cancel' and payload=={} and received is None,'unauthorized')
         outcome['t3_diagnostic']=trace.document()
-        guard(cancel=False);r4_ipc.send(channel,'t3_done',binding,outcome)
+        guard(cancel=False);r4_ipc.send(channel,'t3_done',binding,outcome,seconds=None)
         # No implicit gate close on a nominal result. Root must attest cleanup.
         kind,payload,fd=receive()
         require(kind=='release' and payload=={} and fd is None,'orphan_hold')
-        gate.check();r4_ipc.send(channel,'released',binding,{})
+        gate.check();r4_ipc.send(channel,'released',binding,{},seconds=None)
         return 0 if outcome['result']=='passed' else 2
     finally:
         if received is not None:

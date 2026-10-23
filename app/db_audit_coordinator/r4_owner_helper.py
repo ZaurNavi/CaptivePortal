@@ -102,7 +102,7 @@ def execute(document,trace):
     require(receipt('cgroup').strip()=='0::'+document['leaf'] and not Path('/proc').exists(),'unauthorized')
     for fd in receipts.values():os.close(fd)
     trace.mark('credentials_verified');trace.mark('owner_ready')
-    r4_ipc.send(channel,'owner_ready',document['binding'],dict(pid=os.getpid()),seconds=1)
+    r4_ipc.send(channel,'owner_ready',document['binding'],dict(pid=os.getpid()),seconds=None)
     trace.mark('owner_ready_sent');trace.mark('begin_wait')
     kind,payload,fd=r4_ipc.receive(channel,document['binding'],0,document['parent_pid'],seconds=None)
     require(kind=='begin' and payload=={} and fd is None,'unauthorized')
@@ -111,7 +111,7 @@ def execute(document,trace):
     try:
         def guard():
             if select.select([channel],[],[],0)[0]:
-                kind,payload,fd=r4_ipc.receive(channel,document['binding'],0,document['parent_pid'],seconds=1)
+                kind,payload,fd=r4_ipc.receive(channel,document['binding'],0,document['parent_pid'],seconds=None)
                 require(kind=='cancel' and payload=={} and fd is None,'unauthorized')
                 trace.stop_reason='canceled'
                 raise c.CoordinatorError('canceled')
@@ -150,7 +150,7 @@ def execute(document,trace):
         trace.mark('backup_complete');trace.mark('connections_close')
         destination.close();destination=None;source.close();source=None
         trace.mark('owner_done')
-        r4_ipc.send(channel,'owner_done',document['binding'],dict(complete=True,page_size=size),seconds=1)
+        r4_ipc.send(channel,'owner_done',document['binding'],dict(complete=True,page_size=size),seconds=None)
         trace.mark('owner_done_sent')
         return 0
     except Exception as error:

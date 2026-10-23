@@ -1,6 +1,24 @@
 # QIO226 / 04D R4 — pinned T3 directory capability and first-HOLD attribution
 
-## 04K — current R4 LAB execution has NO elapsed-job-time cutoff
+## 04K-R1 — active R4 duration fixes; pre-admission bootstrap HOLD
+
+Authority: [04K-R1 final correction](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6362904919).
+R4 sends, including cancel, explicitly use seconds=None; owner cancel receive
+also uses None after readiness. After authenticated released + exact child reap,
+root closes IPC endpoints and joins existing reader/reaper threads to actual
+termination, never a timed join false-HOLD. Shared IPC defaults stay unchanged.
+
+R4_BOOTSTRAP_300S=UNRESOLVED_PRE_ADMISSION. Before authorize() reads its FIFO,
+both methods use the same root command with only auth_fd. The R4 discriminator,
+sealed profile/claim FD numbers and parent binding are inside the unread message;
+an unverified r4_fd must not select an unlimited path. Controlled fake-clock/
+real-pipe proof resumes at301s and rejects before decoding for either possible
+method. A trusted pre-auth discriminator requires changing the bootstrap
+interface (LiveCoordinator.command / Session.start / authorize); no such change
+is made without scope approval. Do not claim ALL LAB LIMITS REMOVED or release
+original A/B/C. TechLead disposition required; keep legacy bootstrap finite.
+
+## 04K — active R4 execution has NO elapsed-job-time cutoff
 
 Authority: [Owner/TechLead TASK-COORD-04K](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6362416420).
 Direct parent: accepted04J `e691c1e8ded3106cfa14d0302f58208796017c1a`,
@@ -17,8 +35,9 @@ the existing root selector wait for actual peer/event/reaper completion. There
 is no replacement time cap, timeout toggle or polling scheduler. Elapsed
 durations are observations. Legacy `attempt_seconds` and durable
 `resource_envelope.timeout_seconds` stay byte/schema compatible but are NOT
-effective R4 experiment limits. Finite per-send mechanics (1s) and the bounded
-diagnostic reap observation (.25s) remain; neither measures total job age.
+effective R4 experiment limits. The bounded diagnostic reap observation (.25s)
+remains; it does not measure total job age. R4 per-send timeouts and timed
+positive joins are removed by04K-R1 above; pre-auth bootstrap is unresolved.
 
 All gate/source/FD/PID/membership and cgroup memory/swap/ancestor checks remain,
 including the once-per-guard fresh full hierarchy. Operator-scoped cancel,

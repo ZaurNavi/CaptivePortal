@@ -492,7 +492,7 @@ class Session:
         from . import r4_ipc
         self.canceled=True
         if 'owner' in self.channels:
-            try:r4_ipc.send(self.channels['owner'],'cancel',self.binding,{})
+            try:r4_ipc.send(self.channels['owner'],'cancel',self.binding,{},seconds=None)
             except Exception:pass
         # While the helper is active the worker must keep waiting, not report
         # completion before positive helper reap. The pipe cancels an active T3.
@@ -537,7 +537,7 @@ class Session:
                     require(name=='owner' and self.phase=='owner' and payload['pid']==self.children['owner'].pid,'unauthorized')
                     require(set(self.leaf.samples()[-1].procs)=={os.getpid(),*(child.pid for child in self.children.values())},'unauthorized')
                     self.guard();self.owner_ready=True
-                    r4_ipc.send(self.channels['owner'],'begin',self.binding,{})
+                    r4_ipc.send(self.channels['owner'],'begin',self.binding,{},seconds=None)
                 elif kind=='owner_done':
                     c.closed(payload,{'complete','page_size'})
                     require(name=='owner' and self.owner_ready and payload['complete'] is True,'unauthorized')
@@ -578,11 +578,11 @@ class Session:
                     self.final_fd,folder=r4_snapshot.pin_final(self.ram,self.image_fd,self.profile.worker_gid)
                     self.at('snapshot_dirfd','send')
                     r4_ipc.send(self.channels['worker'],'snapshot',self.binding,
-                        dict(image=self.image,directory=folder),fds=(self.image_fd,self.final_fd))
+                        dict(image=self.image,directory=folder),fds=(self.image_fd,self.final_fd),seconds=None)
                     self.phase='validating'
                 else:
                     self.failure_reason='canceled' if self.canceled else 'worker_crashed' if code!=0 else 'preflight_denied'
-                    r4_ipc.send(self.channels['worker'],'cancel',self.binding,{})
+                    r4_ipc.send(self.channels['worker'],'cancel',self.binding,{},seconds=None)
                     self.phase='validating'
             if self.decision is not None and self.phase=='validating':
                 self.at('release_cleanup','source_recheck')
@@ -608,13 +608,15 @@ class Session:
                 # Worker still owns its sealed claim/profile memfds (also
                 # charged shmem). Zero belongs AFTER its positive final reap,
                 # not before the authenticated permission to release the gate.
-                self.phase='release';r4_ipc.send(self.channels['worker'],'release',self.binding,{})
+                self.phase='release';r4_ipc.send(self.channels['worker'],'release',self.binding,{},seconds=None)
             worker=self.children['worker']
             if self.released and worker.waited:
                 self.at('worker_reap','reap')
                 require(worker.reaped()==(0 if self.decision['result']=='passed' else 2),'orphan_hold')
                 for channel in self.channels.values():channel.close()
-                for thread in self.threads:thread.join(timeout=1);require(not thread.is_alive(),'orphan_hold')
+                # Both exact peers have exited; close endpoints, then observe
+                # actual reader/reaper termination, never infer failure by age.
+                for thread in self.threads:thread.join()
                 self.at('release_cleanup','namespace_restore');self.namespace.restore()
                 self.at('release_cleanup','leaf_exit');self.residence.leave()
                 self.at('release_cleanup','empty')
