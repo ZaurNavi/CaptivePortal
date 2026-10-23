@@ -72,3 +72,23 @@ def validate_v2(model):
     require(set(model["summary"]["application_health"]) == STATES)
     require(sum(model["summary"]["application_health"].values()) == 9)
     return model
+
+
+def validate_v3(model):
+    """V2's entire closed privacy contract plus exactly one bounded workload."""
+    from .operations_service import OperationsError
+    if type(model) is not dict or model.get("api_version") != "admin.operations.db-services.v3":
+        raise OperationsError()
+    workload = model.get("workload")
+    if type(workload) is not dict or set(workload) != {"network_metadata_projection"}:
+        raise OperationsError()
+    pending = workload["network_metadata_projection"]
+    if type(pending) is not dict or set(pending) != {"pending_attribution_count"}:
+        raise OperationsError()
+    count = pending["pending_attribution_count"]
+    if count is not None and (type(count) is not int or not 0 <= count <= 2**53-1):
+        raise OperationsError()
+    v2 = {key: value for key, value in model.items() if key != "workload"}
+    v2["api_version"] = "admin.operations.db-services.v2"
+    validate_v2(v2)
+    return model

@@ -42,6 +42,7 @@ def test_real_500_row_reconciliation_one_trust_probe(tmp_path, monkeypatch, reco
         monkeypatch.setattr(adapter, "_trust_probe", counted_probe)
         monkeypatch.setattr(adapter.reader, "get_device_by_mac", counted_point)
         value.service.reconcile()
+        assert value.service._operations_registry[0] == 'ready'
         assert len(probes) == 1
         assert len(authority_calls) == 500 and set(authority_calls) == set(macs)
         assert all(value.repo.binding(SITE, mac)["binding_state"] == "authoritative" for mac in macs)
@@ -130,5 +131,33 @@ def test_stop_between_registry_points_does_not_commit_reconciliation(tmp_path, m
         value.service.reconcile()
         assert len(calls) == 1
         assert value.repo.connection.total_changes == before
+        assert value.service._operations_registry is None
     finally:
         value.repo.close()
+
+
+@pytest.mark.parametrize('case',['ready','no-device','partial','unavailable','exception','cancelled','empty'])
+def test_readiness_marker_only_observes_existing_complete_nonempty_batch(tmp_path,case):
+    value=stack(tmp_path)
+    try:
+        service=value.service;service.monotonic=lambda:123
+        prepared=service.prepare(source_record())
+        calls=[]
+        def evaluate(macs,*,stop_event):
+            requested=tuple(macs);calls.append(requested)
+            if case=='exception':raise OSError('PRIVATE')
+            if case=='cancelled':stop_event.set()
+            state='registry_unavailable' if case=='unavailable' else 'authoritative' if case=='ready' else 'not_yet_registry_resolved'
+            result={mac:RegistryEvaluation(state) for mac in requested}
+            if case=='partial':result.pop(next(iter(result)))
+            return result
+        value.registry.evaluate_many=evaluate
+        if case=='exception':
+            with pytest.raises(OSError):service._evaluations([prepared])
+        elif case=='partial':
+            with pytest.raises(KeyError):service._evaluations([prepared])
+        else:service._evaluations([] if case=='empty' else [prepared])
+        assert len(calls)==1
+        assert service._operations_registry==(
+            ('unavailable',123) if case=='unavailable' else ('ready',123) if case in {'ready','no-device'} else None)
+    finally:value.repo.close()

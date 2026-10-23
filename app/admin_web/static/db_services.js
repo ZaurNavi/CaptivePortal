@@ -73,10 +73,13 @@
         owners.some(s=>s.operational_state === "failed") ||
         row.file_presence === "absent" && row.expected_mode === "expected" && row.operational_state === "unavailable" ||
         v && lastResult(row) === "failed" && v.binding === "matched") return "failed";
-    if (row.operational_state === "degraded" || owners.some(s=>s.operational_state === "degraded" || ["degraded","unavailable"].includes(s.application_health))) return "degraded";
+    const ni02 = row.id === "network_metadata_projection";
+    if (row.operational_state === "degraded" || owners.some(s=>s.operational_state === "degraded" ||
+        !ni02 && ["degraded","unavailable"].includes(s.application_health))) return "degraded";
     return row.expected_mode === "expected" && row.file_presence === "present" && row.operational_state === "present_unverified" &&
       row.metadata_evidence?.state === "fresh" &&
-      owner?.operational_state === "running" && v && lastResult(row) === "passed" && v.binding === "matched" ? "operating" : "unknown";
+      owner?.operational_state === "running" && v && lastResult(row) === "passed" && v.binding === "matched" &&
+      (!ni02 || v.status === "passed" && v.freshness === "current_report") ? "operating" : "unknown";
   }
   function databaseBadge(row, model) {
     const state=databaseCondition(row,model), node=badge(state,"condition");
@@ -89,6 +92,10 @@
     const node = element("div", null, "ops-field");
     node.append(element("span", label, "ops-field-label"), element("span", value == null ? "—" : value, mono ? "mono" : ""));
     return node;
+  }
+  function pendingLabel(model) {
+    const count = model.workload?.network_metadata_projection?.pending_attribution_count;
+    return `Pending attribution: ${model.sample_status === "fresh" && Number.isSafeInteger(count) && count >= 0 ? count : "Unknown"}`;
   }
   function details(entries) {
     const node = element("details", null, "ops-details");
@@ -247,6 +254,7 @@
             const row = serviceRows.get(item.catalog_ref);
             const appBadge=badge(row.application_health,"application");appBadge.textContent=`App: ${display(row.application_health)}`;
             node.append(badge(row.operational_state,"service"),appBadge);
+            if(row.id==="network_metadata_projection") node.append(element("small",pendingLabel(model)));
             if(row.application_health_evidence?.reason==="backfilling_incomplete_coverage")
               node.append(element("small",healthReasons.backfilling_incomplete_coverage));
             if(phaseBNotice(row))node.append(element("small",phaseBNotice(row)));
@@ -302,7 +310,7 @@
   }
   function render(model) {
     root.dataset.outdated = model.sample_status === "stale" ? "true" : "false";
-    const summary = model.summary, v2 = model.api_version === "admin.operations.db-services.v2";
+    const summary = model.summary, v2 = ["admin.operations.db-services.v2","admin.operations.db-services.v3"].includes(model.api_version);
     // V1 already provides each app-health state. Keep these axes separate from
     // backend process/store status counts; never add overlapping unknowns.
     const health = {healthy:0, degraded:0, unavailable:0, unknown:0, stale:0};
@@ -331,6 +339,7 @@
       identity.append(element("h3", row.label), element("p", row.role), element("span", row.unit, "mono"));
       const states = element("div", null, "ops-state-group");
       states.append(element("span", "Process"), badge(row.operational_state, "service"), element("span", "Application health"), badge(row.application_health, "application"));
+      if(row.id==="network_metadata_projection") states.append(element("span",pendingLabel(model)));
       if(row.application_health_evidence?.reason==="backfilling_incomplete_coverage")
         states.append(element("span",healthReasons.backfilling_incomplete_coverage));
       if(phaseBNotice(row))states.append(element("span",phaseBNotice(row)));
@@ -382,7 +391,8 @@
     updated.textContent = Number.isFinite(age) ? `Updated ${age} sec ago` : "Sample time unavailable";
   }
   let timer = null, inFlight = false, controller = null, disposed = false, last = null;
-  let useV2 = root.dataset.apiV2 === "/admin/api/v2/operations/db-services";
+  let apiVersion = root.dataset.apiV3 === "/admin/api/v3/operations/db-services" ? 3 :
+    root.dataset.apiV2 === "/admin/api/v2/operations/db-services" ? 2 : 1;
   const checkScopes = {schema_version:"schema version",schema_signature:"schema structure",quick_check:"SQLite quick_check",
     foreign_key_check:"foreign key check",integrity_check:"full SQLite integrity_check"};
   const checkOwners = {portal_counter:"captive-portal.service",public_traffic:"captive-portal.service",visitor_registry:"captive-portal.service",
@@ -475,6 +485,13 @@
       ["fresh","stale","unknown"].includes(row.metadata_evidence.state) &&
       (row.journal_bytes === null || row.id === "sensor_spool" && Number.isSafeInteger(row.journal_bytes) && row.journal_bytes >= 0));
   }
+  function validV3(model) {
+    const keys=(value,expected)=>value && typeof value==="object" && !Array.isArray(value) && Object.keys(value).sort().join(",")===expected;
+    if(!keys(model,"api_version,databases,freshness_seconds,generated_at_utc,partial_failures,request_id,sample_status,sampling_completed_at_utc,sampling_started_at_utc,scope,services,snapshot_state,summary,topology,workload") ||
+        !keys(model.workload,"network_metadata_projection") || !keys(model.workload.network_metadata_projection,"pending_attribution_count")) return false;
+    const count=model.workload.network_metadata_projection.pending_attribution_count;
+    return (count===null || Number.isSafeInteger(count) && count>=0) && validV2(model);
+  }
   function schedule() {
     if (timer !== null) clearTimeout(timer);
     timer = null;
@@ -489,12 +506,12 @@
     refresh.disabled = true;
     controller = new AbortController();
     try {
-      let response = await fetchSnapshot(useV2 ? root.dataset.apiV2 : root.dataset.apiBase);
-      if (useV2 && response.status === 404) {
-        // Explicit compatibility fallback: unsupported v2 never sampled; do
-        // not probe it again or turn source/authorization failures into green.
-        useV2 = false;
-        response = await fetchSnapshot(root.dataset.apiBase);
+      const url=()=>apiVersion===3 ? root.dataset.apiV3 : apiVersion===2 ? root.dataset.apiV2 : root.dataset.apiBase;
+      let response = await fetchSnapshot(url());
+      while (apiVersion>1 && response.status === 404) {
+        // Sticky negotiation ONLY on unsupported version. Never hide faults.
+        apiVersion-=1;
+        response = await fetchSnapshot(url());
       }
       const model = await response.json();
       if (disposed) return;
@@ -504,9 +521,10 @@
         } else { title.textContent = "Unavailable"; }
         return;
       }
-      if (model.api_version !== (useV2 ? "admin.operations.db-services.v2" : "admin.operations.db-services.v1") || model.scope !== "global" || !model.summary ||
+      if (model.api_version !== `admin.operations.db-services.v${apiVersion}` || model.scope !== "global" || !model.summary ||
           !Array.isArray(model.services) || model.services.length !== 9 || !Array.isArray(model.databases) || model.databases.length !== 17 ||
-          !Array.isArray(model.partial_failures) || model.partial_failures.length > 32 || !validTopology(model) || (useV2 && !validV2(model))) throw new Error("invalid_snapshot");
+          !Array.isArray(model.partial_failures) || model.partial_failures.length > 32 || !validTopology(model) ||
+          (apiVersion===3 ? !validV3(model) : apiVersion===2 && !validV2(model))) throw new Error("invalid_snapshot");
       render(model);
       last = model;
     } catch (_error) {

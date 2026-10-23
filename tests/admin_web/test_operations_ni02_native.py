@@ -29,7 +29,7 @@ sqlite3.connect=blocked;os.fsync=os.fdatasync=blocked
 def io():
  with open('/proc/self/io') as f:return {k:int(v) for k,v in (line.split(':',1) for line in f)}
 count=2143 if sys.argv[2]=='backlog' else 0
-health=ni02_health('attribution_unavailable' if count else 'usable',dict.fromkeys(DEPENDENCIES[NI02_UNIT],True),count)
+health=ni02_health('attribution_unavailable' if count else 'usable',dict.fromkeys(DEPENDENCIES[NI02_UNIT],True),count,native_reason='pending_attribution' if count else None)
 at=stamp(datetime.now(timezone.utc))
 p=HealthPublisher(enabled=True,channel=lambda:Channel(os.getuid(),sys.argv[1]))
 before=io();wall=time.monotonic();cpu=time.process_time()
@@ -42,7 +42,7 @@ sys.stdin.readline()
 
 
 @native
-@pytest.mark.parametrize('case',['healthy','backlog','missing','stale','malformed'])
+@pytest.mark.parametrize('case',['healthy','backlog','missing','stale','malformed','pid','boot','start_ticks'])
 def test_ni02_shared_UID_report_shape_freshness_and_bounded_IO(case,record_property):
     folder=Path(tempfile.mkdtemp(prefix='issue295-wp3-ni02-',dir='/run'));process=None
     try:
@@ -63,11 +63,18 @@ def test_ni02_shared_UID_report_shape_freshness_and_bounded_IO(case,record_prope
         now=m.parse_stamp(value['sample_time_utc']);boot=value['sample_boottime_ns']
         if case=='missing':path.unlink()
         elif case=='malformed':path.write_bytes(b'{"schema_version":"PRIVATE_CANARY"}')
+        elif case in {'pid','boot','start_ticks'}:
+            if case=='pid':value['producer']['pid']+=1
+            elif case=='boot':value['producer']['boot_id']='00000000-0000-4000-8000-000000000001'
+            else:value['producer']['start_ticks']+=1
+            path.write_bytes(json.dumps(value).encode())
         elif case=='stale':now+=timedelta(seconds=181);boot+=181_000_000_000
         reader=h.HealthReader(channel=lambda:h.Channel(PORTAL,str(child)),boottime=lambda:boot)
         result=reader.read(service,now,deadline=time.monotonic()+1)
-        assert result['status']==('unknown' if case in {'missing','malformed'} else 'stale' if case=='stale' else 'fresh')
-        if case in {'healthy','backlog'}:assert result['health']['state']==('degraded' if case=='backlog' else 'healthy')
+        assert result['status']==('unknown' if case in {'missing','malformed','pid','boot','start_ticks'} else 'stale' if case=='stale' else 'fresh')
+        if case in {'healthy','backlog'}:
+            assert result['health']['state']=='healthy'
+            assert result['health']['pending_count']==(2143 if case=='backlog' else 0)
         assert 'PRIVATE_CANARY' not in json.dumps(result)
         record_property('ni02_shared_uid_informational',json.dumps(dict(case=case,accounting=accounting,
             report_bytes=len(json.dumps(value).encode()),provenance=value['provenance'],result=result),sort_keys=True))
