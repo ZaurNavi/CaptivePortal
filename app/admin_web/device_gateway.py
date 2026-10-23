@@ -13,6 +13,7 @@ from app.analytics.source_gateway import (
     QueryDeadline,
 )
 from app.analytics.validation import parse_utc
+from app.visit_lifecycle.models import compatible_visit_schema_version
 
 
 _REGISTRY_ALIAS = "registry_db"
@@ -709,11 +710,11 @@ class AdminDeviceReadGateway:
                 ).fetchone()[0]
             ) != 1:
                 raise AdminDeviceSourceError("device source unavailable")
-            if int(
+            if not compatible_visit_schema_version(
                 connection.execute(
                     f"PRAGMA {_VISIT_ALIAS}.user_version"
                 ).fetchone()[0]
-            ) != 2:
+            ):
                 raise AdminDeviceSourceError("device source unavailable")
             connection.set_progress_handler(
                 lambda: 1 if deadline.expired() else 0,
@@ -763,7 +764,11 @@ class AdminDeviceReadGateway:
                         f"PRAGMA {alias}.user_version"
                     ).fetchone()[0]
                 )
-                if actual != expected:
+                admitted = (
+                    compatible_visit_schema_version(actual)
+                    if alias == _VISIT_ALIAS else actual == expected
+                )
+                if not admitted:
                     raise AdminDeviceSourceError("device source unavailable")
             connection.set_progress_handler(
                 lambda: 1 if deadline.expired() else 0,

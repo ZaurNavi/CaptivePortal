@@ -685,3 +685,137 @@ def test_device_list_context_addition_preserves_old_list_and_detail_semantics(tm
     assert [item.device_id for item in listed.items] == ["device"]
     assert detailed is not None
     assert detailed.latest_snapshot["hostname"] == "host"
+
+
+def _native_visit_databases(tmp_path, version=6):
+    """Real project-native Visit DDL, not a relabelled V2/fake PRAGMA reader."""
+    from app.visit_lifecycle import repository
+    legacy = tmp_path / "registry-fixture"
+    legacy.mkdir()
+    registry, _unused_legacy = _databases(legacy)
+    visits = tmp_path / "native-visits.sqlite3"
+    with sqlite3.connect(visits) as connection:
+        connection.executescript(getattr(repository, f"_schema_sql_v{version}")())
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == version
+        assert repository._schema_signature(connection) == repository.expected_visit_signature(version)
+    return registry, visits
+
+
+def _native_visit(visits, *, device_id, mac, started_at, site_id=SITE):
+    import uuid
+    with sqlite3.connect(visits) as connection:
+        connection.execute(
+            """INSERT INTO visits(visit_id, site_id, client_mac, device_id,
+                start_auth_session_id, start_auth_run_number, start_final_reason,
+                started_at, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 1, 'authorized', ?, 'open', ?, ?)""",
+            (str(uuid.uuid4()), site_id, mac, device_id, str(uuid.uuid4()),
+             started_at, started_at, started_at),
+        )
+
+
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6])
+@pytest.mark.parametrize("opener", ["_open", "_open_context"])
+def test_native_visit_versions_admitted_by_both_device_paths(tmp_path, version, opener):
+    paths = _native_visit_databases(tmp_path, version)
+    gateway = AdminDeviceReadGateway(*paths, _current_database(tmp_path))
+    connection = getattr(gateway, opener)(_deadline())
+    try:
+        assert connection.in_transaction
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+        assert connection.execute("PRAGMA visit_db.user_version").fetchone()[0] == version
+        assert all("mode=ro" in gateway._read_uri(path) for path in paths)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("DELETE FROM visit_db.visits")
+    finally:
+        connection.set_progress_handler(None, 0)
+        connection.rollback()
+        connection.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("version", [0, 1, 7, 99])
+@pytest.mark.parametrize("opener", ["_open", "_open_context"])
+def test_unsupported_visit_schema_fails_closed_in_both_device_paths(tmp_path, version, opener):
+    paths = _databases(tmp_path)
+    # Deliberately unsupported disposable metadata; never migrate/relabel a
+    # production database, and never use this as evidence of V6 compatibility.
+    with sqlite3.connect(paths[1]) as connection:
+        connection.execute(f"PRAGMA user_version={version}")
+    gateway = AdminDeviceReadGateway(*paths, _current_database(tmp_path))
+    with pytest.raises(AdminDeviceSourceError, match="source unavailable"):
+        getattr(gateway, opener)(_deadline())
+
+
+@pytest.mark.parametrize("source", ["registry", "current"])
+@pytest.mark.parametrize("version", [0, 2, 6, 7])
+def test_native_V6_does_not_weaken_other_source_versions(tmp_path, source, version):
+    paths = _native_visit_databases(tmp_path)
+    current = _current_database(tmp_path)
+    with sqlite3.connect(paths[0] if source == "registry" else current) as connection:
+        connection.execute(f"PRAGMA user_version={version}")
+    gateway = AdminDeviceReadGateway(*paths, current)
+    with pytest.raises(AdminDeviceSourceError):
+        gateway._open_context(_deadline())
+    if source == "registry":
+        with pytest.raises(AdminDeviceSourceError):
+            gateway._open(_deadline())
+
+
+def test_native_V6_real_device_DTOs_context_counts_identity_deadline_and_RO(tmp_path):
+    import hashlib
+    paths = _native_visit_databases(tmp_path)
+    current = _current_database(tmp_path)
+    registry, visits = paths
+    for device, mac, when in [
+        ("old-online", "00:00:00:00:00:01", "2026-01-01T01:00:00.000Z"),
+        ("new-offline", "00:00:00:00:00:02", "2026-01-01T03:00:00.000Z"),
+    ]:
+        _snapshot(registry, device_id=device, mac=mac, captured_at=when, hostname=device)
+        _native_visit(visits, device_id=device, mac=mac, started_at=when)
+    _snapshot(registry, device_id="old-online", mac="00:00:00:00:00:01",
+              captured_at="2026-01-01T01:30:00.000Z", suffix="second", hostname="old-online")
+    _snapshot(registry, device_id="foreign", mac="00:00:00:00:00:03",
+              captured_at="2026-01-01T04:00:00.000Z", site_id=OTHER_SITE)
+    _native_visit(visits, device_id="foreign", mac="00:00:00:00:00:03",
+                  started_at="2026-01-01T04:00:00.000Z", site_id=OTHER_SITE)
+    with sqlite3.connect(current) as connection:
+        connection.execute("INSERT INTO current_client_state VALUES ('cycle-1', ?, ?)",
+                           (SITE, "00:00:00:00:00:01"))
+        connection.execute("INSERT INTO current_client_state VALUES ('cycle-1', ?, ?)",
+                           (SITE, "00:00:00:00:00:99"))  # Current-only is not a Device.
+    hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (*paths, current)}
+    gateway = AdminDeviceReadGateway(*paths, current)
+    listed = gateway.list_devices(site_id=SITE, limit=1, deadline=_deadline())
+    assert [row.device_id for row in listed.items] == ["new-offline"] and listed.has_more
+    last = listed.items[-1]
+    next_page = gateway.list_devices(site_id=SITE, limit=1, deadline=_deadline(),
+                                    cursor=(last.site_last_seen_at, last.device_id))
+    assert [row.device_id for row in next_page.items] == ["old-online"] and not next_page.has_more
+    assert next_page.items[0].site_snapshot_count == 2 and next_page.items[0].site_visit_count == 1
+    summary = gateway.device_inventory_summary(site_id=SITE, today_start_utc="2026-01-01T00:00:00.000Z",
+                 evaluated_at_utc="2026-01-01T05:00:00.000Z", deadline=_deadline())
+    assert (summary.total_devices, summary.new_devices_today) == (2, 2)
+    detail = gateway.get_device(site_id=SITE, device_id="old-online", deadline=_deadline())
+    assert detail.canonical_mac == "00:00:00:00:00:01" and detail.latest_snapshot["hostname"] == "old-online"
+    assert gateway.get_device(site_id=SITE, device_id="foreign", deadline=_deadline()) is None
+    unknown = gateway.list_devices_context(site_id=SITE, limit=10, deadline=_deadline(),
+        overlay_mode="unknown", current_cycle_id=None, source_scope_hash=None)
+    assert [(row.device_id, row.current_presence) for row in unknown.items] == [
+        ("new-offline", "unknown"), ("old-online", "unknown")]
+    trusted = gateway.list_devices_context(site_id=SITE, limit=1, deadline=_deadline(),
+        overlay_mode="trusted", current_cycle_id="cycle-1", source_scope_hash="1" * 64)
+    assert [(row.device_id, row.current_presence) for row in trusted.items] == [("old-online", "online")]
+    row = trusted.items[-1]
+    rest = gateway.list_devices_context(site_id=SITE, limit=1, deadline=_deadline(),
+        overlay_mode="trusted", current_cycle_id="cycle-1", source_scope_hash="1" * 64,
+        cursor=(row.online_rank, row.site_last_seen_at, row.device_id))
+    assert [(row.device_id, row.current_presence) for row in rest.items] == [("new-offline", "offline")]
+    with pytest.raises(AnalyticsQueryDeadlineExceeded):
+        gateway.list_devices(site_id=SITE, limit=10, deadline=QueryDeadline.after(0))
+    assert hashes == {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in hashes}
+    _native_visit(visits, device_id="old-online", mac="00:00:00:00:00:08",
+                  started_at="2026-01-01T05:00:00.000Z")
+    with pytest.raises(AdminDeviceIntegrityError):
+        gateway.list_devices(site_id=SITE, limit=10, deadline=_deadline())
