@@ -59,7 +59,8 @@ def test_io_hotpath_fault_flush_observation_health_checkpoint_atomicity(tmp_path
 @pytest.mark.parametrize("category", ["source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
 @pytest.mark.parametrize("has_prefix", [False, True])
 @requires_posix_io
-def test_final_conflict_health_owns_new_prefix_and_stops_evaluation(tmp_path, monkeypatch, category, has_prefix):
+@pytest.mark.parametrize('expired', [False, True])
+def test_final_conflict_health_owns_new_prefix_and_stops_evaluation(tmp_path, monkeypatch, category, has_prefix, expired):
     from . import record, source_event
     from app.network_metadata.validation import ni_format_utc
     from app.network_metadata.retention import RetentionPolicy
@@ -85,7 +86,7 @@ def test_final_conflict_health_owns_new_prefix_and_stops_evaluation(tmp_path, mo
             state.repo.connection.execute("UPDATE network_metadata_checkpoint SET committed_byte_offset=0,continuity_anchor_start_offset=0,continuity_anchor_length=0,continuity_anchor_sha256=NULL")
             state.repo.connection.execute("UPDATE network_metadata_source_generations SET committed_byte_offset=0")
         # Due touched-identity retention must not erase the pre-decided disposition.
-        state.clock.advance(days=15)
+        state.clock.advance(days=2 if expired else 0)
         expected_offsets = [first.start, second.start] if has_prefix else [first.start]
         identities = []
         identity = state.repo.identity_outcome
@@ -101,24 +102,27 @@ def test_final_conflict_health_owns_new_prefix_and_stops_evaluation(tmp_path, mo
         monkeypatch.setattr(RetentionPolicy, "expire_touched_identity", retain)
         result = state.repo.ingest_batch([first, second, ignored], state.run, state.health, state.anchor)
         generation, checkpoint = state.repo.load_active()
-        assert result == dict(committed=int(has_prefix), duplicates=0, blocked=category)
+        assert result == dict(committed=int(has_prefix and not expired), duplicates=0, blocked=category)
         assert identities == expected_offsets
         assert generation.processing_state == "blocked" and generation.blocked_reason_code == category
         final_offset = first.end if has_prefix else first.start
         assert checkpoint.committed_byte_offset == generation.committed_byte_offset == generation.blocked_record_start_byte_offset == final_offset
-        assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 2
+        assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == (int(not has_prefix) if expired else 2)
         latest = state.repo.latest_health()
         assert latest["health_id"] != original_ref
         assert latest["metadata_output_health"] == latest["metadata_ingest_health"] == "unavailable"
-        assert latest["reason_codes_json"] == '["' + category + '"]'
+        reasons = [category] + (['retention_expired_event'] if expired and has_prefix else [])
+        import json
+        assert json.loads(latest['reason_codes_json']) == [category]  # Blocking identity fault keeps precedence.
         assert latest["committed_byte_offset"] == final_offset
         assert latest["last_output_event_at"] == latest["last_ingested_event_at"] == first.output_event_at
-        assert tuple(state.repo.connection.execute("SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates").fetchone()) == (category, 1)
+        assert dict(state.repo.connection.execute("SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates")) == dict.fromkeys(reasons, 1)
         assert state.repo.connection.execute("SELECT observation_id FROM network_metadata_observations WHERE observation_id=?",
             (ignored.normalized.observation_id,)).fetchone() is None
         prefix_ref = state.repo.connection.execute("SELECT source_health_ref FROM network_metadata_observations WHERE observation_id=?",
-            (first.normalized.observation_id,)).fetchone()[0]
-        assert prefix_ref == (latest["health_id"] if has_prefix else original_ref)
+            (first.normalized.observation_id,)).fetchone()
+        if expired:assert prefix_ref is None
+        else:assert prefix_ref[0] == (latest["health_id"] if has_prefix else original_ref)
 
 
 @pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",

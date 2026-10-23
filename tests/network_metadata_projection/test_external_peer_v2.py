@@ -224,6 +224,7 @@ def test_T06_T07_V2_08_09_reset_append_restart_no_pre_reset_replay(tmp_path):
         assert floor == manifest
         seed_source(source, data=data, start=len(data)+1)
         clock = Clock()
+        clock.value = source.clock() + timedelta(minutes=1)  # Post-reset input is within the native 24h horizon.
         config = ProjectionConfig(enabled=True, db_path=manifest["projection"]["path"],
             source_db_path=source.config.db_path, scope_admission_json=admitted_source(source))
         repo = ProjectionRepository(config, clock=clock).initialize()

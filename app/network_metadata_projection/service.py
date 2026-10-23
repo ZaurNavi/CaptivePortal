@@ -102,7 +102,7 @@ class NetworkMetadataProjectionService:
             raise ProjectionConflict("source_observation_identity_conflict") from None
 
     def _eligible(self, source):
-        cutoff = self.repository.clock() - timedelta(days=14)
+        cutoff = self.repository.clock() - timedelta(days=1)
         return (source.sensitive_endpoint_presence_state == "observed_retained"
                 and ni_timestamp(source.event_at, canonical=True) >= cutoff
                 and ni_timestamp(source.ingested_at, canonical=True) >= cutoff)

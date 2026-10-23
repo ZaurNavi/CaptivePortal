@@ -51,6 +51,24 @@ def test_closed_store_and_pragmas(materialized):
         assert forbidden not in schema
 
 
+@pytest.mark.parametrize('age', [86399, 86400, 86401])
+def test_native_retention_observation_and_rollup_24h_boundary(materialized, age):
+    repo, gen = materialized
+    at = ni_timestamp(AT, canonical=True)
+    # Produce a valid positive in-horizon, then age the native stored data.
+    observed = at-timedelta(seconds=1)
+    row = evaluation(event=ni_format_utc(observed))
+    batch(repo, gen, row)
+    checkpoint = dict(repo.checkpoint(gen))
+    repo.clock = lambda: observed+timedelta(seconds=age)
+    repo.retain()
+    expected = int(age <= 86400)
+    assert repo.connection.execute('SELECT count(*) FROM device_service_rollups').fetchone()[0] == expected
+    assert repo.connection.execute('SELECT count(*) FROM service_recognition_observations').fetchone()[0] == expected
+    assert dict(repo.checkpoint(gen)) == checkpoint
+    assert repo.connection.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
 def test_independent_writer_lock(materialized):
     repo,_=materialized
     second=ServiceMaterializationRepository(repo.db_path)

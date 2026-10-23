@@ -21,6 +21,16 @@ the implementation as not yet production are historical stage facts and are not
 the current project status.
 <!-- NI-V1-CURRENT-DISPOSITION:END -->
 
+Current policy amendment (#321 V3B): intermediate NI01/NI02 event evidence and
+NI04 Device recognized observations/rollups are eligible for at most 24 hours
+from original source event/ingest time, with native bounded owner GC. No schema,
+index or bootstrap migration is part of this amendment. Active continuity and
+identity state remains protected. NI04 unacknowledged Visit delivery is exempt
+from age GC and is pruned only by the existing verified durable Visit ACK;
+Visit-owned results retain their own lifetime. A future one-time cutover needs
+separate Owner GO and cannot promise to recover erased history by code rollback.
+The historical implementation/migration statements below are not rewritten.
+
 Authority: Architecture Contract v1 + v1.1 Addendum and Implementation TASK v1.
 Production rollout, migration, mode changes, merge and deployment require separate Owner authorization.
 Historical stage statement: NI-05 and NI-06 were HOLD at this implementation checkpoint; current disposition is NI-05 Production and NI-06 CANCELLED BY OWNER.

@@ -1,6 +1,7 @@
 """#296 V3: bounded replay-safe GC and exact V6 cutover, disposable SQLite only."""
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import timedelta
 from hashlib import sha256
 import json
 import sqlite3
@@ -22,6 +23,39 @@ from .test_visit_service_lifetime import later, member, replay
 def rows(repo):
     with repo.read_connection() as c:
         return [dict(r) for r in c.execute('SELECT * FROM visit_service_membership')]
+
+
+def test_source_retention_never_age_prunes_unacknowledged_delivery(delivery, visit_repository):
+    source, gen, worker = delivery
+    put(source, gen, evaluated())
+    outbox = tuple(tuple(r) for r in source.connection.execute('SELECT * FROM ni04_visit_delivery_outbox ORDER BY outbox_seq'))
+    assert visit_repository.service_consumer_cursor() is None
+    source.clock = lambda: ni_timestamp(NOW, canonical=True)+timedelta(days=3)
+    source.retain()
+    assert tuple(tuple(r) for r in source.connection.execute('SELECT * FROM ni04_visit_delivery_outbox ORDER BY outbox_seq')) == outbox
+    assert source.connection.execute('SELECT count(*) FROM device_service_rollups').fetchone()[0] == 0
+    assert source.connection.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_source_cutover_keeps_saved_visit_and_unacknowledged_stream(delivery, visit_repository, visit_service):
+    source, gen, worker = delivery
+    visit = open_visit(visit_service, visit_repository)
+    put(source, gen, evaluated())
+    worker.run_services_once(now=NOW)
+    saved = summaries(visit_repository, visit)
+    assert saved
+    source.retain()  # Verified durable ACK can advance only this prefix.
+    floor = source.connection.execute('SELECT floor_seq,floor_hash FROM ni04_visit_delivery_outbox WHERE outbox_seq=0').fetchone()
+    put(source, gen, evaluated(seed='unacknowledged-before-cutover'))
+    pending = tuple(tuple(r) for r in source.connection.execute('SELECT * FROM ni04_visit_delivery_outbox ORDER BY outbox_seq'))
+    cursor = visit_repository.service_consumer_cursor()
+    source.clock = lambda: ni_timestamp(NOW, canonical=True)+timedelta(days=91)
+    source.retain()
+    assert tuple(tuple(r) for r in source.connection.execute('SELECT * FROM ni04_visit_delivery_outbox ORDER BY outbox_seq')) == pending
+    assert tuple(source.connection.execute('SELECT floor_seq,floor_hash FROM ni04_visit_delivery_outbox WHERE outbox_seq=0').fetchone()) == tuple(floor)
+    assert summaries(visit_repository, visit) == saved
+    assert visit_repository.service_consumer_cursor() == cursor
+    assert source.connection.execute('SELECT count(*) FROM device_service_rollups').fetchone()[0] == 0
 
 
 @pytest.mark.parametrize('age,eligible',[(3599,True),(3600,False),(3601,False)])

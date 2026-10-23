@@ -225,7 +225,7 @@ class ServiceMaterializationRepository:
 
     def retain(self):
         at=self.clock()
-        cutoff=ni_format_utc(at-timedelta(days=14))
+        cutoff=ni_format_utc(at-timedelta(days=1))
         grace=ni_format_utc(at-timedelta(days=1))
         # Read/close the Visit checkpoint BEFORE acquiring the NI04 write lock.
         acknowledgement=self._visit_acknowledgement()
