@@ -263,7 +263,7 @@ class LiveCoordinator(Coordinator):
 
     def timeout(self):
         if self._r4 is not None:
-            return None if self._r4.kill_sent else max(0,(self._r4.deadline-time.monotonic_ns())/1e9)
+            return None  # R4 LAB wakes on existing IPC/reaper/operator events, not job age.
         if self.process is None:return None  # Idle selector blocks indefinitely.
         target=self._abort_at if self._abort_at is not None else self._deadline
         return None if target is None or self._killed else max(0,target-time.monotonic())

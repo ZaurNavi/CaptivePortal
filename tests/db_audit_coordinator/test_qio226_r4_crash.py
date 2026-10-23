@@ -297,7 +297,7 @@ def test_04E_uncertain_reap_cannot_be_logged_as_a_confirmed_exit(monkeypatch):
     assert events==[]
 
 
-def test_04E_diagnostic_wait_cannot_extend_expired_root_deadline(monkeypatch):
+def test_04K_hold_diagnostic_wait_is_bounded_independently_of_job_age(monkeypatch):
     from types import SimpleNamespace
     from app.db_audit_coordinator import r4_release as release
     job=record();job.update(seq=1,reason_code='running',state='running')
@@ -308,7 +308,7 @@ def test_04E_diagnostic_wait_cannot_extend_expired_root_deadline(monkeypatch):
     waits=[];subject.children=dict(owner=SimpleNamespace(waited=False,exited=SimpleNamespace(wait=waits.append)))
     events=[];monkeypatch.setattr(release,'emit_hold',events.append)
     subject.hold(c.CoordinatorError('not_admitted'))
-    assert waits==[0] and subject.held and subject.owner.orphan_hold
+    assert waits==[.25] and subject.held and subject.owner.orphan_hold
     assert len(events)==1 and events[0]['event']=='qio226_r4_first_hold'
 
 
@@ -712,15 +712,34 @@ def test_K03_malformed_or_duplicate_kernel_fields_are_still_fail_closed(text):
 
 
 @POSIX
-def test_K07_deadline_durably_holds_before_exact_whole_leaf_kill_and_no_repeated_kill():
+@pytest.mark.parametrize('elapsed',[1201,5401])
+def test_04K_R4_age_never_holds_or_kills_and_legacy_deadline_still_expires(monkeypatch,elapsed):
+    from types import SimpleNamespace
+    from app.db_audit_coordinator import live_coordinator as runtime
     from app.db_audit_coordinator.r4_release import Session
-    subject=Session.__new__(Session);subject.deadline=0;subject.done=False;subject.kill_sent=False
+    subject=Session.__new__(Session);subject.deadline=None;subject.done=False
     ledger=[]
     subject.hold=lambda:ledger.append('durable_orphan_hold')
     class Leaf:
         def write(self,key,value):assert (key,value)==('cgroup.kill','1');ledger.append('exact_leaf_kill')
-    subject.leaf=Leaf();subject.expire();subject.expire()
-    assert ledger==['durable_orphan_hold','exact_leaf_kill'] and subject.kill_sent
+    subject.leaf=Leaf()
+    monkeypatch.setattr(runtime.time,'monotonic',lambda:elapsed)
+    monkeypatch.setattr(runtime.time,'monotonic_ns',lambda:elapsed*10**9)
+    root=runtime.LiveCoordinator.__new__(runtime.LiveCoordinator);root._r4=subject
+    assert root.timeout() is None
+    subject.expire();root.expire();root.expire()
+    assert ledger==[] and not subject.done
+    # Exact unchanged non-R4 branch still signals cancellation, then kills only
+    # its own leaf after the existing two-second grace. No R4 path is involved.
+    root._r4=None;root.process=SimpleNamespace(returncode=None)
+    root._deadline=1200;root._abort_at=None;root._killed=False;root._leaf=Leaf()
+    def cancel():ledger.append('cancel');root._abort_at=elapsed+2
+    root._notify_cancel=cancel
+    assert root.timeout()==0
+    root.expire();assert ledger==['cancel'] and root.timeout()==2
+    monkeypatch.setattr(runtime.time,'monotonic',lambda:elapsed+2)
+    root.expire();root.expire()
+    assert ledger==['cancel','exact_leaf_kill'] and root._killed
 
 
 @pytest.mark.skipif(sys.platform!='linux' or getattr(os,'geteuid',lambda:0)()==0,
@@ -1083,7 +1102,7 @@ def compile_04J_guard(namespace):
     return namespace['guard']
 
 
-@pytest.mark.parametrize('fault',['none','deadline','gate','leaf','cancel','membership',
+@pytest.mark.parametrize('fault',['none','gate','leaf','cancel','membership',
     'memory_max','swap_max','swap_current','ancestor'])
 def test_04J_each_guard_uses_one_fresh_complete_sample_and_exact_failure(fault):
     from types import SimpleNamespace
@@ -1112,7 +1131,7 @@ def test_04J_each_guard_uses_one_fresh_complete_sample_and_exact_failure(fault):
     guard=compile_04J_guard(namespace)
     if fault=='none':
         guard();guard()
-        one=['deadline','gate','leaf','cancel','membership','samples','guest','sample_check']
+        one=['gate','leaf','cancel','membership','samples','guest','sample_check']
         assert trace==one*2 and observations[0] is not observations[1]
         assert all(actual is supplied for actual,supplied in zip(observations,received))
     else:
@@ -1135,4 +1154,32 @@ def test_04J_cancel_false_preserves_cleanup_checks_but_does_not_read_cancel_pipe
         membership=lambda pid:'/leaf',guest_sample=lambda sample:SimpleNamespace(check=lambda:calls.append('full_check')),
         require=p.require,c=c)
     compile_04J_guard(namespace)(cancel=False)
-    assert calls==['deadline','gate','leaf','samples','full_check']
+    assert calls==['gate','leaf','samples','full_check']
+
+
+@POSIX
+@pytest.mark.parametrize('peer',['packet','EOF'])
+@pytest.mark.parametrize('elapsed',[1201,5401])
+def test_04K_no_deadline_authenticated_socket_wait_uses_actual_packet_or_EOF(monkeypatch,peer,elapsed):
+    import threading
+    import time
+    from app.db_audit_coordinator import r4_ipc
+    left,right=r4_ipc.pair();entered=threading.Event();done=threading.Event();outcomes=[]
+    monkeypatch.setattr(time,'monotonic_ns',lambda:elapsed*10**9)
+    def receive():
+        try:
+            entered.set()
+            outcomes.append(r4_ipc.receive(left,'a'*64,os.geteuid(),os.getpid(),seconds=None))
+        except c.CoordinatorError as error:outcomes.append(error.code)
+        finally:done.set()
+    reader=threading.Thread(target=receive,daemon=True);reader.start()
+    try:
+        assert entered.wait(1)
+        if peer=='packet':r4_ipc.send(right,'cancel','a'*64,{})
+        else:right.close()
+        assert done.wait(1)
+        reader.join(1);assert not reader.is_alive()
+        assert outcomes==[('cancel',{},None)] if peer=='packet' else outcomes==['unauthorized']
+        assert left.gettimeout() is None
+    finally:
+        right.close();left.close()

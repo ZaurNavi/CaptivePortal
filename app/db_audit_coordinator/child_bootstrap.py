@@ -205,11 +205,10 @@ def execute_r4(data,job,profile,policy):
     channel=socket.socket(fileno=data['r4_fd'])
     leaf=Leaf(mountpoint(),data['leaf'],(data['leaf_device'],data['leaf_inode']))
     gate=Gate(profile.root+'/heavy.lock',data['gate_device'],data['gate_inode'])
-    deadline=Deadlines(data['started_ns'],policy.attempt_seconds)
     namespace=list(identity(os.stat('/proc/self/ns/mnt')))
     binding=r4_ipc.claim_binding(job,profile,leaf,namespace)
     def guard(*,cancel=True):
-        deadline.check();gate.check();leaf.check()
+        gate.check();leaf.check()
         if cancel and select.select([data['cancel_fd']],[],[],0)[0]:raise c.CoordinatorError('canceled')
         require(membership(os.getpid())==leaf.relative,'unauthorized')
         samples=leaf.samples()
@@ -217,9 +216,8 @@ def execute_r4(data,job,profile,policy):
         require(node.maximum==policy.memory_max_bytes and node.swap_max==node.swap_current==0,'not_admitted')
         sample=guest_sample(samples);sample.check()
     def receive(*,snapshot=False):
-        remaining=(data['started_ns']+policy.attempt_seconds*10**9-time.monotonic_ns())/1e9
-        require(remaining>0,'not_admitted')
-        return r4_ipc.receive(channel,binding,0,data['supervisor_pid'],seconds=remaining,allow_snapshot=snapshot)
+        # R4 LAB waits for the authenticated peer's actual outcome, not job age.
+        return r4_ipc.receive(channel,binding,0,data['supervisor_pid'],seconds=None,allow_snapshot=snapshot)
     received=None
     try:
         verify_origin(profile);gate.acquire();guard()

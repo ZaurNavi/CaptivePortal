@@ -1,5 +1,51 @@
 # QIO226 / 04D R4 — pinned T3 directory capability and first-HOLD attribution
 
+## 04K — current R4 LAB execution has NO elapsed-job-time cutoff
+
+Authority: [Owner/TechLead TASK-COORD-04K](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6362416420).
+Direct parent: accepted04J `e691c1e8ded3106cfa14d0302f58208796017c1a`,
+tree `d452ed7a5b3e0f01085a6b25693a3a3b2c40ae14`. This section supersedes all
+historical R4 finite-deadline/1200s and engineering900s instructions below;
+their old receipts/queues remain historical facts, not current execution caps.
+
+Only the existing enabled R4 LAB path is changed. Root Session has
+`deadline=None`; its sealed, fixed-schema owner capability encodes JSON
+`deadline_ns:null`, accepted only as null (not bool, numeric, huge or omitted).
+Backup source/progress/BUSY callbacks, T3 guards and worker/owner packet receives
+never expire due to elapsed age. Authenticated Unix `receive(seconds=None)` and
+the existing root selector wait for actual peer/event/reaper completion. There
+is no replacement time cap, timeout toggle or polling scheduler. Elapsed
+durations are observations. Legacy `attempt_seconds` and durable
+`resource_envelope.timeout_seconds` stay byte/schema compatible but are NOT
+effective R4 experiment limits. Finite per-send mechanics (1s) and the bounded
+diagnostic reap observation (.25s) remain; neither measures total job age.
+
+All gate/source/FD/PID/membership and cgroup memory/swap/ancestor checks remain,
+including the once-per-guard fresh full hierarchy. Operator-scoped cancel,
+real IPC EOF/helper/worker death, resource violations and source/security
+failures remain fail-closed. Root R4 `expire()` never sends `cgroup.kill` due
+to age. Uncertain reap/cleanup remains HOLD, not fabricated terminal success.
+The non-R4 finite deadline/cancel grace/leaf-kill path is unchanged. SQLite RO,
+pinned owner read transaction, callback100000 limit, full integrity/FK/schema/
+canonical rows, all strong hashes and positive helper/worker cleanup remain.
+
+Focused QA advances actual process clocks by1201/5401 seconds without sleeping
+for those durations: root guard/expire, helper ready/begin/Backup callbacks,
+worker T3 and IPC waits must complete with genuine authenticated positive
+release. Actual scoped cancellation, child exit/EOF, swap/OOM and finite
+non-R4 expiration remain separate negative/regression controls. Existing
+uninstalled QA provenance exceptions do NOT qualify installed F2/native5.15.
+No additional dense benchmark or performance target is required by04K.
+
+Coder delivers one clean direct-parent LOCAL LAB commit only. No push, PR,
+installation, original-source run or production action. After brief TechLead
+source/focused PASS, SysAdmin (not Coder) may conduct the separately authorized
+ONE full original-backed OLD LAB A→B→C via authenticated submit-batch, fresh
+isolated immutable release/epoch/queue/keys, source OS RO main/WAL/SHM,
+unchanged UID/root/two-FD/cgroup and positive cleanup. Never use old04J binary
+for this trial. A's known `pt_schema_signature` must remain truthful; no
+comparator auto-fix. B/C natural results and source safety are the evidence.
+
 ## 04H — fast pinned guards, strong boundary SHA and closed T3 attribution
 
 Authority: [TASK-COORD-04H](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6324005276).

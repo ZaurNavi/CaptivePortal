@@ -701,6 +701,9 @@ if len(sys.argv)>3 and sys.argv[3].startswith('04i_'):
 elif len(sys.argv)>3 and sys.argv[3].startswith('04j_'):
  from tests.db_audit_coordinator.test_qio226_r4_native import install_04I_cost_probe,install_04J_sample_probe
  install_04I_cost_probe();install_04J_sample_probe()
+elif len(sys.argv)>3 and sys.argv[3]=='04k_age':
+ from tests.db_audit_coordinator.test_qio226_r4_native import install_04K_worker_clock
+ install_04K_worker_clock()
 try:os._exit(worker.execute(int(sys.argv[1])))
 except BaseException:traceback.print_exc();os._exit(3)
 '''
@@ -835,14 +838,13 @@ if scenario.startswith('04f_'):
  import sqlite3,time
  native_connect=sqlite3.connect
  if scenario=='04f_busy_deadline':
-  original_read=helper.readonly_document;captured={}
-  def read(*args,**kwargs):
-   document=original_read(*args,**kwargs);captured['document']=document;return document
-  helper.readonly_document=read
+  # 04K supersedes the old elapsed-abort expectation. Advance the clock while
+  # genuinely BUSY, then release contention; it must finish naturally instead.
   original_mark=helper.OwnerTrace.mark
   def deadline_mark(self,name):
    original_mark(self,name)
-   if name=='backup_start':captured['document']['deadline_ns']=time.monotonic_ns()+50_000_000
+   if name=='backup_start':
+    real_ns=time.monotonic_ns;time.monotonic_ns=lambda:real_ns()+5401*10**9
   helper.OwnerTrace.mark=deadline_mark
  class CallbackSource(sqlite3.Connection):
   def backup(self,target,**kwargs):
@@ -856,7 +858,7 @@ if scenario.startswith('04f_'):
     elif scenario=='04f_page_budget' and first:code,remaining,total=0,0,2**26//4096+1
     first=False
     progress(code,remaining,total)
-    if scenario=='04f_busy_once' and code==5:
+    if scenario in {'04f_busy_once','04f_busy_deadline'} and code==5:
      blocker.execute('ROLLBACK')
    kwargs['progress']=observed
    try:return super().backup(target,**kwargs)
@@ -866,6 +868,9 @@ if scenario.startswith('04f_'):
   if filename=='file:/source/input.sqlite3?mode=ro':kwargs['factory']=CallbackSource
   return native_connect(filename,*args,**kwargs)
  helper.sqlite3.connect=callback_connect
+if scenario=='04k_age':
+ from tests.db_audit_coordinator.test_qio226_r4_native import install_04K_owner_clock
+ install_04K_owner_clock(helper)
 if len(sys.argv)>3 and sys.argv[3]=='helper_death':
  import sqlite3,time
  original=sqlite3.connect
@@ -1048,7 +1053,8 @@ try:
           for fd in os.listdir('/proc/'+str(child.pid)+'/fd'))
       except FileNotFoundError:open_stage=False
       if open_stage:
-       if sys.argv[1] in {'cancel_B','04f_busy_cancel'}:subject._notify_cancel()
+       if sys.argv[1] in {'cancel_B','04f_busy_cancel'}:
+        subject.cancel_scoped(session.job['job_id'],session.job['attempt_id'],session.job['claim_epoch'],c.scope(1002))
        else:child.process.kill()
        fault_killed=True
    if sys.argv[1] in faults:
@@ -1101,7 +1107,7 @@ try:
    print(json.dumps(dict(crash='helper_death',positive_release=True,source_hashes_unchanged=before==[hashes(p.source) for p in policies])))
   else:
    final=subject.store.read();states=[job['state'] for job in final['jobs']]
-   failed_callbacks={'04f_bad_status','04f_page_budget','04f_busy_deadline'}
+   failed_callbacks={'04f_bad_status','04f_page_budget'}
    expected=['failed','completed','completed'] if sys.argv[1]=='04h_A_failure' else ['deferred']*3 if sys.argv[1] in failed_callbacks else ['completed','failed','completed'] if sys.argv[1]=='controlled_B' else ['completed','canceled','completed'] if sys.argv[1] in {'cancel_B','04f_busy_cancel'} else ['completed']*3
    assert states==expected,states
    if sys.argv[1] in {'cancel_B','04f_busy_cancel'}:assert fault_killed and final['jobs'][1]['audit_result']['result']=='incomplete'
@@ -1196,12 +1202,16 @@ def test_04E_native_actual_owner_boundary_is_reported_once_after_positive_reap(s
     events=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{"event":"qio226_r4_owner_outcome"')]
     assert len(events)==1
     item=events[0]
-    assert item['stage']==('owner_ready' if stage=='expired' else stage)
+    assert item['stage']==('imports_verified' if stage=='expired' else stage)
     assert item['child_exit_code']==(-9 if stage=='begin_wait' else 3)
     if stage=='unreported':assert item['report_status']=='unavailable'
     elif stage=='begin_wait':assert item['report_status']=='stage_only'
     else:assert item['report_status']=='failure'
-    if stage=='expired':assert item['outcome']=='deadline' and item['stop_reason']=='deadline'
+    if stage=='expired':
+        # A forged finite deadline is now an invalid private auth document,
+        # not an elapsed-job timeout. Closed schema/authorization stays strict.
+        assert item['coordinator_code']=='unauthorized' and item['stop_reason'] is None
+        assert item['outcome']=='pre_ready_exit'
     elif not item['owner_ready_received']:assert item['outcome']=='pre_ready_exit'
     else:assert item['outcome']=='backup_abort'
     assert not any(value in json.dumps(item) for value in ('SECRET','CANARY','/source','nonce','SQL'))
@@ -1237,7 +1247,7 @@ def test_04F_actual_owner_callback_abi_bounded_failure_and_positive_release(scen
     assert len(events)==3
     assert all(p['helper_reaped'] and p['gatekeeper_reaped'] and p['cleanup_complete']
         and p['shmem_zero'] and p['empty_observations']==2 for p in result['proofs'])
-    if scenario=='04f_busy_once':
+    if scenario in {'04f_busy_once','04f_busy_deadline'}:
         assert result['states']==['completed']*3
         assert all(e['backup']['busy']==1 and e['backup']['done']==1 and e['backup']['complete']
             and e['outcome']=='complete' and e['child_exit_code']==0 for e in events)
@@ -1248,11 +1258,8 @@ def test_04F_actual_owner_callback_abi_bounded_failure_and_positive_release(scen
     else:
         assert result['states']==['deferred']*3
         assert all(e['child_exit_code']==3 and not e['owner_done_received'] for e in events)
-        if scenario=='04f_busy_deadline':
-            assert all(e['stop_reason']=='deadline' and e['backup']['status']==5 for e in events)
-        else:
-            check='callback_status' if scenario=='04f_bad_status' else 'callback_page_budget'
-            assert all(e['backup']['check']==check and e['coordinator_code']=='not_admitted' for e in events)
+        check='callback_status' if scenario=='04f_bad_status' else 'callback_page_budget'
+        assert all(e['backup']['check']==check and e['coordinator_code']=='not_admitted' for e in events)
     record_property('04f_native_callback_and_release',json.dumps(dict(scenario=scenario,events=events,result=result),sort_keys=True))
 
 
@@ -1685,10 +1692,10 @@ try:
  else:
   assert os.waitstatus_to_exitcode(status)==0
   final=json.loads(line)
-  expected='coordinator_unavailable' if fault=='cancel' else 'unsafe_path' if fault in {'gate','mount'} else 'unauthorized' if fault=='membership' else 'passed' if fault=='none' else 'not_admitted'
+  expected='coordinator_unavailable' if fault=='cancel' else 'unsafe_path' if fault in {'gate','mount'} else 'unauthorized' if fault=='membership' else 'passed' if fault in {'none','deadline'} else 'not_admitted'
   assert final['outcome']==expected and final['outcome']!='audit_failed'
   stats=final['stats'];assert stats['guards']==2
-  assert stats['samples']==(1 if fault in {'deadline','cancel','gate','membership','mount'} else 2)
+  assert stats['samples']==(1 if fault in {'cancel','gate','membership','mount'} else 2)
  stream.close()
  print(json.dumps(dict(fault=fault,first=first,final=final,kernel=os.uname().release,
   bound_counter_fault=(fault in {'swap_current','ancestor_memory','ancestor_swap','ancestor_subtree','ancestor_pressure','leaf_oom_counter'}),
@@ -1726,3 +1733,105 @@ def test_04J_native_fresh_guard_kernel_controls_and_exact_resource_failure(fault
         assert result['final']['stats']['samples']==result['final']['stats']['passed']==2
         assert result['final']['stats']['min_samples']==result['final']['stats']['max_samples']==1
     record_property('04j_native_guard',json.dumps(result,sort_keys=True))
+
+
+def install_04K_worker_clock():
+    """QA-only clock advance; authentic worker/FDs/guards/T3 remain untouched."""
+    import time
+    from app.db_audit_coordinator import r4_ipc,r4_snapshot
+    original_ns=time.monotonic_ns;age=1201
+    time.monotonic_ns=lambda:original_ns()+age*10**9
+    receive=r4_ipc.receive;validate=r4_snapshot.validate
+    def received(*args,**kwargs):
+        assert kwargs['seconds'] is None
+        result=receive(*args,**kwargs)
+        print(json.dumps(dict(event='04k_worker_wait',age=age,kind=result[0],deadline=None)),file=sys.stderr,flush=True)
+        return result
+    def validating(*args,**kwargs):
+        nonlocal age
+        age=5401
+        result=validate(*args,**kwargs)
+        print(json.dumps(dict(event='04k_worker_T3',age=age,passed=True)),file=sys.stderr,flush=True)
+        return result
+    r4_ipc.receive=received;r4_snapshot.validate=validating
+
+
+def install_04K_owner_clock(helper):
+    """Advance the actual helper clock before ready/begin and Backup callbacks."""
+    import time
+    original_ns=time.monotonic_ns;age=1201;calls=0
+    time.monotonic_ns=lambda:original_ns()+age*10**9
+    read=helper.readonly_document;mark=helper.OwnerTrace.mark
+    callback=helper.BackupProgress.__call__;finish=helper.BackupProgress.finish
+    def document(*args,**kwargs):
+        result=read(*args,**kwargs)
+        assert result['deadline_ns'] is None
+        return result
+    def marked(self,name):
+        nonlocal age
+        if name=='backup_start':age=5401
+        mark(self,name)
+    def progress(self,*args):
+        nonlocal calls
+        assert age==5401
+        calls+=1
+        return callback(self,*args)
+    def finished(self):
+        finish(self)
+        assert calls>0
+        print(json.dumps(dict(event='04k_owner_backup',age=age,callbacks=calls,
+            complete=self.complete,deadline=None)),file=sys.stderr,flush=True)
+    helper.readonly_document=document;helper.OwnerTrace.mark=marked
+    helper.BackupProgress.__call__=progress;helper.BackupProgress.finish=finished
+
+
+def pipeline_04K_driver():
+    code=pipeline_04I_driver()
+    replacements=[
+        ("original=open('/proc/self/cgroup')", "real_ns=time.monotonic_ns;clock_age=0\ntime.monotonic_ns=lambda:real_ns()+clock_age*10**9\noriginal=open('/proc/self/cgroup')"),
+        ("   assert subject.dispatch_one()", "   clock_age=0\n   assert subject.dispatch_one()\n   clock_age=5401\n   assert (time.monotonic_ns()-subject._r4.started)//10**9>=5401\n   assert subject._r4.deadline is None and subject.timeout() is None\n   subject.expire();assert not subject.orphan_hold\n   print(json.dumps(dict(event='04k_root_age',age=clock_age,deadline=None,held=False)),file=sys.stderr,flush=True)"),
+        ("    subject.finish()", "    assert subject.timeout() is None\n    subject.expire();subject.finish()"),
+    ]
+    for old,new in replacements:
+        assert code.count(old)==1,old
+        code=code.replace(old,new,1)
+    return code
+
+
+def run_04K_readable_pipeline(source_root,scenario):
+    import inspect
+    source=inspect.getsource(run_04I_readable_pipeline)
+    assert source.count('pipeline_04I_driver()')==1
+    source=source.replace('def run_04I_readable_pipeline(', 'def qualified_04K_pipeline(',1)
+    source=source.replace('pipeline_04I_driver()', 'pipeline_04K_driver()',1)
+    namespace=dict(globals());exec(source,namespace)
+    return namespace['qualified_04K_pipeline'](source_root,scenario)
+
+
+@NATIVE
+def test_04K_aged_root_owner_worker_Backup_T3_IPC_naturally_complete_with_real_release(record_property):
+    process,blobs=run_04K_readable_pipeline(ROOT,'04k_age')
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout)
+    assert result['states']==['completed']*3 and result['source_hashes_unchanged']
+    assert result['uids']==[0,995,1003]
+    assert len(result['proofs'])==3 and len(blobs)>0
+    for proof in result['proofs']:
+        assert proof['helper_reaped'] and proof['gatekeeper_reaped'] and proof['cleanup_complete']
+        assert proof['shmem_zero'] and proof['empty_observations']==2
+        assert proof['source_pre_sha256']==proof['source_post_sha256']
+        assert proof['memory_observations']['swap_current']==0
+        assert proof['snapshot']['size']>0 and len(proof['snapshot']['sha256'])==64
+    events=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{')]
+    backup=[e for e in events if e.get('event')=='04k_owner_backup']
+    t3=[e for e in events if e.get('event')=='04k_worker_T3']
+    waits=[e for e in events if e.get('event')=='04k_worker_wait']
+    roots=[e for e in events if e.get('event')=='04k_root_age']
+    assert len(backup)==len(t3)==len(roots)==3 and len(waits)==6
+    assert all(e['age']==5401 and e['deadline'] is None and not e['held'] for e in roots)
+    assert all(e['age']==5401 and e['complete'] and e['callbacks']>0 and e['deadline'] is None for e in backup)
+    assert all(e['age']==5401 and e['passed'] for e in t3)
+    assert [e['age'] for e in waits]==[1201,5401]*3
+    assert [e['kind'] for e in waits]==['snapshot','release']*3
+    assert all(e['deadline'] is None for e in waits)
+    record_property('04k_age_native',json.dumps(dict(result=result,backup=backup,t3=t3,waits=waits,roots=roots),sort_keys=True))

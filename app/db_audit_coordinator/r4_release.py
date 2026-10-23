@@ -55,7 +55,7 @@ class BackupProgress:
     """Pure owner-side callback policy, shared with its closed diagnostic sink.
 
     SQLITE_BUSY/LOCKED can report 0/0 before any pages are copied. They are NOT
-    completion. CPython owns the retry loop; the existing deadline, cancellation,
+    completion. CPython owns the retry loop; cancellation,
     source guard and 100000 callback cap still own this attempt. No per-call log.
     No Linux bootstrap imports are needed to test this pure policy on Windows.
     """
@@ -310,16 +310,11 @@ class Session:
         self.owner_ready=self.backup_done=self.released=self.done=self.canceled=False
         self.decision=None;self.previous=None;self.phase='claim';self.held=False
         self.failure_reason=None
-        self.kill_sent=False
         self.gate_id='claim_publish';self.subphase='claim'
         self.source_gate_verified=self.source_open_started=False
         self.first_hold_diagnostic=None
         self.owner_trace_fd=None;self.owner_diagnostic=None
-        self.started=time.monotonic_ns();self.deadline=self.started+self.policy.attempt_seconds*10**9
-
-    def left(self):
-        value=(self.deadline-time.monotonic_ns())/1e9
-        require(value>0,'not_admitted');return value
+        self.started=time.monotonic_ns();self.deadline=None  # Authenticated R4 LAB: no elapsed-job cap.
 
     def wake(self):
         try:self.owner._wake_write.send(b'r')
@@ -339,7 +334,7 @@ class Session:
         def packets():
             try:
                 while True:
-                    kind,payload,fd=r4_ipc.receive(endpoint,self.binding,uid,child.pid,seconds=self.left())
+                    kind,payload,fd=r4_ipc.receive(endpoint,self.binding,uid,child.pid,seconds=None)
                     require(fd is None,'unauthorized')
                     self.events.put((kind,name,payload));self.wake()
                     if kind in {'owner_done','released'}:return
@@ -350,7 +345,7 @@ class Session:
 
     def guard(self):
         from .live_receipts import guest_sample
-        self.left();self.leaf.check();self.namespace.check()
+        self.leaf.check();self.namespace.check()
         require(membership(os.getpid())==self.leaf.relative,'not_admitted')
         nodes=self.leaf.samples()
         require(nodes[-1].maximum==self.policy.memory_max_bytes,'not_admitted')
@@ -679,17 +674,11 @@ class Session:
             helper=getattr(self,'children',{}).get('owner')
             if helper is not None:
                 if not helper.waited:
-                    helper.exited.wait(max(0,min(.25,(self.deadline-time.monotonic_ns())/1e9)))
+                    helper.exited.wait(.25)  # Bounded diagnostic reap observation, not a job deadline.
                 if helper.waited:
                     try:self.owner_outcome(helper)
                     except c.CoordinatorError:pass  # Uncertain reap is never an exit-status receipt.
 
     def expire(self):
-        if self.done:return
-        if time.monotonic_ns()>=self.deadline and not self.kill_sent:
-            self.at('deadline','wait')
-            self.hold()
-            if self.leaf is not None:self.leaf.write('cgroup.kill','1')
-            self.kill_sent=True
-            # Root is deliberately in this same leaf: expiry may kill the
-            # supervisor too. That remains durable ORPHAN_HOLD, never next FIFO.
+        """R4 LAB has no elapsed expiration; reaper/cancel/resource facts own it."""
+        return

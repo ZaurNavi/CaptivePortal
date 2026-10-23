@@ -12,7 +12,6 @@ import socket
 import sqlite3
 import stat
 import sys
-import time
 
 from . import contracts as c
 from .child_bootstrap import readonly_document,verify_parent
@@ -78,17 +77,14 @@ def execute(document,trace):
     trace.mark('artifact_verified');trace.mark('imports')
     import_roots()
     trace.mark('imports_verified')
-    integer(document['channel_fd'],3,2**20);integer(document['deadline_ns'],1)
+    integer(document['channel_fd'],3,2**20)
+    require(document['deadline_ns'] is None,'unauthorized')
     channel=socket.socket(fileno=document['channel_fd'])
     # Regular self receipts cannot fchdir out of chroot. No /proc directory,
     # original source FD, mount namespace FD or parent root FD is inherited.
     trace.mark('receipt_open')
     receipts={name:os.open('/proc/self/'+name,os.O_RDONLY|os.O_CLOEXEC) for name in ('status','cgroup')}
     require(channel.family==socket.AF_UNIX and channel.type&socket.SOCK_SEQPACKET,'unauthorized')
-    def left():
-        remaining=(document['deadline_ns']-time.monotonic_ns())/1e9
-        if remaining<=0:trace.stop_reason='deadline'
-        require(remaining>0,'not_admitted');return remaining
     for item in os.listdir('/proc/self/fd'):
         fd=int(item)
         if fd>2 and fd not in {*receipts.values(),channel.fileno(),trace.fd}:
@@ -106,17 +102,16 @@ def execute(document,trace):
     require(receipt('cgroup').strip()=='0::'+document['leaf'] and not Path('/proc').exists(),'unauthorized')
     for fd in receipts.values():os.close(fd)
     trace.mark('credentials_verified');trace.mark('owner_ready')
-    r4_ipc.send(channel,'owner_ready',document['binding'],dict(pid=os.getpid()),seconds=min(left(),1))
+    r4_ipc.send(channel,'owner_ready',document['binding'],dict(pid=os.getpid()),seconds=1)
     trace.mark('owner_ready_sent');trace.mark('begin_wait')
-    kind,payload,fd=r4_ipc.receive(channel,document['binding'],0,document['parent_pid'],seconds=left())
+    kind,payload,fd=r4_ipc.receive(channel,document['binding'],0,document['parent_pid'],seconds=None)
     require(kind=='begin' and payload=={} and fd is None,'unauthorized')
     trace.mark('begin_received')
     source=destination=None
     try:
         def guard():
-            left()
             if select.select([channel],[],[],0)[0]:
-                kind,payload,fd=r4_ipc.receive(channel,document['binding'],0,document['parent_pid'],seconds=min(left(),1))
+                kind,payload,fd=r4_ipc.receive(channel,document['binding'],0,document['parent_pid'],seconds=1)
                 require(kind=='cancel' and payload=={} and fd is None,'unauthorized')
                 trace.stop_reason='canceled'
                 raise c.CoordinatorError('canceled')
@@ -146,9 +141,8 @@ def execute(document,trace):
         destination=sqlite3.connect('/stage/snapshot.sqlite3',isolation_level=None,timeout=0)
         trace.mark('destination_opened')
         def wait():
-            # No native busy_timeout or new loop. Wake on cancel, never sleep
-            # past the attempt's remaining budget, then recheck original guard.
-            select.select([channel],[],[],min(.005,left()));guard()
+            # Existing bounded per-callback wait, wake on cancel/EOF; no job-age cap.
+            select.select([channel],[],[],.005);guard()
         progress=BackupProgress(trace,guard,wait,size,policy.image_max_bytes)
         trace.mark('backup_start');source.backup(destination,pages=128,progress=progress,sleep=0)
         progress.finish()
@@ -156,7 +150,7 @@ def execute(document,trace):
         trace.mark('backup_complete');trace.mark('connections_close')
         destination.close();destination=None;source.close();source=None
         trace.mark('owner_done')
-        r4_ipc.send(channel,'owner_done',document['binding'],dict(complete=True,page_size=size),seconds=min(left(),1))
+        r4_ipc.send(channel,'owner_done',document['binding'],dict(complete=True,page_size=size),seconds=1)
         trace.mark('owner_done_sent')
         return 0
     except Exception as error:
