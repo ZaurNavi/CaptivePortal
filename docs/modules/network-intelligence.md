@@ -307,7 +307,29 @@ The worker consumes:
 
 Live feed pages are bounded at 256. Authoritative binding change reads are bounded at 128. Worker state, checkpoints, replay jobs and artifact generation make restart/replay explicit.
 
-Positive service observations are retained for at most 14 days under the current materialization contract. Current positive rollups are not deleted merely to make capacity health look good. Capacity pressure can halt materialization explicitly.
+Transient NI-01 observations (including sensitive children), NI-02 edges/pending,
+and NI-04 positive Device observations/rollups have a shared maximum event age of
+24 hours (86400 seconds). Original event and source-ingest times must both remain
+eligible; retry/reconcile timestamps never refresh that horizon. Equality at the
+cutoff is retained; older event history is ineligible. NI-01 deletes the core
+parent first via native FK cascade, without a redundant sensitive-redaction pass.
+Native bounded owner retention and existing maintenance cadence are unchanged;
+no new indexes, schema changes, reset/bootstrap, scheduler or retention daemon.
+
+Historical orphan health/fault/lineage is eligible after 24h only when unreferenced.
+Current health, active source generations/checkpoints/ingest runs, current
+authoritative Site/MAC/Device bindings and immutable reset proof remain protected
+regardless of creation age. NI-04 Visit delivery is **ACK-pruned only**, never
+age-pruned while unacknowledged. Visit-owned NI-03/NI-04 history is unchanged.
+Missing expired source/feed evidence must remain partial/limited/unavailable,
+not fabricated complete coverage. Capacity pressure can still halt explicitly.
+
+Issue #321 V3B requires a separately Owner-authorized, quiesced, bounded native
+cutover to drain only expired backlog. Zero expired rows does not mean empty DBs,
+and code rollback cannot restore purged history. Source/focused Lab verification
+does not authorize production deletion, restart or deployment. Recurring GC cost
+and cutover resource budgets remain independent acceptance gates; no physical HDD
+savings are implied by shorter logical retention.
 
 ## 10. Materialized read path
 

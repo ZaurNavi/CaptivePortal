@@ -13,7 +13,7 @@ from .models import (LOGICAL_SOURCE_ID, NORMALIZER_VERSION, CONFLICT_CATEGORIES,
     FAULT_CATEGORIES, SourceGenerationV1, SourceCheckpointV1,
     NetworkMetadataStorageUnavailable, NetworkMetadataStorageCorrupt,
     NetworkMetadataStorageLimit, NetworkMetadataWriterUnavailable,
-    NetworkMetadataValidationError, INT64_MAX)
+    NetworkMetadataValidationError, INT64_MAX, CORE_RETENTION_DAYS, SENSITIVE_RETENTION_DAYS)
 from .schema import TABLE_DDL, create_schema, validate_schema
 from .validation import integer, digest, canonical_uuid, ni_format_utc, ni_timestamp
 
@@ -43,6 +43,7 @@ class NetworkMetadataRepository:
     def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), telemetry=None):
         self.config, self.clock, self.telemetry = config, clock, telemetry
         self.connection = None
+        self._active_ingest_run_id = None
         self.capacity_halted = False
         self._insert_columns = self._insert_columns_connection = self._insert_columns_path = None
 
@@ -167,6 +168,7 @@ class NetworkMetadataRepository:
                 started_at_utc=now, repository_head=identity.artifact_sha,
                 repository_tree=identity.artifact_tree, normalizer_version=NORMALIZER_VERSION,
                 configuration_digest=self.config.configuration_digest))
+        self._active_ingest_run_id = run_id
         return run_id
 
     def load_active(self):
@@ -367,8 +369,8 @@ class NetworkMetadataRepository:
                 generation.source_generation_id, outcomes[0].start, outcomes[-1].start)
             candidate = controller.copy()
             plan = []
-            sensitive_cutoff = ni_timestamp(now, canonical=True) - timedelta(days=14)
-            core_cutoff = ni_timestamp(now, canonical=True) - timedelta(days=30)
+            sensitive_cutoff = ni_timestamp(now, canonical=True) - timedelta(days=SENSITIVE_RETENTION_DAYS)
+            core_cutoff = ni_timestamp(now, canonical=True) - timedelta(days=CORE_RETENTION_DAYS)
             # Phase A is read-only in SQLite: freeze identity dispositions and
             # final prefix health before retention or first-ingest writes.
             for outcome in outcomes:

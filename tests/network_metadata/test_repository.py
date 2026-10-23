@@ -399,17 +399,19 @@ def test_io_hotpath_retention_expiry_semantics_are_preserved(tmp_path, enabled, 
         items = _a_outcomes(state, [data])
         result = state.repo.ingest_batch(items, state.run, state.health, state.anchor)
         assert state.repo.load_active()[1].committed_byte_offset == items[0].end
-        if age == 31:
-            assert result["committed"] == 0
-            assert tuple(state.repo.connection.execute("SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates").fetchone()) == ("retention_expired_event", 1)
-            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 0
-        else:
-            assert result["committed"] == 1
-            assert state.repo.connection.execute("SELECT sensitive_endpoint_presence_state FROM network_metadata_observations").fetchone()[0] == "expired"
-            assert tuple(state.repo.connection.execute("SELECT digest_state,source_record_sha256,semantic_payload_sha256 FROM network_metadata_source_records").fetchone()) == ("expired", None, None)
-            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_sensitive_endpoints").fetchone()[0] == 0
-            _a_rewind(state)
-            assert state.repo.ingest_batch(items, state.run, state.health, state.anchor)["blocked"] == "replay_identity_evidence_expired"
+        # Both ages exceed the shared 24h first-ingest horizon, with A ON or OFF.
+        assert result["committed"] == 0 and result["blocked"] is None
+        assert tuple(state.repo.connection.execute("SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates").fetchone()) == ("retention_expired_event", 1)
+        for table in ("observations", "source_records", "sensitive_endpoints"):
+            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_"+table).fetchone()[0] == 0
+        # Replaying an unpersisted expired event must not invent retained identity evidence.
+        _a_rewind(state)
+        replay = state.repo.ingest_batch(items, state.run, state.health, state.anchor)
+        assert replay["committed"] == 0 and replay["blocked"] is None
+        assert state.repo.load_active()[1].committed_byte_offset == items[0].end
+        assert tuple(state.repo.connection.execute("SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates").fetchone()) == ("retention_expired_event", 2)
+        for table in ("observations", "source_records", "sensitive_endpoints"):
+            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_"+table).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("category", ["invalid_utf8", "invalid_json", "duplicate_json_member", "non_object_json",

@@ -121,6 +121,7 @@ INDEX_DDL = {
 "idx_nm_faults_last_seen_category": "network_metadata_ingest_fault_aggregates(last_seen_utc,fault_category)",
 "idx_nm_bindings_site_valid_from": "network_metadata_capture_scope_bindings(site_id,valid_from_utc,binding_digest)",
 "idx_nm_ingest_runs_started": "network_metadata_ingest_runs(started_at_utc,ingest_run_id)",
+"idx_nm_observations_source_health_ref": "network_metadata_observations(source_health_ref)",
 }
 
 

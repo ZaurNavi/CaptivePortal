@@ -1,6 +1,6 @@
 """Bounded NI retention, never an active-generation or capacity override."""
 from datetime import timedelta
-from .models import RETENTION_MAX_BATCHES_PER_PASS
+from .models import RETENTION_MAX_BATCHES_PER_PASS, RETENTION_PARENT_BATCH_ROWS, CORE_RETENTION_DAYS
 from .validation import ni_format_utc, ni_timestamp
 
 
@@ -18,17 +18,17 @@ class RetentionPolicy:
             return
         now = ni_timestamp(transaction_now, canonical=True)
         oldest = min(ni_timestamp(row[1], canonical=True), ni_timestamp(row[2], canonical=True))
-        if oldest < now - timedelta(days=30):
+        if oldest < now - timedelta(days=CORE_RETENTION_DAYS):
             self._delete("core", [row[0]])
-        elif oldest < now - timedelta(days=14):
-            self._delete("sensitive", [row[0]])
 
     def run(self):
         repo = self.repository
         now = repo.clock()
-        cutoffs = {days: ni_format_utc(now - timedelta(days=days)) for days in (14, 30, 45, 90)}
-        totals = dict(sensitive=0, core=0, health=0, faults=0, generations=0, bindings=0, runs=0)
-        classes = tuple(totals)
+        cutoffs = {1: ni_format_utc(now - timedelta(days=CORE_RETENTION_DAYS))}
+        totals = dict(core=0, sensitive=0, health=0, faults=0, generations=0, bindings=0, runs=0)
+        # Equal horizons: parent CASCADE performs all event cleanup, once.
+        # Keep the redaction helper for explicit provenance handling, not GC.
+        classes = ("core", "health", "faults", "generations", "bindings", "runs")
         remaining_batches = RETENTION_MAX_BATCHES_PER_PASS
         for category in classes:
             while remaining_batches > 0:
@@ -49,17 +49,32 @@ class RetentionPolicy:
     def _select(self, kind, cutoff):
         conn = self.repository.connection
         if kind in {"sensitive", "core"}:
-            age = cutoff[14 if kind == "sensitive" else 30]
+            age = cutoff[1]
+            if kind == "core":
+                candidates = {}
+                for column in ("event_at", "ingested_at"):
+                    rows = conn.execute(
+                        "SELECT observation_id,event_at,ingested_at FROM network_metadata_observations "
+                        f"WHERE {column}<? ORDER BY {column},observation_id LIMIT ?",
+                        (age, RETENTION_PARENT_BATCH_ROWS))
+                    for identity, event_at, ingested_at in rows:
+                        candidates[identity] = min(ni_timestamp(event_at, canonical=True),
+                                                   ni_timestamp(ingested_at, canonical=True))
+                # Both branches compete by original age, not a fixed priority.
+                return sorted(candidates, key=lambda key: (candidates[key], key))[:RETENTION_PARENT_BATCH_ROWS]
             extra = " AND sensitive_endpoint_presence_state!='expired'" if kind == "sensitive" else ""
             return [row[0] for row in conn.execute(
                 "SELECT observation_id FROM network_metadata_observations WHERE (event_at<? OR ingested_at<?)" + extra +
                 " ORDER BY observation_id LIMIT 5000", (age, age))]
         if kind == "health":
             return [row[0] for row in conn.execute("""SELECT health_id FROM network_metadata_source_health
-                WHERE evaluated_at<? AND NOT EXISTS(SELECT 1 FROM network_metadata_observations o WHERE o.source_health_ref=health_id)
-                ORDER BY health_id LIMIT 5000""", (cutoff[45],))]
+                WHERE evaluated_at<? AND health_id!=coalesce((
+                    SELECT health_id FROM network_metadata_source_health WHERE capture_source_id=?
+                    ORDER BY evaluated_at DESC,rowid DESC LIMIT 1), '')
+                AND NOT EXISTS(SELECT 1 FROM network_metadata_observations o WHERE o.source_health_ref=health_id)
+                ORDER BY health_id LIMIT 5000""", (cutoff[1], self.repository.config.capture_scope_binding.capture_source_id))]
         if kind == "faults":
-            return [row[0] for row in conn.execute("SELECT rowid FROM network_metadata_ingest_fault_aggregates WHERE last_seen_utc<? ORDER BY rowid LIMIT 5000", (cutoff[45],))]
+            return [row[0] for row in conn.execute("SELECT rowid FROM network_metadata_ingest_fault_aggregates WHERE last_seen_utc<? ORDER BY rowid LIMIT 5000", (cutoff[1],))]
         if kind == "generations":
             return [row[0] for row in conn.execute("""SELECT source_generation_id FROM network_metadata_source_generations g
                 WHERE closed_at_utc<? AND processing_state='runnable'
@@ -68,17 +83,18 @@ class RetentionPolicy:
                 AND NOT EXISTS(SELECT 1 FROM network_metadata_source_records r WHERE r.source_generation_id=g.source_generation_id)
                 AND NOT EXISTS(SELECT 1 FROM network_metadata_source_health h WHERE h.source_generation_id=g.source_generation_id)
                 AND NOT EXISTS(SELECT 1 FROM network_metadata_ingest_fault_aggregates f WHERE f.source_generation_id=g.source_generation_id)
-                ORDER BY g.source_generation_id LIMIT 5000""", (cutoff[90],))]
+                ORDER BY g.source_generation_id LIMIT 5000""", (cutoff[1],))]
         if kind == "bindings":
             current = self.repository.config.capture_scope_binding.binding_digest
             return [row[0] for row in conn.execute("""SELECT binding_digest FROM network_metadata_capture_scope_bindings b
                 WHERE valid_from_utc<? AND binding_digest!=?
                 AND NOT EXISTS(SELECT 1 FROM network_metadata_source_generations g WHERE g.capture_scope_binding_digest=b.binding_digest)
                 AND NOT EXISTS(SELECT 1 FROM network_metadata_observations o WHERE o.capture_scope_binding_digest=b.binding_digest)
-                ORDER BY b.binding_digest LIMIT 5000""", (cutoff[90], current))]
+                ORDER BY b.binding_digest LIMIT 5000""", (cutoff[1], current))]
         return [row[0] for row in conn.execute("""SELECT ingest_run_id FROM network_metadata_ingest_runs r
-            WHERE started_at_utc<? AND NOT EXISTS(SELECT 1 FROM network_metadata_observations o WHERE o.ingest_run_id=r.ingest_run_id)
-            ORDER BY r.ingest_run_id LIMIT 5000""", (cutoff[90],))]
+            WHERE started_at_utc<? AND ingest_run_id!=?
+            AND NOT EXISTS(SELECT 1 FROM network_metadata_observations o WHERE o.ingest_run_id=r.ingest_run_id)
+            ORDER BY r.ingest_run_id LIMIT 5000""", (cutoff[1], getattr(self.repository, '_active_ingest_run_id', None) or ""))]
 
     def _delete(self, kind, ids):
         conn = self.repository.connection

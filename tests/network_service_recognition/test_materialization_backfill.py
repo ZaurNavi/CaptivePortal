@@ -37,7 +37,9 @@ def test_durable_keyset_resume_without_zero_restart(lane):
     lane.now.tick=2;lane.now.value+=timedelta(seconds=2)
     lane.worker.cycle()
     assert lane.repo.checkpoint(gen)['backfill_state']=='complete'
-    assert lane.repo.connection.execute('SELECT count(*) FROM service_recognition_observations').fetchone()[0]==129
+    # Restart maintenance removes exactly the first two now-over-24h rows;
+    # the durable keyset still advances to the end instead of replaying zero.
+    assert lane.repo.connection.execute('SELECT count(*) FROM service_recognition_observations').fetchone()[0]==127
     assert lane.repo.connection.execute('SELECT count(*) FROM device_service_rollups').fetchone()[0]==1
 
 

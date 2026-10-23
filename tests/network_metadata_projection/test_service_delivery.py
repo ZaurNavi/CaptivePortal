@@ -150,7 +150,7 @@ def test_G2_R1_QA02_QA03_audit_retention_id_reuse_does_not_change_cursor(state):
     assert changes(state) == (first,)
 
 
-def test_G2_R1_QA04_change_and_feed_sequences_survive_retention_recreation(state):
+def test_G2_R1_QA04_feed_sequence_and_current_change_survive_event_retention(state):
     install_service_recognition_extension(state.repo)
     state.service.poll()
     first_feed, = feed(state)
@@ -174,7 +174,9 @@ def test_G2_R1_QA04_change_and_feed_sequences_survive_retention_recreation(state
     second_feed, = feed(state)
     second_change, = changes(state)
     assert second_feed.feed_seq > first_feed.feed_seq
-    assert second_change.change_seq > first_change.change_seq
+    # Current authoritative identity is not historical binding-event garbage.
+    assert second_change.change_seq == first_change.change_seq
+    assert second_change.device_id == first_change.device_id
 
 
 def test_G2_late_binding_allocates_one_targeted_change(state):

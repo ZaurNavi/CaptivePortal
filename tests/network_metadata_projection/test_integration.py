@@ -211,7 +211,7 @@ def test_retry_crash_atomicity(tmp_path, point, committed):
 def test_exact_sensitive_cutoff_not_extended_by_projection_binding(tmp_path, age_field):
     value = stack(tmp_path)
     try:
-        boundary = value.clock() - timedelta(days=14)
+        boundary = value.clock() - timedelta(days=1)
         record = source_record(**{age_field: timestamp(boundary)})
         value.source.records = [record]
         # A read-only horizon earlier than this fixture permits exact-boundary projection.
@@ -398,18 +398,18 @@ def test_reopen_durable_projection_checkpoint_and_no_replay_refresh(tmp_path):
         value.repo.close()
 
 
-def test_binding_event_30d_run_and_invisible_checkpoint_90d_gc(tmp_path):
+def test_binding_event_24h_run_and_invisible_checkpoint_gc(tmp_path):
     value = stack(tmp_path)
     try:
         value.service.poll()
         run_id = value.service.run_id
-        value.clock.advance(days=30)
+        value.clock.advance(days=1)
         value.service.retain()
         assert value.repo.connection.execute("SELECT count(*) FROM projection_registry_binding_events").fetchone()[0] == 2
         value.clock.advance(microseconds=1)
         value.service.retain()
         assert value.repo.connection.execute("SELECT count(*) FROM projection_registry_binding_events").fetchone()[0] == 0
-        value.clock.advance(days=60)
+        value.clock.advance(days=2)
         value.service.retain()
         assert value.repo.checkpoint(GENERATION) is not None  # still-visible source generation
         assert value.repo.connection.execute("SELECT 1 FROM projection_runs WHERE projection_run_id=?", (run_id,)).fetchone() is not None
@@ -422,3 +422,28 @@ def test_binding_event_30d_run_and_invisible_checkpoint_90d_gc(tmp_path):
         assert value.repo.checkpoint(GENERATION) is None
     finally:
         value.repo.close()
+
+
+@pytest.mark.parametrize('fault', [None, 'uuid', 'offset'])
+def test_checkpoint_fallback_after_parent_gc_keeps_old_generation_continuity(tmp_path, fault):
+    from types import SimpleNamespace
+    value = stack(tmp_path)
+    try:
+        value.service.poll()
+        value.clock.advance(days=3)
+        value.source.records = []  # NI01 parent GC, not a projection cursor reset.
+        generation = SimpleNamespace(source_generation_id=GENERATION, generation_start_offset=0, committed_byte_offset=1)
+        if fault == 'uuid':
+            value.repo.connection.execute('UPDATE projection_source_checkpoints SET last_observation_id=?',(str(uuid.uuid4()),))
+        elif fault == 'offset':generation.committed_byte_offset = 0
+        if fault:
+            with pytest.raises(ProjectionConflict):value.service._checkpoint_verified(generation)
+            return
+        assert value.service._checkpoint_verified(generation) == 0
+        value.source.records = [source_record(1,event_at=timestamp(value.clock()-timedelta(seconds=1)),ingested_at=timestamp(value.clock()))]
+        original = value.attribution.resolve_ipv4
+        value.attribution.resolve_ipv4 = lambda *args: replace(original(*args),
+            valid_from='2026-01-01T00:00:00.000Z', valid_until='2030-01-01T00:00:00.000Z')
+        value.service.poll()
+        assert value.repo.checkpoint(GENERATION)['last_record_start_byte_offset'] == 1
+    finally:value.repo.close()

@@ -198,13 +198,68 @@ def test_ipv6_endpoint_absence_scope_direction_and_reader_validation(state):
 
 def test_retention_uses_event_and_ingested_not_projection_or_binding(state):
     state.service.poll()
-    state.clock.advance(days=14)
-    # source_ingested_at is already strictly older than 14d (clock began +30s).
+    state.clock.advance(days=1)
+    # source_ingested_at is already strictly older than 24h (clock began +30s).
     state.service.reconcile()
     state.service.retain()
     assert edges(state) == []
-    assert state.repo.connection.execute("SELECT count(*) FROM projection_site_mac_bindings").fetchone()[0] == 0
+    # Reconciliation just evaluated these current bindings; expiry is not reset.
+    assert state.repo.connection.execute("SELECT count(*) FROM projection_site_mac_bindings").fetchone()[0] == 2
     assert state.repo.connection.execute("SELECT count(*) FROM projection_registry_identities").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('age', [86399, 86400, 86401])
+@pytest.mark.parametrize('field', ['event_at', 'ingested_at'])
+@pytest.mark.parametrize('role', ['src', 'dst'])
+def test_24h_source_admission_checks_both_original_times_and_roles(state, age, field, role):
+    from app.network_metadata.validation import ni_format_utc
+    from types import SimpleNamespace
+    state.attribution.get_authority_horizon = lambda site: SimpleNamespace(state='available',
+        first_usable_at='2026-01-01T00:00:00.000Z', retained_from='2026-01-01T00:00:00.000Z')
+    original = state.attribution.resolve_ipv4
+    def resolve(*args):
+        value = original(*args)
+        return replace(value, valid_from='2026-01-01T00:00:00.000Z', valid_until='2026-12-01T00:00:00.000Z') if value.state == 'resolved' else value
+    state.attribution.resolve_ipv4 = resolve
+    value = replace(state.source.records[0], **{field:ni_format_utc(state.clock()-timedelta(seconds=age))})
+    state.source.records = [value]
+    state.attribution.states['10.73.0.8' if role == 'src' else '10.73.0.7'] = 'unattributed'
+    state.service.poll()
+    assert len(edges(state)) == int(age <= 86400)
+    assert state.repo.checkpoint(GENERATION)['last_record_start_byte_offset'] == 0
+    if age > 86400:assert state.attribution.calls == []
+
+
+def test_pending_expiry_updates_runtime_count_within_last_allowed_batch(state):
+    from app.network_metadata_projection.retention import ProjectionRetention
+    state.attribution.states = {'10.73.0.7':'unavailable', '10.73.0.8':'unavailable'}
+    state.service.poll()
+    assert state.repo.connection.execute('SELECT pending_attribution_count FROM projection_runtime_state').fetchone()[0] == 1
+    state.clock.advance(days=2)
+    state.repo.config = replace(state.config, retention_max_batches_per_pass=1)
+    result = ProjectionRetention(state.repo, state.source).run()
+    assert result['projection_pending_attribution'] == 1
+    assert not state.repo.pending()
+    assert state.repo.connection.execute('SELECT pending_attribution_count FROM projection_runtime_state').fetchone()[0] == 0
+    assert edges(state) == []
+    assert state.repo.checkpoint(GENERATION) is not None
+
+
+def test_authoritative_identity_and_change_index_survive_event_gc(state):
+    from app.network_metadata_projection.service_extension import install_service_recognition_extension
+    install_service_recognition_extension(state.repo)
+    state.registry.values[MAC] = RegistryEvaluation('authoritative', str(uuid.uuid4()))
+    state.service.poll()
+    before = tuple(tuple(r) for r in state.repo.connection.execute('SELECT * FROM projection_registry_binding_change_index'))
+    identity = dict(state.repo.binding(SITE, MAC))
+    state.clock.advance(days=3)
+    state.service.retain()
+    assert edges(state) == []
+    assert dict(state.repo.binding(SITE, MAC)) == identity
+    assert state.repo.connection.execute('SELECT 1 FROM projection_registry_identities WHERE device_id=?',(identity['device_id'],)).fetchone()
+    assert before == tuple(tuple(r) for r in state.repo.connection.execute('SELECT * FROM projection_registry_binding_change_index'))
+    assert state.repo.checkpoint(GENERATION) is not None
+    assert state.repo.connection.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
 def test_exact_schema_missing_join_fail_closed_and_source_failure(state):
