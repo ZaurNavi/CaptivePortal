@@ -7,7 +7,8 @@ from .materialization_config import materialization_config_from_env
 def main(argv=None):
     parser=argparse.ArgumentParser(description='NI-04 background Service Intelligence')
     parser.add_argument('command',choices=('run',))
-    parser.parse_args(argv)
+    parser.add_argument('--visit-history-db',default=None,help='Explicit Owner-approved Visit consumer DB; default disabled')
+    args=parser.parse_args(argv)
     repo=None
     try:
         config=materialization_config_from_env()
@@ -17,7 +18,8 @@ def main(argv=None):
         from .artifacts import load_local_bundle
         from .materialization_repository import ServiceMaterializationRepository
         from .worker import ServiceMaterializationWorker
-        repo=ServiceMaterializationRepository(config.db_path,max_db_bytes=config.max_db_bytes)
+        repo=ServiceMaterializationRepository(config.db_path,max_db_bytes=config.max_db_bytes,
+            visit_delivery_db_path=args.visit_history_db)
         service=ServiceMaterializationWorker(repo,
             ServiceRecognitionDeliveryReadService(config.projection_db_path,idle_write_reduction_enabled=config.projection_idle_write_reduction_enabled),
             WorkerSourceReadService(config.source_db_path),load_local_bundle())

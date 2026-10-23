@@ -99,16 +99,49 @@ class MaterializationUnavailable(RuntimeError):
         super().__init__("materialization_unavailable")
 
 
+# Exactly one additional source-owned table. Sequence zero is the durable
+# stream/floor anchor, not a second queue or metadata database. Facts have no
+# FK to expiring NI04 generations: unacknowledged delivery must survive them.
+VISIT_OUTBOX_DDL = """CREATE TABLE ni04_visit_delivery_outbox (
+    outbox_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('anchor','positive','binding','generation')),
+    site_id TEXT,device_id TEXT,client_mac TEXT,edge_id TEXT,service_id TEXT,
+    observed_at TEXT,source_ref TEXT,generation_id TEXT,source_observation_id TEXT,
+    binding_seq INTEGER CHECK(binding_seq>0),
+    taxonomy_id TEXT,taxonomy_version INTEGER,taxonomy_digest TEXT,
+    ruleset_id TEXT,ruleset_version INTEGER,ruleset_digest TEXT,rule_id TEXT,
+    service_label TEXT,organization_id TEXT,organization_label TEXT,category_id TEXT,
+    created_at TEXT NOT NULL,previous_hash TEXT NOT NULL,entry_hash TEXT NOT NULL,
+    head_seq INTEGER,head_hash TEXT,floor_seq INTEGER,floor_hash TEXT,consumer_id TEXT,
+    CHECK((kind='anchor')=(outbox_seq=0)),
+    CHECK((kind='anchor')=(head_seq IS NOT NULL)),
+    CHECK(kind<>'anchor' OR (head_seq>=floor_seq AND floor_seq>=0 AND head_hash IS NOT NULL AND floor_hash IS NOT NULL)),
+    CHECK(kind<>'positive' OR (site_id IS NOT NULL AND device_id IS NOT NULL AND client_mac IS NOT NULL
+        AND edge_id IS NOT NULL AND service_id IS NOT NULL AND observed_at IS NOT NULL
+        AND source_ref IS NOT NULL AND generation_id IS NOT NULL AND source_observation_id IS NOT NULL
+        AND binding_seq IS NOT NULL AND taxonomy_id IS NOT NULL AND taxonomy_version>0 AND taxonomy_digest IS NOT NULL
+        AND ruleset_id IS NOT NULL AND ruleset_version>0 AND ruleset_digest IS NOT NULL AND rule_id IS NOT NULL
+        AND service_label IS NOT NULL AND organization_id IS NOT NULL AND organization_label IS NOT NULL AND category_id IS NOT NULL)),
+    CHECK(kind<>'binding' OR (site_id IS NOT NULL AND device_id IS NOT NULL AND client_mac IS NOT NULL AND binding_seq IS NOT NULL)),
+    CHECK(kind<>'generation' OR generation_id IS NOT NULL))"""
+VISIT_OUTBOX_INDEX = "CREATE INDEX idx_ni04_visit_delivery_identity ON ni04_visit_delivery_outbox(site_id,client_mac,outbox_seq)"
+DDL_V2 = (DDL[0].replace('CHECK(schema_version=1)', 'CHECK(schema_version=2)'), *DDL[1:],
+    VISIT_OUTBOX_DDL, VISIT_OUTBOX_INDEX)
+
+
 def signature(connection):
     return tuple((kind,name," ".join(sql.lower().split()) if sql else None)
         for kind,name,sql in connection.execute("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
 
 
-@lru_cache(maxsize=1)
-def expected_signature():
+@lru_cache(maxsize=2)
+def expected_signature(version=2):
+    if type(version) is not int or version not in (1,2):
+        raise MaterializationUnavailable()
     connection = sqlite3.connect(":memory:")
     try:
-        for statement in DDL:
+        for statement in (DDL if version==1 else DDL_V2):
             connection.execute(statement)
         return signature(connection)
     finally:
@@ -117,23 +150,48 @@ def expected_signature():
 
 def create_schema(connection, at):
     ni_timestamp(at, canonical=True)
-    for statement in DDL:
+    for statement in DDL_V2:
         connection.execute(statement)
-    connection.execute("PRAGMA user_version=1")
-    connection.execute("INSERT INTO service_materialization_schema VALUES(1,1,1,?,?)", (ALGORITHM,at))
+    connection.execute("PRAGMA user_version=2")
+    connection.execute("INSERT INTO service_materialization_schema VALUES(1,2,1,?,?)", (ALGORITHM,at))
     connection.execute("INSERT INTO service_materialization_runtime(singleton_id,runtime_state,updated_at_utc) VALUES(1,'initializing',?)", (at,))
+    create_visit_delivery_anchor(connection, at)
+
+
+def create_visit_delivery_anchor(connection, at):
+    import uuid
+    from hashlib import sha256
+    stream=str(uuid.uuid4()); initial=sha256(('ni04-visit-delivery-v1:'+stream).encode('ascii')).hexdigest()
+    connection.execute("INSERT INTO ni04_visit_delivery_outbox(outbox_seq,stream_id,kind,created_at,previous_hash,entry_hash,head_seq,head_hash,floor_seq,floor_hash) VALUES(0,?,'anchor',?,?,?,0,?,0,?)",
+        (stream,at,initial,initial,initial,initial))
+
+
+def migrate_visit_delivery(connection, at):
+    """Only the NI04 sole writer calls this inside its existing transaction."""
+    validate_schema(connection, integrity=True)
+    if connection.execute('PRAGMA user_version').fetchone()[0] != 1:
+        raise MaterializationUnavailable()
+    connection.execute('ALTER TABLE service_materialization_schema RENAME TO old_materialization_schema_v1')
+    connection.execute(DDL_V2[0])
+    connection.execute('INSERT INTO service_materialization_schema SELECT singleton_id,2,materialization_contract_version,algorithm_version,created_at_utc FROM old_materialization_schema_v1')
+    connection.execute('DROP TABLE old_materialization_schema_v1')
+    connection.execute(VISIT_OUTBOX_DDL);connection.execute(VISIT_OUTBOX_INDEX)
+    create_visit_delivery_anchor(connection, at)
+    connection.execute('PRAGMA user_version=2')
+    validate_schema(connection, integrity=True)
 
 
 def validate_schema(connection, *, integrity=False):
     try:
-        if signature(connection) != expected_signature():
+        version=connection.execute('PRAGMA user_version').fetchone()[0]
+        if type(version) is not int or version not in (1,2) or signature(connection) != expected_signature(version):
             raise ValueError
-        if connection.execute("PRAGMA user_version").fetchone()[0] != 1 or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
             raise ValueError
         if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
             raise ValueError
         rows = connection.execute("SELECT * FROM service_materialization_schema").fetchall()
-        if len(rows) != 1 or tuple(rows[0][:4]) != (1,1,1,ALGORITHM):
+        if len(rows) != 1 or tuple(rows[0][:4]) != (1,version,1,ALGORITHM):
             raise ValueError
         ni_timestamp(rows[0][4],canonical=True)
         runtime=connection.execute("SELECT active_generation_id,updated_at_utc FROM service_materialization_runtime").fetchall()
@@ -143,6 +201,11 @@ def validate_schema(connection, *, integrity=False):
         active=connection.execute("SELECT generation_id FROM service_materialization_generations WHERE state='active' LIMIT 2").fetchall()
         if len(active)>1 or runtime[0][0]!=(active[0][0] if active else None):
             raise ValueError
+        if version==2:
+            anchor=connection.execute("SELECT stream_id,head_seq,head_hash,floor_seq,floor_hash FROM ni04_visit_delivery_outbox WHERE outbox_seq=0 AND kind='anchor'").fetchone()
+            if anchor is None or not 0<=anchor[3]<=anchor[1]:raise ValueError
+            from app.network_metadata.validation import canonical_uuid,digest
+            canonical_uuid(anchor[0]);digest(anchor[2]);digest(anchor[4])
         if integrity and (tuple(row[0] for row in connection.execute("PRAGMA quick_check")) != ("ok",)
                 or connection.execute("PRAGMA foreign_key_check").fetchone() is not None):
             raise ValueError
