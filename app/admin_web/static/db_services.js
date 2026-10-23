@@ -26,7 +26,13 @@
     dependencies_unconfirmed:"Required dependencies not confirmed", pending_attribution:"Limited: confirmed pending attribution backlog",
     registry_degraded:"Registry dependency degraded", source_poll_stale:"Source confirmation is stale", capacity_limited:"Source capacity limited",
     blocked_conflict:"Source blocked by a conflict", report_unavailable:"Trusted health evidence unavailable", report_stale:"Health evidence expired",
-    backfilling_incomplete_coverage:"Backfilling / coverage incomplete", source_lagging:"Source processing is lagging", source_stale:"Native source is stale"};
+    backfilling_incomplete_coverage:"Backfilling / coverage incomplete", source_lagging:"Source processing is lagging", source_stale:"Native source is stale",
+    projection_rebuilding:"Projection rebuilding / coverage incomplete", projection_catching_up:"Projection catching up", projection_stale:"Projection data is stale",
+    core_composed:"Local Core composition ready; not Omada end-to-end verification", core_unavailable:"Required Web/Auth composition unavailable",
+    core_component_degraded:"Required enabled component has limited availability", authorization_degraded:"Recent cached authorization failure"};
+  const phaseBNotice=(row)=>row.application_health_evidence?.source==="observed_via_sensor" ? "Observed via Sensor; not a Suricata self-report" :
+    row.application_health_evidence?.source==="portal_in_process" ? "In-process composition; not Omada end-to-end verification" :
+    ["projection_rebuilding","projection_catching_up","projection_stale"].includes(row.application_health_evidence?.reason) ? healthReasons[row.application_health_evidence.reason] : null;
   const reason = (value) => value == null ? "No collection failure reported" : Object.hasOwn(reasons, value) ? reasons[value] : "Evidence unavailable";
   function element(tag, text, cls) {
     const node = document.createElement(tag);
@@ -243,6 +249,7 @@
             node.append(badge(row.operational_state,"service"),appBadge);
             if(row.application_health_evidence?.reason==="backfilling_incomplete_coverage")
               node.append(element("small",healthReasons.backfilling_incomplete_coverage));
+            if(phaseBNotice(row))node.append(element("small",phaseBNotice(row)));
           } else if (item.node_type === "database") {
             const row = dbRows.get(item.catalog_ref);
             node.append(element("small", row.filename, "mono"), databaseBadge(row,model), element("small", bytes(row.total_footprint_bytes)));
@@ -326,6 +333,7 @@
       states.append(element("span", "Process"), badge(row.operational_state, "service"), element("span", "Application health"), badge(row.application_health, "application"));
       if(row.application_health_evidence?.reason==="backfilling_incomplete_coverage")
         states.append(element("span",healthReasons.backfilling_incomplete_coverage));
+      if(phaseBNotice(row))states.append(element("span",phaseBNotice(row)));
       const process = element("div", null, "ops-process");
       process.append(field("PID", row.main_pid), field("Uptime", uptime(row.uptime_seconds)), field("Restarts", row.n_restarts));
       article.append(identity, states, process, field("Expected", display(row.expected_mode)), details([
@@ -435,23 +443,32 @@
   function validV2(model) {
     const states = new Set(["healthy","degraded","unavailable","unknown","stale"]);
     const sources={fingerprint_sensor:"sensor_native.v2",network_metadata_projection:"source_self_reported_shared_uid",
-      fingerprint_evidence:"source_self_reported_shared_uid",network_metadata:"source_self_reported_shared_uid",network_service_recognition:"source_self_reported_shared_uid"};
-    const owners=["fingerprint_evidence","network_metadata","network_service_recognition"];
+      fingerprint_evidence:"source_self_reported_shared_uid",network_metadata:"source_self_reported_shared_uid",network_service_recognition:"source_self_reported_shared_uid",
+      fingerprint_classification:"source_self_reported_shared_uid",traffic_projection:"source_self_reported_shared_uid",fingerprint_suricata:"observed_via_sensor",portal_core:"portal_in_process"};
+    const owners=["fingerprint_evidence","network_metadata","network_service_recognition","fingerprint_classification","traffic_projection"];
     const ownerReasons={source_ready:"healthy",backfilling_incomplete_coverage:"healthy",source_degraded:"degraded",source_lagging:"degraded",source_stale:"degraded",
-      source_unavailable:"unavailable",capacity_limited:"unavailable",blocked_conflict:"unavailable",source_initializing:"unknown",source_stopping:"unknown",dependencies_unconfirmed:"unknown"};
+      source_unavailable:"unavailable",capacity_limited:"unavailable",blocked_conflict:"unavailable",source_initializing:"unknown",source_stopping:"unknown",dependencies_unconfirmed:"unknown",
+      projection_rebuilding:"degraded",projection_catching_up:"degraded",projection_stale:"degraded"};
+    const coreReasons={core_composed:"healthy",core_unavailable:"unavailable",core_component_degraded:"degraded",authorization_degraded:"degraded",dependencies_unconfirmed:"unknown"};
+    const proxyReasons={source_ready:"healthy",source_unavailable:"unavailable",dependencies_unconfirmed:"unknown"};
+    const noSource=(e)=>e.state==="unknown" && e.reason==="report_unavailable" || e.state==="stale" && e.reason==="report_stale";
+    const localValid=(row,e)=>!["portal_core","fingerprint_suricata"].includes(row.id) || (e.source==="none" ? noSource(e) :
+      e.state==="stale" ? e.reason==="report_stale" : (row.id==="portal_core" ? coreReasons : proxyReasons)[e.reason]===e.state);
     const ownerValid=(row,e)=>!owners.includes(row.id) || (e.source==="none" ?
       (e.state==="unknown" && e.reason==="report_unavailable" || e.state==="stale" && e.reason==="report_stale") : (e.state==="stale" ? e.reason==="report_stale" :
       ownerReasons[e.reason]===e.state && (!["backfilling_incomplete_coverage","source_lagging","capacity_limited","blocked_conflict"].includes(e.reason) || row.id==="network_service_recognition") &&
-      (e.reason!=="source_stale" || row.id==="network_metadata")));
+      (e.reason!=="source_stale" || row.id==="network_metadata") &&
+      (!["projection_rebuilding","projection_catching_up","projection_stale"].includes(e.reason) || row.id==="traffic_projection")));
     const keys = (value, expected) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === expected;
     return model.services.every((row) => {
       const e = row.application_health_evidence;
       return keys(e, "age,observed_at,reason,received_at,source,state,ttl") && states.has(e.state) && e.state === row.application_health &&
-        Object.hasOwn(healthReasons, e.reason) && ["none","sensor_native.v2","source_self_reported_shared_uid"].includes(e.source) &&
+        Object.hasOwn(healthReasons, e.reason) && ["none","sensor_native.v2","source_self_reported_shared_uid","observed_via_sensor","portal_in_process"].includes(e.source) &&
         Number.isInteger(e.ttl) && e.ttl > 0 && e.ttl <= 180 && (e.age === null || Number.isFinite(e.age) && e.age >= 0) &&
-        (e.source==="none" || sources[row.id]===e.source) && ownerValid(row,e) &&
+        (e.source==="none" || sources[row.id]===e.source) && ownerValid(row,e) && localValid(row,e) &&
         (Object.hasOwn(sources,row.id) || e.state === "unknown" && e.source === "none") &&
-        (!["backfilling_incomplete_coverage","source_lagging","source_stale"].includes(e.reason) || owners.includes(row.id) && e.source!=="none") &&
+        (!["backfilling_incomplete_coverage","source_lagging","source_stale","projection_rebuilding","projection_catching_up","projection_stale",...Object.keys(coreReasons).filter(k=>k!=="dependencies_unconfirmed")].includes(e.reason) ||
+          (owners.includes(row.id) || row.id==="portal_core" || row.id==="fingerprint_suricata") && e.source!=="none") &&
         (!["healthy","degraded","unavailable"].includes(e.state) || e.source !== "none" && Number.isFinite(e.age) && e.age <= e.ttl && typeof e.observed_at === "string" && typeof e.received_at === "string");
     }) && model.databases.every((row) => validVerification(row) &&
       keys(row.metadata_evidence,"age,source,state,ttl") && ["sensor_metadata","sampler_lstat","none"].includes(row.metadata_evidence.source) &&

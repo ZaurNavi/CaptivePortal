@@ -60,7 +60,10 @@ def test_v2_truthful_native_health_and_v1_identical_projection(monkeypatch,nativ
         assert all(r['application_health']=='unknown' for r in old['services'])
         sensor=next(r for r in model['services'] if r['id']=='fingerprint_sensor')
         assert sensor['operational_state']=='running' and sensor['application_health']==state
-        assert all(r['application_health']=='unknown' for r in model['services'] if r['id']!='fingerprint_sensor')
+        proxy = next(r for r in model['services'] if r['id']=='fingerprint_suricata')
+        assert proxy['application_health'] == ('unknown' if native=='missing' else 'healthy')
+        assert proxy['application_health_evidence']['source'] == ('none' if native=='missing' else 'observed_via_sensor')
+        assert all(r['application_health']=='unknown' for r in model['services'] if r['id'] not in {'fingerprint_sensor','fingerprint_suricata'})
         for row in model['databases']:
             assert row['store_verification']==dict(status='not_attested',scope=None,as_of=None,source='none',last_result=None,binding='unknown')
             assert row['health_evidence']=='none' and row['schema_observed_version'] is None
@@ -85,11 +88,11 @@ def test_v2_truthful_native_health_and_v1_identical_projection(monkeypatch,nativ
 def test_source_ttl_inside_fresh_common_cache_never_extends_green(monkeypatch):
     clock=[ORIGIN];service,reader,sources=reader_service(monkeypatch,clock=clock)
     try:
-        assert service.read('before',version=2)['summary']['application_health']['healthy']==1
+        assert service.read('before',version=2)['summary']['application_health']['healthy']==2
         clock[0]+=180_000_000_001
         model=validate_v2(service.read('expired',version=2))
         assert model['sample_status']=='fresh' and model['summary']['application_health']['healthy']==0
-        assert model['summary']['application_health']['stale']==1
+        assert model['summary']['application_health']['stale']==2
         assert sources==[1] and reader.calls==1
         assert next(r for r in model['databases'] if r['id']=='sensor_spool')['journal_bytes'] is None
     finally:service.close()

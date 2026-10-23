@@ -50,6 +50,14 @@ class IntegrationWorker:
     def __init__(self, repository, executor, identity_resolver, *, clock=utc_now):
         self.repository, self.executor, self.resolver = repository, executor, identity_resolver
         self.clock, self.stop_event = clock, threading.Event()
+        from app.operations_app_health import HealthPublisher
+        from app.operations_health import CLASSIFICATION_UNIT
+        self._app_health = HealthPublisher(CLASSIFICATION_UNIT)
+
+    def _publish_app_health(self, outcome):
+        from app.operations_health import CLASSIFICATION_UNIT, owner_health
+        try:self._app_health.publish(owner_health(CLASSIFICATION_UNIT, outcome), force=outcome == 'stopping')
+        except Exception:pass
 
     def run_once(self):
         activity, _owned_completed = self._run_cycle()
@@ -113,16 +121,20 @@ class IntegrationWorker:
                 if not owned_completed:
                     last_ready_at = None
                     emit("fingerprint.integration_worker_health", reason_code="consumer_lock_unavailable")
+                    self._publish_app_health('consumer_lock_unavailable')
                 else:
                     now = time.monotonic()
                     # A backwards clock reading cannot make a heartbeat due.
                     if last_ready_at is None or now - last_ready_at >= READY_HEARTBEAT_MAX_INTERVAL_SECONDS:
                         emit("fingerprint.integration_worker_health", reason_code="ready")
+                        self._publish_app_health('ready')
                         last_ready_at = now
             except Exception:
                 last_ready_at = None
                 emit("fingerprint.integration_worker_health", reason_code="integration_unavailable")
+                self._publish_app_health('integration_unavailable')
             self.stop_event.wait(1)
+        self._publish_app_health('stopping')
 
     def stop(self):
         self.stop_event.set()

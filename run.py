@@ -492,6 +492,9 @@ def main() -> None:
     if settings_bootstrap.activation_service is not None:
         settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime, _analytics_runtime,
                                                     feature_plan=settings_bootstrap.feature_plan)
+    # Already-completed mandatory composition only; no live health checks here.
+    from app.admin_web.runtime import bind_core_operations_snapshot
+    bind_core_operations_snapshot(app, settings)
     # Shared-provider consumers may use candidate G only after durable adoption.
     try:
         _pending_session_cleaner.start()

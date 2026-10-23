@@ -1,7 +1,7 @@
 """Tiny same-admin in-memory owner health transport. No startup checks or probes.
 
-Only Phase A owners; file evidence is self-reported, never an authorization or
-independent attestation. Reuses the already-provisioned secure tmpfs channels.
+File evidence is self-reported, never an authorization or independent attestation.
+Missing/unapproved provisioning remains unknown; this code never provisions it.
 """
 import hashlib
 import json
@@ -12,12 +12,22 @@ import uuid
 from datetime import datetime, timezone
 
 from app.device_fingerprint_sensor import operations_metadata as m
-from app.operations_verification_report import configured_channel
-from app.operations_health import OWNER_UNITS, validate_owner
+from app.operations_verification_report import configured_channel as startup_channel
+from app.operations_health import CLASSIFICATION_UNIT, OWNER_UNITS, validate_owner
 
 SCHEMA = "captivprod.ops.owner-app-health.v1"
 REPORT = "app-health.json"
 PROVENANCE = "source_self_reported_shared_uid"
+
+
+def configured_channel(unit):
+    if unit != CLASSIFICATION_UNIT:
+        return startup_channel(unit)  # Historical startup transport is untouched.
+    import pwd
+    from app.network_metadata_projection.operations_health import Channel
+    uid = pwd.getpwnam('admin').pw_uid
+    m.require(uid > 0)
+    return Channel(uid, '/run/captiveportal-operations/classification')
 
 
 def decode(raw, unit):
@@ -50,8 +60,11 @@ def _stamp(info):
 
 class HealthPublisher:
     def __init__(self, unit, *, enabled=None, channel=configured_channel, monotonic=time.monotonic,
-                 now=lambda: datetime.now(timezone.utc), boottime=m.boot_ns, identity=m.process_identity):
+                 now=lambda: datetime.now(timezone.utc), boottime=m.boot_ns, identity=m.process_identity,
+                 interval=m.INTERVAL):
         m.require(unit in OWNER_UNITS)
+        m.require(type(interval) in {int, float} and 0 < interval <= m.INTERVAL)
+        self.interval = interval
         self.unit, self.channel, self.monotonic, self.now = unit, channel, monotonic, now
         self.boottime, self.identity = boottime, identity
         self.enabled = os.environ.get('WEB_ADMIN_DB_SERVICES_ENABLED', 'false') == 'true' if enabled is None else enabled is True
@@ -69,7 +82,7 @@ class HealthPublisher:
                 self.pid, self.epoch, self.sequence = pid, str(uuid.uuid4()), 0
                 self.last_attempt = self.last_health = None
             # Idle renewals every 60s; state transitions at most once per second.
-            interval = m.INTERVAL if health == self.last_health else 1.0
+            interval = self.interval if health == self.last_health else 1.0
             if not force and self.last_attempt is not None and tick-self.last_attempt < interval:return False
             self.last_attempt, self.last_health = tick, dict(health)
             deadline = tick + m.BUDGET

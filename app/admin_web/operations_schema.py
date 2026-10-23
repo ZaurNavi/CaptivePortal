@@ -1,5 +1,5 @@
 """Closed v2 projection contract. No raw producer report crosses this boundary."""
-from app.operations_health import STATES, REASONS, OWNER_SERVICES, validate_owner
+from app.operations_health import STATES, REASONS, OWNER_SERVICES, LOCAL_SERVICES, APP_SOURCES, PHASE_REASONS, validate_owner, validate_local
 from app.device_fingerprint_sensor.operations_metadata import parse_stamp
 import math
 from .operations_inventory import SERVICES, STORES
@@ -31,30 +31,29 @@ def validate_v2(model):
         evidence = row["application_health_evidence"]
         require(type(evidence) is dict and set(evidence) == {"state", "source", "observed_at", "received_at", "age", "ttl", "reason"})
         require(evidence["state"] in STATES and row["application_health"] == evidence["state"])
-        require(evidence["source"] in {"none", "sensor_native.v2", "source_self_reported_shared_uid"} and evidence["reason"] in REASONS)
-        require(evidence["source"] == "none" or evidence["source"] == {
-            "fingerprint_sensor": "sensor_native.v2", "network_metadata_projection": "source_self_reported_shared_uid",
-            "fingerprint_evidence": "source_self_reported_shared_uid", "network_metadata": "source_self_reported_shared_uid",
-            "network_service_recognition": "source_self_reported_shared_uid"}.get(row["id"]))
+        require(evidence["source"] in {'none', *APP_SOURCES.values()} and evidence["reason"] in REASONS)
+        require(evidence["source"] == "none" or evidence["source"] == APP_SOURCES.get(row["id"]))
         require(type(evidence["ttl"]) is int and 0 < evidence["ttl"] <= 180)
         require(evidence["age"] is None or type(evidence["age"]) in {float, int} and math.isfinite(evidence["age"]) and 0 <= evidence["age"] <= 2**53-1)
         for key in ("observed_at", "received_at"):
             if evidence[key] is not None:
                 try:parse_stamp(evidence[key])
                 except Exception:require(False)
-        if row["id"] in {"portal_core", "fingerprint_suricata", "fingerprint_classification", "traffic_projection"}:
-            require(evidence["state"] == "unknown" and evidence["source"] == "none")
-        if row["id"] in OWNER_SERVICES:
+        if row["id"] in OWNER_SERVICES or row['id'] in LOCAL_SERVICES:
             if evidence["source"] == "none":
                 require((evidence['state'], evidence['reason']) in {
                     ('unknown', 'report_unavailable'), ('stale', 'report_stale')})
             elif evidence["state"] == "stale":
                 require(evidence["reason"] == "report_stale")
             else:
-                try:validate_owner({key: evidence[key] for key in ('state','reason')}, OWNER_SERVICES[row['id']])
+                try:
+                    validator = validate_owner if row['id'] in OWNER_SERVICES else validate_local
+                    validator({key: evidence[key] for key in ('state','reason')},
+                        (OWNER_SERVICES | LOCAL_SERVICES)[row['id']])
                 except ValueError:require(False)
-        if evidence['reason'] in {'backfilling_incomplete_coverage','source_lagging','source_stale'}:
-            require(row['id'] in OWNER_SERVICES and evidence['source'] != 'none')
+        if evidence['reason'] in PHASE_REASONS:
+            require(row['id'] in OWNER_SERVICES or row['id'] in LOCAL_SERVICES)
+            require(evidence['source'] != 'none')
         if evidence["state"] in {"healthy", "degraded", "unavailable"}:
             require(evidence["source"] != "none" and evidence["age"] is not None and evidence["age"] <= evidence["ttl"])
             require(type(evidence["observed_at"]) is str and type(evidence["received_at"]) is str)

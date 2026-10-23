@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -32,6 +33,71 @@ from .device_list_context_config import (
     device_list_context_config_from_settings,
 )
 from .device_list_context_cursor import DeviceListContextCursorCodec
+
+
+def bind_core_operations_snapshot(app, settings):
+    """Record completed composition once; inject only process-local memory reads."""
+    try:
+        runtime = app.extensions.get('admin_web_runtime')
+        if runtime is None or runtime.operations_service is None:
+            return
+        capport = settings.get('capport_enabled', False)
+        if capport in ('true', 'false'):capport = capport == 'true'
+        admin = getattr(runtime.config, 'enabled', None)
+        # Unknown effective intent stays unknown; never rebuild configuration.
+        app.extensions['operations_core_composition'] = (os.getpid(), capport, admin)
+        runtime.operations_service.set_core_snapshot_provider(lambda now: core_operations_snapshot(app, now))
+    except Exception:pass
+
+
+def core_operations_snapshot(app, now):
+    """Composition evidence, NOT a live Omada/guest transaction or health probe."""
+    from app.operations_health import CORE_UNIT, validate_local
+    from app.device_fingerprint_sensor.operations_metadata import TTL
+    from app.auth.health import OUTCOME_VERIFIED_SUCCESS, OUTCOME_RETRYABLE_FAILURE, OUTCOME_BLOCKING_FAILURE
+    state, reason, observed = 'unknown', 'dependencies_unconfirmed', now
+    try:
+        marker = app.extensions.get('operations_core_composition')
+        if not marker or marker[0] != os.getpid() or any(type(v) is not bool for v in marker[1:]):
+            return dict(health=dict(state=state, reason=reason), observed_at=observed)
+        handler = app.extensions.get('portal_entry_handler')
+        if handler is None or any(getattr(handler, field, None) is None for field in
+                                 ('_auth_worker', '_session_manager', '_executor')):
+            state, reason = 'unavailable', 'core_unavailable'
+        else:
+            runtime = app.extensions.get('admin_web_runtime')
+            if marker[1] and app.extensions.get('capport_service') is None:
+                state, reason = 'degraded', 'core_component_degraded'
+            elif marker[2] and (runtime is None or getattr(runtime, 'blueprint', None) is None or
+                    runtime.blueprint.name not in app.blueprints):
+                state, reason = 'degraded', 'core_component_degraded'
+            elif marker[2] and getattr(runtime, 'state', None) not in ('active', 'unavailable', 'disabled'):
+                # Registration alone cannot establish mandatory Admin readiness.
+                state, reason = 'unknown', 'dependencies_unconfirmed'
+            elif marker[2] and (runtime.state != 'active' or getattr(runtime, 'query_service', None) is None):
+                state, reason = 'degraded', 'core_component_degraded'
+            else:
+                tracker = app.extensions.get('authorization_health_tracker')
+                snapshots = tracker.snapshots()  # Already bounded, in-memory only.
+                bad, invalid = [], False
+                for record in snapshots.values():
+                    if record.outcome is None and record.observed_at is None:continue
+                    age = (now-record.observed_at).total_seconds()
+                    if age < 0 or record.outcome not in {OUTCOME_VERIFIED_SUCCESS,
+                            OUTCOME_RETRYABLE_FAILURE, OUTCOME_BLOCKING_FAILURE}:
+                        invalid = True
+                    elif age <= TTL and record.outcome != OUTCOME_VERIFIED_SUCCESS:
+                        bad.append(record.observed_at)
+                if bad:
+                    # Per-site outcomes prove partial failure, not global Core
+                    # composition failure or an Omada end-to-end diagnosis.
+                    state, reason, observed = 'degraded', 'authorization_degraded', max(bad)
+                elif not invalid:
+                    # Idle/no auth outcomes and stale historical failures are NOT outages.
+                    state, reason = 'healthy', 'core_composed'
+    except Exception:
+        state, reason, observed = 'unknown', 'dependencies_unconfirmed', now
+    return dict(health=validate_local(dict(state=state, reason=reason), CORE_UNIT), observed_at=observed)
 
 
 @dataclass(slots=True)
