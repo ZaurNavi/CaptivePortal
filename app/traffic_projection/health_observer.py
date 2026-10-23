@@ -36,6 +36,30 @@ class TrafficProjectionHealthObserver:
         self._reconcile_progress: dict[
             tuple[str, str], tuple[tuple[Any, Any], float, bool]
         ] = {}
+        from app.operations_app_health import HealthPublisher
+        from app.operations_health import TRAFFIC_UNIT
+        self._app_health = HealthPublisher(TRAFFIC_UNIT, monotonic=monotonic,
+            interval=HEARTBEAT_INTERVAL_SECONDS)
+        self._app_site_states: dict[tuple[str, str], tuple[str, float]] = {}
+        self._app_ownership_confirmed = False
+
+    def _owned_keys_locked(self, keys):
+        changed = not self._app_ownership_confirmed or self.known_owned_keys != keys
+        self.known_owned_keys = keys
+        self._app_ownership_confirmed = True
+        self._app_site_states = {key: value for key, value in self._app_site_states.items() if key in keys}
+        return changed
+
+    def _publish_app_health_locked(self):
+        from app.operations_health import TRAFFIC_UNIT, owner_health, traffic_health
+        try:
+            if not self._app_health.enabled:return
+            value = (owner_health(TRAFFIC_UNIT, None) if not self._app_ownership_confirmed else
+                traffic_health(self.known_owned_keys, self._app_site_states, self._monotonic(),
+                    ownership_confirmed=True, freshness=HEARTBEAT_INTERVAL_SECONDS))
+            if self._stop.is_set():value = dict(state='unknown', reason='source_stopping')
+            self._app_health.publish(value, force=self._stop.is_set())
+        except Exception:pass
 
     def start(self, initial_services) -> None:
         services = tuple(initial_services)
@@ -45,7 +69,7 @@ class TrafficProjectionHealthObserver:
             for site_id in service.config.site_ids
         }
         with self._lock:
-            self.known_owned_keys = keys
+            self._owned_keys_locked(keys)
         for service in services:
             for site_id in service.config.site_ids:
                 self.observe_service_site(
@@ -64,6 +88,8 @@ class TrafficProjectionHealthObserver:
 
     def request_stop(self) -> None:
         self._stop.set()
+        try:self._app_health.publish(dict(state='unknown', reason='source_stopping'), force=True)
+        except Exception:pass
 
     def stop(self, timeout_seconds: float) -> bool:
         self.request_stop()
@@ -106,9 +132,11 @@ class TrafficProjectionHealthObserver:
                 for site_id in service.config.site_ids
             }
             with self._lock:
-                self.known_owned_keys = keys
+                if self._owned_keys_locked(keys) or not keys:
+                    self._publish_app_health_locked()
         except Exception:
             with self._lock:
+                self._app_ownership_confirmed = False
                 keys = set(self.known_owned_keys)
                 if not keys:
                     keys = {
@@ -224,6 +252,9 @@ class TrafficProjectionHealthObserver:
         self._previous_status[key] = status
         self._previous_source_available[key] = source_available
         self._previous_storage_available[key] = True
+        if key in self.known_owned_keys:
+            self._app_site_states[key] = (status, now)
+        self._publish_app_health_locked()
         self._observe_reconcile_progress_locked(key, fields, now)
 
     def _observe_failure_locked(self, key: tuple[str, str]) -> None:
@@ -248,6 +279,9 @@ class TrafficProjectionHealthObserver:
             self._last_heartbeat[key] = now
         self._previous_storage_available[key] = False
         self._previous_status[key] = "unavailable"
+        if key in self.known_owned_keys:
+            self._app_site_states[key] = ('unavailable', now)
+        self._publish_app_health_locked()
 
     def _observe_reconcile_progress_locked(
         self,

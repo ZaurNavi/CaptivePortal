@@ -6,9 +6,21 @@ NI02_UNIT = "network-metadata-projection.service"
 EVIDENCE_UNIT = "fingerprint-evidence.service"
 NI01_UNIT = "network-metadata.service"
 NI04_UNIT = "network-service-recognition.service"
+CLASSIFICATION_UNIT = "fingerprint-classification.service"
+TRAFFIC_UNIT = "traffic-projection.service"
+CORE_UNIT = "captive-portal.service"
+SURICATA_UNIT = "fingerprint-suricata.service"
 OWNER_SERVICES = {"fingerprint_evidence": EVIDENCE_UNIT, "network_metadata": NI01_UNIT,
-    "network_service_recognition": NI04_UNIT}
+    "network_service_recognition": NI04_UNIT, "fingerprint_classification": CLASSIFICATION_UNIT,
+    "traffic_projection": TRAFFIC_UNIT}
 OWNER_UNITS = frozenset(OWNER_SERVICES.values())
+LOCAL_SERVICES = {"portal_core": CORE_UNIT, "fingerprint_suricata": SURICATA_UNIT}
+APP_SOURCES = {"fingerprint_sensor": "sensor_native.v2", "network_metadata_projection": "source_self_reported_shared_uid",
+    **dict.fromkeys(OWNER_SERVICES, "source_self_reported_shared_uid"),
+    "fingerprint_suricata": "observed_via_sensor", "portal_core": "portal_in_process"}
+PHASE_REASONS = frozenset({"backfilling_incomplete_coverage", "source_lagging", "source_stale",
+    "projection_rebuilding", "projection_catching_up", "projection_stale", "core_composed", "core_unavailable",
+    "core_component_degraded", "authorization_degraded"})
 STATES = frozenset({"healthy", "degraded", "unavailable", "unknown", "stale"})
 DEPENDENCIES = {
     SENSOR_UNIT: frozenset({"preflight", "raw_capture", "suricata", "delivery", "spool"}),
@@ -17,7 +29,7 @@ DEPENDENCIES = {
 REASONS = frozenset({"source_ready", "source_degraded", "source_unavailable", "source_initializing",
     "source_stopping", "dependencies_unconfirmed", "pending_attribution", "registry_degraded",
     "source_poll_stale", "capacity_limited", "blocked_conflict", "report_unavailable", "report_stale",
-    "backfilling_incomplete_coverage", "source_lagging", "source_stale"})
+    "backfilling_incomplete_coverage", "source_lagging", "source_stale"}) | PHASE_REASONS
 
 
 def validate(value, unit):
@@ -62,8 +74,21 @@ def validate_owner(value, unit):
         allowed["unavailable"].update({"capacity_limited", "blocked_conflict"})
     if unit == NI01_UNIT:
         allowed["degraded"].add("source_stale")
+    if unit == TRAFFIC_UNIT:
+        allowed["degraded"].update({"projection_rebuilding", "projection_catching_up", "projection_stale"})
     require(type(value["state"]) is str and value["state"] in allowed
         and type(value["reason"]) is str and value["reason"] in allowed[value["state"]])
+    return value
+
+
+def validate_local(value, unit):
+    require(unit in LOCAL_SERVICES.values() and type(value) is dict and set(value) == {'state', 'reason'})
+    allowed = ({'healthy': {'core_composed'}, 'degraded': {'core_component_degraded', 'authorization_degraded'},
+        'unavailable': {'core_unavailable'}, 'unknown': {'dependencies_unconfirmed'}}
+        if unit == CORE_UNIT else {'healthy': {'source_ready'}, 'unavailable': {'source_unavailable'},
+            'unknown': {'dependencies_unconfirmed'}})
+    require(type(value['state']) is str and value['state'] in allowed and type(value['reason']) is str
+        and value['reason'] in allowed[value['state']])
     return value
 
 
@@ -78,6 +103,11 @@ def owner_health(unit, native):
             "degraded": ("degraded", "source_degraded"), "unavailable": ("unavailable", "source_unavailable"),
             "initializing": ("unknown", "source_initializing"), "stopping": ("unknown", "source_stopping")
         }.get(native, (state, reason))
+    elif unit == CLASSIFICATION_UNIT:
+        state, reason = {'ready': ('healthy', 'source_ready'),
+            'consumer_lock_unavailable': ('degraded', 'source_degraded'),
+            'integration_unavailable': ('unavailable', 'source_unavailable'),
+            'stopping': ('unknown', 'source_stopping')}.get(native, (state, reason))
     elif unit == NI04_UNIT:
         state, reason = {"usable": ("healthy", "source_ready"),
             "backfilling": ("healthy", "backfilling_incomplete_coverage"),
@@ -88,7 +118,7 @@ def owner_health(unit, native):
             "blocked_conflict": ("unavailable", "blocked_conflict"),
             "initializing": ("unknown", "source_initializing"), "stopping": ("unknown", "source_stopping")
         }.get(native, (state, reason))
-    else:
+    elif unit == NI01_UNIT:
         from app.network_metadata.models import CONFLICT_CATEGORIES
         fields = tuple(getattr(native, key, None) for key in ("capture", "output", "ingest"))
         reasons = getattr(native, "local_reasons", None)
@@ -99,6 +129,24 @@ def owner_health(unit, native):
         elif fields == ("usable",) * 3 and isinstance(reasons, (set, frozenset, tuple)) and len(reasons) == 0:
             state, reason = "healthy", "source_ready"
     return validate_owner(dict(state=state, reason=reason), unit)
+
+
+def traffic_health(expected, cached, now, *, ownership_confirmed, freshness):
+    """Aggregate only current owned version/site observations; never a DB read."""
+    state, reason = 'unknown', 'dependencies_unconfirmed'
+    if ownership_confirmed and expected:
+        statuses = [cached[key][0] if key in cached and 0 <= now-cached[key][1] <= freshness else None
+                    for key in expected]
+        if all(status == 'healthy' for status in statuses):
+            state, reason = 'healthy', 'source_ready'
+        elif all(status in {'unavailable', 'diverged'} for status in statuses):
+            state, reason = 'unavailable', 'source_unavailable'
+        elif any(status in {'catching_up', 'rebuilding', 'stale', 'unavailable', 'diverged'} for status in statuses):
+            state = 'degraded'
+            reason = ('projection_rebuilding' if 'rebuilding' in statuses else
+                'projection_catching_up' if 'catching_up' in statuses else
+                'projection_stale' if 'stale' in statuses else 'source_degraded')
+    return validate_owner(dict(state=state, reason=reason), TRAFFIC_UNIT)
 
 
 def sensor_health(native_state, dependencies):

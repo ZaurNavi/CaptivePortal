@@ -20,7 +20,8 @@ from .operations_health import SensorHealthEvidence, project as project_health, 
 from app.operations_health import unknown_evidence
 from app.network_metadata_projection.operations_health import HealthReader, PROVENANCE
 from app.operations_health import NI02_UNIT
-from app.operations_health import OWNER_SERVICES
+from app.operations_health import OWNER_SERVICES, SENSOR_UNIT, CORE_UNIT, SURICATA_UNIT, validate, validate_local
+from app.device_fingerprint_sensor.operations_metadata import parse_stamp, TTL
 from app.operations_app_health import HealthReader as OwnerHealthReader
 from .operations_verification import OwnerChecks
 from app.operations_verification import opaque_identity,project as project_verification
@@ -273,7 +274,7 @@ def summarize(services, databases):
 
 class AdminOperationsReadService:
     def __init__(self, inventory, *, acquire=acquire_systemd, lstat=os.lstat, monotonic=time.monotonic, now=utc_now,
-                 sensor_metadata=None, ni02_health=None,owner_checks=None,owner_health_readers=None):
+                 sensor_metadata=None, ni02_health=None,owner_checks=None,owner_health_readers=None,core_snapshot=None):
         self.inventory, self._acquire, self._lstat = inventory, acquire, lstat
         self._monotonic, self._now = monotonic, now
         self._sensor_metadata = sensor_metadata if sensor_metadata is not None else SensorMetadataReader()
@@ -285,12 +286,55 @@ class AdminOperationsReadService:
         self._owner_health = {key: SensorHealthEvidence(self._owner_health_readers[key], unit=unit, source=PROVENANCE)
             for key, unit in OWNER_SERVICES.items()}
         self._owner_checks=owner_checks if owner_checks is not None else OwnerChecks()
+        self._core_snapshot = core_snapshot
         self._condition = threading.Condition()
         self._cancel = threading.Event()
         self._busy = False
         self._last_attempt = None
         self._cache = None
         self._failed = False
+
+    def set_core_snapshot_provider(self, provider):
+        self._core_snapshot = provider
+
+    @staticmethod
+    def _local_record(health, source, observed, now, expiry):
+        return dict(evidence=dict(state=health['state'], source=source, reason=health['reason'],
+            observed_at=timestamp(observed), received_at=timestamp(now),
+            age=(now-observed).total_seconds(), ttl=int(TTL)), expires=expiry)
+
+    def _suricata_health(self, report, sensor, suricata, now):
+        unknown = dict(evidence=unknown_evidence(), expires=None)
+        try:
+            if suricata['operational_state'] != 'running':return unknown
+            if report.get('status') == 'stale':
+                unknown['evidence'].update(state='stale', reason='report_stale')
+                return unknown
+            if report.get('status') != 'fresh' or sensor['operational_state'] != 'running':return unknown
+            health = validate(report['health'], SENSOR_UNIT)
+            if report['producer']['pid'] != sensor['main_pid']:return unknown
+            observed = parse_stamp(report['observed_at'])
+            age = (now-observed).total_seconds()
+            if not 0 <= age <= TTL or boot_ns() > report['expires_boottime_ns']:return unknown
+            # A Sensor observation before a newly started Suricata is not proof of that incarnation.
+            if observed < parse_stamp(suricata['started_at_utc']):return unknown
+            state = health['dependencies']['suricata']
+            mapped = validate_local(dict(state='healthy' if state else 'unavailable',
+                reason='source_ready' if state else 'source_unavailable'), SURICATA_UNIT)
+            return self._local_record(mapped, 'observed_via_sensor', observed, now, report['expires_boottime_ns'])
+        except Exception:return unknown
+
+    def _core_health(self, service, now):
+        try:
+            if self._core_snapshot is None or service['operational_state'] != 'running' or service['main_pid'] != os.getpid():
+                raise ValueError()
+            value = self._core_snapshot(now)
+            health = validate_local(value['health'], CORE_UNIT)
+            observed = value['observed_at']; age = (now-observed).total_seconds()
+            if not 0 <= age <= TTL:raise ValueError()
+            return self._local_record(health, 'portal_in_process', observed, now,
+                boot_ns()+int((TTL-age)*1e9))
+        except Exception:return dict(evidence=unknown_evidence(), expires=None)
 
     def close(self):
         with self._condition:
@@ -425,6 +469,10 @@ class AdminOperationsReadService:
             sensor_report = {"status": "unknown", "reason": "metadata_unavailable", "stores": None}
             expiry = None
         health_records = {"fingerprint_sensor": self._sensor_health.collect(sensor_report, sensor, self._now())}
+        suricata = next(row for row in services if row['id'] == 'fingerprint_suricata')
+        health_records['fingerprint_suricata'] = self._suricata_health(sensor_report, sensor, suricata, self._now())
+        core = next(row for row in services if row['id'] == 'portal_core')
+        health_records['portal_core'] = self._core_health(core, self._now())
         ni02 = next(row for row in services if row["id"] == "network_metadata_projection")
         try:
             ni02_report = self._ni02_report.read(ni02,self._now(),deadline=deadline,monotonic=self._monotonic,cancel=self._cancel)

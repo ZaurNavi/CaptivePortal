@@ -10,10 +10,13 @@ import pytest
 
 from app.admin_web import operations_service as ops
 from app.admin_web.operations_schema import validate_v2
-from app.operations_health import OWNER_SERVICES, owner_health
+from app.operations_health import OWNER_SERVICES as FILE_SERVICES, owner_health
 from tests.admin_web.test_operations_inventory import resolved
 from tests.admin_web.test_operations_service import NOW, regular, systemd_text
 from tests.admin_web.test_operations_v2 import Reader, ORIGIN
+
+OWNER_SERVICES = {key: FILE_SERVICES[key] for key in
+    ('fingerprint_evidence', 'network_metadata', 'network_service_recognition')}
 
 
 class OwnerReader(Reader):
@@ -34,9 +37,11 @@ def service_for(monkeypatch, natives=None):
     natives = natives or dict(fingerprint_evidence='ready', network_metadata=SimpleNamespace(
         capture='usable', output='usable', ingest='usable', local_reasons=set()), network_service_recognition='backfilling')
     owners = {key: OwnerReader(unit, natives[key]) for key, unit in OWNER_SERVICES.items()}
+    reports = {key: Reader('missing') for key in FILE_SERVICES}
+    reports.update(owners)
     def acquire(cancel):calls.append(1); return systemd_text()
     value = ops.AdminOperationsReadService(resolved(), acquire=acquire, lstat=regular,
-        now=lambda: NOW, monotonic=lambda: tick[0], sensor_metadata=Reader(), owner_health_readers=owners)
+        now=lambda: NOW, monotonic=lambda: tick[0], sensor_metadata=Reader('missing'), owner_health_readers=reports)
     return value, owners, clock, tick, calls
 
 
@@ -89,13 +94,14 @@ def test_missing_stale_reports_never_turn_running_owner_green(monkeypatch, state
 
 
 @pytest.mark.parametrize('key', ['portal_core', 'fingerprint_suricata', 'fingerprint_classification', 'traffic_projection'])
-def test_every_phase_b_id_remains_unknown_only(monkeypatch, key):
+def test_every_phase_b_id_rejects_wrong_source_pairing(monkeypatch, key):
     service, *_ = service_for(monkeypatch)
     try:model = service.read('phase-b', version=2)
     finally:service.close()
     row = row_for(model, key)
     row['application_health'] = 'healthy'
     row['application_health_evidence'] = copy.deepcopy(row_for(model, 'fingerprint_evidence')['application_health_evidence'])
+    row['application_health_evidence']['source'] = 'sensor_native.v2'
     with pytest.raises(ops.OperationsError):validate_v2(model)
 
 
