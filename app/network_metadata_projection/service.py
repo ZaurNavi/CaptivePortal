@@ -33,6 +33,7 @@ class NetworkMetadataProjectionService:
         self._scope_admission = None if not config.enabled else ScopeAdmission(config.scope_admission_json)
         self._operations_source = self._operations_commit = self._operations_pending = None
         self._operations_failed = False
+        self._operations_registry = None
         self._operations_publisher = None
         try:
             from .operations_health import HealthPublisher
@@ -236,14 +237,35 @@ class NetworkMetadataProjectionService:
         for _, edges, _ in dispositions:
             for edge in edges:
                 if self.stop_event.is_set():
+                    self._operations_registry = None
                     return {}
                 key = edge["site_id"], edge["client_mac"]
                 if key not in keys and self.repository.binding(*key) is None:
                     keys[key] = None
+        if keys:
+            self._operations_registry = None
         by_mac = self.registry.evaluate_many((key[1] for key in keys), stop_event=self.stop_event)
+        self._observe_registry(keys, by_mac)
         if self.stop_event.is_set():
             return {}
         return {key: by_mac[key[1]] for key in keys}
+
+    def _observe_registry(self, keys, results):
+        """Observe only the existing nonempty batch; no extra Registry I/O."""
+        if not keys:
+            return
+        self._operations_registry = None
+        if self.stop_event.is_set():
+            return
+        values = [results.get(key[1]) for key in keys] if type(results) is dict else []
+        if any(isinstance(value, RegistryEvaluation) and value.state == "registry_unavailable" for value in values):
+            status = "unavailable"
+        elif len(values) == len(keys) and all(isinstance(value, RegistryEvaluation) and
+                value.state in {"authoritative", "not_yet_registry_resolved"} for value in values):
+            status = "ready"
+        else:
+            return
+        self._operations_registry = status, self.monotonic()
 
     def _checkpoint_verified(self, generation):
         checkpoint = self.repository.checkpoint(generation.source_generation_id)
@@ -378,13 +400,19 @@ class NetworkMetadataProjectionService:
             pending = self._operations_pending
             if pending is not None and not 0 <= tick-pending[2] <= 180:
                 pending = None
-            count = min(MAXIMUM,pending[0]) if pending is not None and type(pending[0]) is int and pending[0] >= 0 else None
-            state = "degraded" if self._operations_failed and self.repository.live_state == "usable" else self.repository.live_state
+            count = pending[0] if pending is not None and type(pending[0]) is int and 0 <= pending[0] <= MAXIMUM else None
+            state = self.repository.live_state
+            registry = self._operations_registry
+            registry = registry[0] if registry is not None and 0 <= tick-registry[1] <= 180 else None
+            if state in {"usable", "attribution_unavailable"}:
+                if self._operations_failed or self.repository.attribution_read_state == "unavailable":
+                    state = "degraded"
+                elif registry == "unavailable":
+                    state = "registry_degraded"
             commit_age = None if self._operations_commit is None else (self.repository.clock()-ni_timestamp(self._operations_commit,canonical=True)).total_seconds()
             value = ni02_health(state,dict(source=recent,writer=self.run_id is not None and commit_age is not None and 0 <= commit_age <= 180,
-                attribution=self.repository.attribution_read_state == "available",registry=state == "usable",pending=count is not None),count)
-            if state == "usable" and not recent:
-                value.update(state="unknown",reason="source_poll_stale")
+                attribution=self.repository.attribution_read_state == "available",registry=registry == "ready",pending=count is not None),
+                count,native_reason=self.repository.live_reason)
             def converted(value):return None if value is None else stamp(ni_timestamp(value,canonical=True))
             publisher.publish(value,dict(source_confirmed_at=converted(self._operations_source[0]) if self._operations_source else None,
                 writer_committed_at=converted(self._operations_commit),pending_observed_at=converted(pending[1]) if count is not None else None),self.stop_event)
@@ -433,7 +461,10 @@ class NetworkMetadataProjectionService:
         selected = self.repository.reconcile_selection()
         if self.stop_event.is_set():
             return
+        if selected:
+            self._operations_registry = None
         by_mac = self.registry.evaluate_many((row["client_mac"] for row in selected), stop_event=self.stop_event)
+        self._observe_registry([(row["site_id"], row["client_mac"]) for row in selected], by_mac)
         if self.stop_event.is_set():
             return
         evaluations = {(row["site_id"], row["client_mac"]): by_mac[row["client_mac"]] for row in selected}

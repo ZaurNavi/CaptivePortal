@@ -215,3 +215,39 @@ def test_ui_operational_truth_table_and_problem_toggle(monkeypatch,tmp_path,scen
     result=subprocess.run([shutil.which('node'),str(Path(__file__).with_name('operations_status_ui.cjs')),
         str(root/'app/admin_web/static/db_services.js'),str(fixture),expected,scenario],capture_output=True,text=True)
     assert result.returncode==0,result.stdout+result.stderr
+
+
+@pytest.mark.parametrize('scenario',['pending','zero','unknown','fallback-v2','fallback-v1','401','403','500','503',
+    'network','bad-json','bad-count','extra-workload','bad-health','bad-check','failed-check','stale-check',
+    'unsafe-file','stopped-writer','degraded-writer','missing-check','changed-check','stale-refresh'])
+def test_v3_workload_separate_service_and_db_conditions_and_sticky_fallback(monkeypatch,tmp_path,scenario):
+    from tests.admin_web.test_operations_v2 import workload_service
+    from app.admin_web.operations_schema import validate_v3
+    service,*_=workload_service(monkeypatch)
+    try:model=service.read('v3-ui',version=3)
+    finally:service.close()
+    row=next(r for r in model['databases'] if r['id']=='network_metadata_projection')
+    owner=next(r for r in model['services'] if r['id']=='network_metadata_projection')
+    owner['application_health']=owner['application_health_evidence']['state']='degraded'
+    owner['application_health_evidence']['reason']='registry_degraded'
+    row['store_verification']=v.project(row['id'],dict(row=proof(row['id'])),'a'*64,intent='expected',source_current=True)
+    if scenario=='zero':model['workload']['network_metadata_projection']['pending_attribution_count']=0
+    if scenario=='unknown':model['workload']['network_metadata_projection']['pending_attribution_count']=None
+    if scenario=='failed-check':row['store_verification']=v.project(row['id'],dict(row=proof(row['id'],status='failed',scope=[])),
+        'a'*64,intent='expected',source_current=True)
+    if scenario=='stale-check':row['store_verification'].update(status='stale',freshness='stale',reason='source_stale')
+    if scenario=='changed-check':row['store_verification'].update(status='stale',freshness='stale',reason='store_changed',binding='changed')
+    if scenario=='unsafe-file':row.update(file_presence='unknown',reason_code='symlink_file')
+    if scenario=='stopped-writer':owner['operational_state']='stopped'
+    if scenario=='degraded-writer':owner['operational_state']='degraded'
+    if scenario=='missing-check':row['store_verification']=v.not_attested()
+    validate_v3(model)
+    baseline=subprocess.check_output(['git','show','afdfd4f9b9a8798e71db5aed984e4196b5645090:app/admin_web/static/db_services.js'],
+        cwd=Path(__file__).parents[2],text=True,encoding='utf-8')
+    legacy=baseline[baseline.index('  function databaseCondition('):baseline.index('  function databaseBadge(')]
+    legacy=legacy.replace('function databaseCondition(', 'function legacyDatabaseCondition(',1)
+    fixture=tmp_path/'v3.json';fixture.write_text(json.dumps(dict(snapshot=model,legacy_database_condition=legacy)),encoding='utf-8')
+    result=subprocess.run([shutil.which('node'),str(Path(__file__).with_name('db_services_v3_ui.cjs')),
+        str(Path(__file__).parents[2]/'app/admin_web/static/db_services.js'),str(fixture),scenario],capture_output=True,text=True)
+    assert result.returncode==0,result.stdout+result.stderr
+    assert 'PASS v3 workload' in result.stdout

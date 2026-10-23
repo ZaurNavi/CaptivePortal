@@ -1,6 +1,6 @@
 """Versioned app-health projection. Only trusted owner reports, never DB probes."""
 import copy
-from app.operations_health import unknown_evidence, validate, SENSOR_UNIT
+from app.operations_health import unknown_evidence, validate, SENSOR_UNIT, NI02_UNIT
 from app.device_fingerprint_sensor.operations_metadata import TTL, boot_ns
 
 
@@ -23,6 +23,12 @@ class SensorHealthEvidence:
                     observed_at=report["observed_at"], received_at=now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
                     age=report["age"], ttl=int(TTL), reason=report["health"]["reason"]),
                     expires=report["expires_boottime_ns"], producer=report["producer"], key=key)
+                if self.unit == NI02_UNIT:
+                    from app.device_fingerprint_sensor.operations_metadata import parse_stamp
+                    if (parse_stamp(report["observed_at"]) < parse_stamp(service["started_at_utc"])
+                            or not 0 <= report["age"] <= TTL or type(report["expires_boottime_ns"]) is not int):
+                        raise ValueError()
+                    current["pending_count"] = report["health"]["pending_count"]
                 self.last = copy.deepcopy(current)
             except Exception:
                 current = None
@@ -37,6 +43,8 @@ class SensorHealthEvidence:
                     self.last = None
                 elif self.last["evidence"]["state"] in {"degraded", "unavailable"}:
                     current = copy.deepcopy(self.last)
+                    if self.unit == NI02_UNIT:
+                        current["pending_count"] = None  # Cached degradation is not current workload proof.
             except Exception:
                 self.last = None
         if current is not None:

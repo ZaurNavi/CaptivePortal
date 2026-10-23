@@ -28,6 +28,7 @@ from app.operations_verification import opaque_identity,project as project_verif
 
 API_VERSION = "admin.operations.db-services.v1"
 API_VERSION_V2 = "admin.operations.db-services.v2"
+API_VERSION_V3 = "admin.operations.db-services.v3"
 RESAMPLE_SECONDS = 30.0
 STALE_SECONDS = 90.0
 FIRST_WAIT_SECONDS = 0.250
@@ -342,7 +343,7 @@ class AdminOperationsReadService:
             self._condition.notify_all()
 
     def read(self, request_id, *, version=1):
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise OperationsError()
         with self._condition:
             now = self._monotonic()
@@ -389,7 +390,7 @@ class AdminOperationsReadService:
             sample_status="stale" if stale else "fresh")
         result["summary"] = summarize(result["services"], result["databases"])
         result["topology"] = topology_snapshot()
-        if version == 2:
+        if version in (2, 3):
             result["api_version"] = API_VERSION_V2
             for row in result["services"]:
                 record = health_records.get(row["id"])
@@ -421,6 +422,15 @@ class AdminOperationsReadService:
                 unknown_or_stale=sum(r["operational_state"] in {"unknown", "stale"}
                     or r["application_health"] in {"unknown", "stale"} for r in result["services"])
                     + result["summary"]["databases"]["unknown_or_stale"])
+        if version == 3:
+            result["api_version"] = API_VERSION_V3
+            record = health_records.get("network_metadata_projection") or {}
+            count = record.get("pending_count")
+            expiry = record.get("expires")
+            if (stale or expiry is None or boot_ns() > expiry or
+                    type(count) is not int or not 0 <= count <= 2**53-1):
+                count = None
+            result["workload"] = {"network_metadata_projection": {"pending_attribution_count": count}}
         if len(json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_LIMIT:
             raise OperationsError()
         return result

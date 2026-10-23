@@ -57,7 +57,7 @@ def validate(value, unit):
         require(pending is None or integer(pending))
         require(deps["pending"] == (pending is not None))
         if value["state"] == "healthy":
-            require(pending == 0)
+            require(pending is not None)
         if value["reason"] == "pending_attribution":
             require(value["state"] == "degraded" and pending is not None and pending > 0)
     return value
@@ -160,13 +160,11 @@ def sensor_health(native_state, dependencies):
     return validate(dict(state=state, reason=reason, dependencies=dependencies), SENSOR_UNIT)
 
 
-def ni02_health(native_state, dependencies, pending_count):
+def ni02_health(native_state, dependencies, pending_count, *, native_reason=None):
     state, reason = "unknown", "dependencies_unconfirmed"
-    if native_state == "usable" and all(dependencies.values()) and pending_count == 0:
-        state, reason = "healthy", "source_ready"
-    elif native_state == "attribution_unavailable" and pending_count is not None and pending_count > 0:
-        state, reason = "degraded", "pending_attribution"
-    elif native_state in {"attribution_unavailable", "degraded"}:
+    pending_only = native_state == "attribution_unavailable" and native_reason == "pending_attribution"
+    if native_state == "degraded" or native_state == "attribution_unavailable" and not pending_only and (
+            native_reason == "attribution_authority_unavailable" or not dependencies["attribution"]):
         state, reason = "degraded", "source_degraded"
     elif native_state == "registry_degraded":
         state, reason = "degraded", "registry_degraded"
@@ -178,6 +176,11 @@ def ni02_health(native_state, dependencies, pending_count):
         state, reason = "unavailable", "source_unavailable"
     elif native_state == "stopping":
         state, reason = "unknown", "source_stopping"
+    elif native_state == "usable" or pending_only:
+        if not dependencies["source"]:
+            state, reason = "unknown", "source_poll_stale"
+        elif all(dependencies.values()) and pending_count is not None:
+            state, reason = "healthy", "source_ready"
     return validate(dict(state=state, reason=reason, dependencies=dependencies, pending_count=pending_count), NI02_UNIT)
 
 
