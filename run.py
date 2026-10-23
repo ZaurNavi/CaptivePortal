@@ -512,6 +512,10 @@ def main() -> None:
         logger.exception("visitor_snapshot_start_failed")
     _start_public_traffic_worker(app)
 
+    if settings.get("sqlite_unified_audit_enabled") == "true":
+        from app.unified_sqlite_audit.readiness import prepare_portal_state
+        prepare_portal_state(app)
+
     host = settings["host"]
     port = settings["port"]
     debug = settings["debug"]

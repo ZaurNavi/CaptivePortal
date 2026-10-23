@@ -771,6 +771,10 @@ def create_app(
     def success():
         return render_template("success.html")
 
+    if settings.get("sqlite_unified_audit_enabled") == "true":
+        from app.unified_sqlite_audit.readiness import install
+        install(app, settings)
+
     return app
 
 
