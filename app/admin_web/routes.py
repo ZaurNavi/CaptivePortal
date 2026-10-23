@@ -727,8 +727,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 and config.device_current_context_enabled
             ),
             device_protocol_intelligence_enabled=(
-                page.key == "device" and config.device_protocol_intelligence_enabled
-                and policy.authorize(g.admin_principal, "admin.read.device", selected)
+                page.key in ("device", "visits") and config.device_protocol_intelligence_enabled
+                and policy.authorize(g.admin_principal, "admin.read.visits", selected)
             ),
             device_service_intelligence_enabled=(
                 page.key == "device" and config.device_service_intelligence_enabled
@@ -1063,9 +1063,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return _error("internal_error", 500)
         return _success(selected, response.result, enforce_size=True)
 
-    @blueprint.get("/admin/api/v1/sites/<site_id>/devices/<device_id>/protocol-intelligence")
+    @blueprint.get("/admin/api/v2/sites/<site_id>/devices/<device_id>/visits/<visit_id>/protocol-intelligence")
+    @blueprint.get("/admin/api/v2/sites/<site_id>/devices/<device_id>/visits/<visit_id>/recognized-services")
     @authenticated
-    def api_device_protocol_intelligence(site_id: str, device_id: str) -> Response:
+    def api_visit_protocol_intelligence(site_id: str, device_id: str, visit_id: str) -> Response:
         try:
             selected = resolver.resolve(site_id)
         except AdminSiteContextError:
@@ -1073,20 +1074,23 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         except AdminAccessDenied:
             return _error("site_forbidden", 403)
         try:
-            if not policy.authorize(g.admin_principal, "admin.read.device", selected):
+            if not policy.authorize(g.admin_principal, "admin.read.visits", selected):
                 return _error("site_forbidden", 403)
             if request.args or request.get_data(cache=False):
                 return _error("invalid_request", 400)
-            if canonical_device_id(device_id) is None:
+            if canonical_device_id(device_id) is None or canonical_device_id(visit_id) is None:
                 return _error("invalid_request", 400)
             if not config.device_protocol_intelligence_enabled:
                 return _error("not_found", 404)
             if runtime.query_service is None:
                 return _error("source_unavailable", 503)
-            response = runtime.query_service.device_protocol_intelligence(
-                g.admin_principal, selected, device_id, query_parameters_present=False)
+            services=_is_visit_service_history_path(request.path)
+            query=(runtime.query_service.visit_service_history if services else runtime.query_service.visit_protocol_intelligence)
+            response = query(
+                g.admin_principal, selected, device_id, visit_id, query_parameters_present=False)
             return _success(selected, response.result, enforce_size=True,
-                            response_limit_bytes=16384, api_version="admin.device.protocol-intelligence.v1")
+                            response_limit_bytes=65536 if services else 16384,
+                            api_version="admin.visit.recognized-services.v1" if services else "admin.visit.protocol-intelligence.v1")
         except AdminQueryValidationError:
             return _error("invalid_request", 400)
         except AdminQueryForbidden:
@@ -2523,7 +2527,8 @@ def _error(code: str, status_code: int) -> Response:
         return jsonify(
             {
                 "api_version": (getattr(g, "admin_service_api_version", "admin.device.service-intelligence.v2") if _is_service_intelligence_path(request.path)
-                    else "admin.device.protocol-intelligence.v1" if _is_protocol_intelligence_path(request.path)
+                    else "admin.visit.recognized-services.v1" if _is_visit_service_history_path(request.path)
+                    else "admin.visit.protocol-intelligence.v1" if _is_protocol_intelligence_path(request.path)
                     else "admin.settings.features.mutation.v1" if request.path == "/admin/api/v1/settings/features/generations"
                     else "admin.settings.features.v1" if request.path == "/admin/api/v1/settings/features"
                     else "admin.settings.portal.mutation.v1" if request.path == "/admin/api/v1/settings/portal/generations"
@@ -2546,7 +2551,11 @@ def _error(code: str, status_code: int) -> Response:
 
 
 def _is_protocol_intelligence_path(path: str) -> bool:
-    return path.startswith(ADMIN_API_PREFIX + "/sites/") and "/devices/" in path and path.endswith("/protocol-intelligence")
+    return path.startswith("/admin/api/v2/sites/") and "/devices/" in path and "/visits/" in path and path.endswith("/protocol-intelligence")
+
+
+def _is_visit_service_history_path(path: str) -> bool:
+    return path.startswith('/admin/api/v2/sites/') and '/devices/' in path and '/visits/' in path and path.endswith('/recognized-services')
 
 
 def _is_service_intelligence_path(path: str) -> bool:
@@ -2558,7 +2567,9 @@ def _is_admin_path(path: str) -> bool:
 
 
 def _is_api_path(path: str) -> bool:
-    return path == "/admin/api/v2/operations/db-services" or path == ADMIN_API_PREFIX or path.startswith(ADMIN_API_PREFIX + "/")
+    return (_is_protocol_intelligence_path(path) or _is_visit_service_history_path(path)
+        or path == "/admin/api/v2/operations/db-services"
+        or path == ADMIN_API_PREFIX or path.startswith(ADMIN_API_PREFIX + "/"))
 
 
 def _is_current_state_path(path: str) -> bool:

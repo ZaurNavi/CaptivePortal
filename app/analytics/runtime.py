@@ -18,7 +18,7 @@ from .current_traffic import CurrentTrafficReadService
 from .home_activity import HomeActivityReadService
 from .historical_traffic import HistoricalTrafficReadService
 from .read_service import AnalyticsReadService
-from .source_gateway import AnalyticsSourceGateway, SOURCE_SCHEMA_VERSIONS
+from .source_gateway import AnalyticsSourceGateway, SOURCE_SCHEMA_VERSIONS, compatible_source_schema_version
 from .telemetry import AnalyticsTelemetry
 from .visits import VisitAnalyticsService
 from .wireless import WirelessAnalyticsService
@@ -311,7 +311,7 @@ def _check_source(name: str, service: Any | None) -> SourceBoundaryHealth:
     except Exception:
         return SourceBoundaryHealth(False, expected, None, False)
     return SourceBoundaryHealth(
-        version == expected and query_only,
+        compatible_source_schema_version(name, version) and query_only,
         expected,
         version,
         query_only,

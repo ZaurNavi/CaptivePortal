@@ -276,12 +276,12 @@ class AdminQueryService:
         device_list_context_cursor_codec: Any | None = None,
         fingerprint_presentation_service: DeviceFingerprintPresentationService | None = None,
         inventory_timezone_name: str | None = None,
-        protocol_intelligence_service: Any | None = None,
         service_intelligence_service: Any | None = None,
         observed_device_hints_service: Any | None = None,
     ):
         self._config = config
-        self._protocol_intelligence = protocol_intelligence_service
+        # Former Device-window dependency is no longer composed or called.
+        # NI03 now reads only the stored result owned by the requested Visit.
         self._service_intelligence = service_intelligence_service
         from .device_fingerprint_presentation import ObservedDeviceHintsPresentationService
         self._observed_device_hints = observed_device_hints_service or ObservedDeviceHintsPresentationService(None)
@@ -1528,43 +1528,32 @@ class AdminQueryService:
 
         return self._run(query)
 
-    def device_protocol_intelligence(self, principal, site_id, device_id, *, query_parameters_present=False):
-        self._authorize(principal, "admin.read.device", site_id)
+    def visit_protocol_intelligence(self, principal, site_id, device_id, visit_id, *, query_parameters_present=False):
+        self._authorize(principal, "admin.read.visits", site_id)
         selected_id = self._uuid(device_id, "device_id")
+        selected_visit = self._uuid(visit_id, "visit_id")
         if query_parameters_present:
             raise AdminQueryValidationError()
         if not self._config.device_protocol_intelligence_enabled:
             raise AdminQueryNotFound()
 
         def query(deadline):
-            from app.network_protocol_intelligence.models import (
-                ProtocolValidationError, ProtocolBusy, ProtocolDeadline, ProtocolUnavailable,
-            )
-            from app.network_metadata.validation import ni_format_utc
-            from .device_protocol_intelligence_serialization import serialize_device_protocol_intelligence
-
-            device = self._devices.get_device(site_id=site_id, device_id=selected_id, deadline=deadline)
-            if device is None:
+            value = self._reads.visit_protocol_summary(site_id=site_id, device_id=selected_id,
+                visit_id=selected_visit, deadline=deadline)
+            if value is None:
                 raise AdminQueryNotFound()
-            if self._protocol_intelligence is None:
-                raise AdminQueryUnavailable()
-            try:
-                value = self._protocol_intelligence.get_device_protocol_summary(
-                    site_id, selected_id, device.canonical_mac,
-                    evaluated_at_utc=ni_format_utc(datetime.now(timezone.utc)), deadline=deadline)
-                result = serialize_device_protocol_intelligence(value)
-                if result["site_id"] != site_id or result["device_id"] != selected_id:
-                    raise ProtocolUnavailable()
-                return AdminQueryResponse(result)
-            except ProtocolValidationError:
-                raise AdminQueryValidationError() from None
-            except ProtocolBusy:
-                raise AdminQueryBusy() from None
-            except ProtocolDeadline:
-                raise AdminQueryDeadline() from None
-            except ProtocolUnavailable:
-                raise AdminQueryUnavailable() from None
+            return AdminQueryResponse(value)
+        return self._run(query)
 
+    def visit_service_history(self, principal, site_id, device_id, visit_id, *, query_parameters_present=False):
+        self._authorize(principal,'admin.read.visits',site_id)
+        selected_id=self._uuid(device_id,'device_id');selected_visit=self._uuid(visit_id,'visit_id')
+        if query_parameters_present:raise AdminQueryValidationError()
+        if not self._config.device_protocol_intelligence_enabled:raise AdminQueryNotFound()
+        def query(deadline):
+            value=self._reads.visit_service_history(site_id=site_id,device_id=selected_id,visit_id=selected_visit,deadline=deadline)
+            if value is None:raise AdminQueryNotFound()
+            return AdminQueryResponse(value)
         return self._run(query)
 
     def device_service_intelligence(self, principal, site_id, device_id, *, query_parameters_present=False):

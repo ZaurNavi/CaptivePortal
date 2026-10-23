@@ -161,7 +161,43 @@ def _rich_hints_base_prefixes():
     original = subprocess.check_output(["git", "show", "ae1f99491318e32e247ea5d5877d53650cc8d78e:app/admin_web/static/admin.js"], cwd=ROOT).split(
         b"/* NI-04: independent bounded Service Intelligence coordinator. */")[0].rstrip()
     # Preserve the existing CRLF-only checkout policy, without new normalization.
-    return prefix.replace(b"\r\n", b"\n"), original.replace(b"\r\n", b"\n")
+    return _without_visit_hook(prefix.replace(b"\r\n", b"\n")), original.replace(b"\r\n", b"\n")
+
+
+def _without_visit_hook(prefix):
+    # #296 authorizes exactly one additive Visit-row hook, not a replacement
+    # of the old row renderer, Fingerprint span, or NI04 runtime.
+    hook = b'''    // VISIT-NETWORK-296:BEGIN
+    const network = node("section", "visit-network-results");
+    network.dataset.visitId = item.visit_id || "";
+    network.dataset.deviceId = item.device_id || "";
+    network.dataset.visitStatus = item.status || "";
+    network.setAttribute("aria-label", "Visit network results");
+    value.append(network);
+    // VISIT-NETWORK-296:END
+'''
+    assert prefix.count(b"// VISIT-NETWORK-296:BEGIN") == prefix.count(b"// VISIT-NETWORK-296:END") == prefix.count(hook) == 1
+    assert prefix.index(b"  function visitRow(item)") < prefix.index(hook) < prefix.index(b"  async function loadVisits(")
+    return prefix.replace(hook, b"", 1)
+
+
+@pytest.mark.parametrize("before,after", [
+    (b'    return value;\n  }\n\n  async function loadVisits', b'    return null;\n  }\n\n  async function loadVisits'),
+    (b'item.reported_traffic_total_bytes', b'item.changed_traffic'),
+    (b'content.append(fingerprintCard(result.fingerprint));', b'content.append(fingerprintCard(null));'),
+])
+def test_visit_hook_exception_preserves_every_existing_renderer_byte(before, after):
+    source = (ROOT / "app/admin_web/static/admin.js").read_bytes().replace(b"\r\n", b"\n")
+    assert source.count(before) == 1
+    assert _without_visit_hook(source) != _without_visit_hook(source.replace(before, after, 1))
+
+
+def test_visit_hook_exception_rejects_changed_or_duplicate_hook():
+    source = (ROOT / "app/admin_web/static/admin.js").read_bytes().replace(b"\r\n", b"\n")
+    for changed in (source.replace(b'network.dataset.visitId = item.visit_id', b'network.dataset.visitId = item.device_id'),
+                    source + b'// VISIT-NETWORK-296:BEGIN'):
+        with pytest.raises(AssertionError):
+            _without_visit_hook(changed)
 
 
 @pytest.mark.parametrize("old,new", [
@@ -214,17 +250,24 @@ def test_rich_hints_exception_is_limited_to_the_approved_additions():
 
 
 def _assert_frozen_ni03_asset_unchanged(name, current):
-    # Issue #293 admits exactly two reviewed readers, not an arbitrary HEAD or
-    # a masked source span. Their entire bytes, including prior V2 admission,
-    # are frozen at the reviewed Top-1 commit. UI/model historical pins stay.
+    # Keep complete-file canaries. #296 replaces the NI03 UI with the exact
+    # reviewed Visit coordinator and adds one exact Visit reader to #293's
+    # frozen shared reader; no arbitrary current-source span is masked.
     references = {
-        "app/admin_web/static/device_protocol_intelligence.js": "5c7b4c46afa5a57d55fe044c4326da3a10b9e145",
+        "app/admin_web/static/device_protocol_intelligence.js": "9c54033c0a7f257c77f6487e254ddadb02ed54d4",
         "app/network_protocol_intelligence/models.py": "5c7b4c46afa5a57d55fe044c4326da3a10b9e145",
         "app/network_protocol_intelligence/read_service.py": "cc199c200bab71fe44b58bbd3e7d5c4b7ec44a19",
         "app/network_metadata_projection/read_service.py": "cc199c200bab71fe44b58bbd3e7d5c4b7ec44a19",
     }
     assert name in references
     accepted = subprocess.check_output(["git", "show", references[name] + ":" + name], cwd=ROOT)
+    if name == "app/network_metadata_projection/read_service.py":
+        reviewed = subprocess.check_output(["git", "show", "9c54033c0a7f257c77f6487e254ddadb02ed54d4:" + name], cwd=ROOT)
+        begin, end = b"    def read_visit_protocol_snapshot(", b"    def _list("
+        assert reviewed.count(begin) == reviewed.count(end) == accepted.count(end) == 1
+        assert begin not in accepted and reviewed.index(begin) < reviewed.index(end)
+        addition = reviewed[reviewed.index(begin):reviewed.index(end)]
+        accepted = accepted.replace(end, addition + end, 1)
     # Preserve only the pre-existing CRLF checkout policy; no source masking.
     assert current.replace(b"\r\n", b"\n") == accepted.replace(b"\r\n", b"\n")
 
