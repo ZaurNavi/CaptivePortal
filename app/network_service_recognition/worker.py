@@ -28,6 +28,16 @@ class ServiceMaterializationWorker:
         self._last_heartbeat=self._last_coverage=self._last_backfill=self._last_retention=None
         self._cycle_lock=threading.Lock()
         self._failures=0
+        from app.operations_app_health import HealthPublisher
+        from app.operations_health import NI04_UNIT
+        self._app_health=HealthPublisher(NI04_UNIT,monotonic=monotonic)
+
+    def _publish_app_health(self, *, state=None):
+        from app.operations_health import NI04_UNIT,owner_health
+        try:
+            native=getattr(self.repository,'live_state',None) if state is None else state
+            self._app_health.publish(owner_health(NI04_UNIT,native),force=state=='stopping')
+        except Exception:pass
 
     def stop(self):self._stop.set()
 
@@ -280,10 +290,12 @@ class ServiceMaterializationWorker:
             self._cycle_lock.release()
 
     def run(self):
+        self._publish_app_health(state='initializing')
         if self.repository.connection is None:self.repository.initialize()
         while not self._stop.is_set():
             try:
                 busy=self.cycle()
+                self._publish_app_health()
                 if not busy:self._stop.wait(1)
             except Exception as error:
                 state=self.failure_state(error)
@@ -294,7 +306,9 @@ class ServiceMaterializationWorker:
                 except Exception:pass
                 self._failures=min(self._failures+1,5)
                 self.telemetry.emit(**({'capacity_halt_total':1} if state=='capacity_halted' else {'source_failures_total':1}))
+                self._publish_app_health()
                 self._stop.wait(min(30,2**self._failures))
+        self._publish_app_health(state='stopping')
         try:
             with self.repository.transaction():self.repository.runtime('stopping',ni_format_utc(self.clock()))
         finally:self.repository.close()

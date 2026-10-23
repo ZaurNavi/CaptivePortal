@@ -25,7 +25,8 @@
     source_unavailable:"Source reports unavailable", source_initializing:"Source initializing", source_stopping:"Source stopping",
     dependencies_unconfirmed:"Required dependencies not confirmed", pending_attribution:"Limited: confirmed pending attribution backlog",
     registry_degraded:"Registry dependency degraded", source_poll_stale:"Source confirmation is stale", capacity_limited:"Source capacity limited",
-    blocked_conflict:"Source blocked by a conflict", report_unavailable:"Trusted health evidence unavailable", report_stale:"Health evidence expired"};
+    blocked_conflict:"Source blocked by a conflict", report_unavailable:"Trusted health evidence unavailable", report_stale:"Health evidence expired",
+    backfilling_incomplete_coverage:"Backfilling / coverage incomplete", source_lagging:"Source processing is lagging", source_stale:"Native source is stale"};
   const reason = (value) => value == null ? "No collection failure reported" : Object.hasOwn(reasons, value) ? reasons[value] : "Evidence unavailable";
   function element(tag, text, cls) {
     const node = document.createElement(tag);
@@ -240,6 +241,8 @@
             const row = serviceRows.get(item.catalog_ref);
             const appBadge=badge(row.application_health,"application");appBadge.textContent=`App: ${display(row.application_health)}`;
             node.append(badge(row.operational_state,"service"),appBadge);
+            if(row.application_health_evidence?.reason==="backfilling_incomplete_coverage")
+              node.append(element("small",healthReasons.backfilling_incomplete_coverage));
           } else if (item.node_type === "database") {
             const row = dbRows.get(item.catalog_ref);
             node.append(element("small", row.filename, "mono"), databaseBadge(row,model), element("small", bytes(row.total_footprint_bytes)));
@@ -321,6 +324,8 @@
       identity.append(element("h3", row.label), element("p", row.role), element("span", row.unit, "mono"));
       const states = element("div", null, "ops-state-group");
       states.append(element("span", "Process"), badge(row.operational_state, "service"), element("span", "Application health"), badge(row.application_health, "application"));
+      if(row.application_health_evidence?.reason==="backfilling_incomplete_coverage")
+        states.append(element("span",healthReasons.backfilling_incomplete_coverage));
       const process = element("div", null, "ops-process");
       process.append(field("PID", row.main_pid), field("Uptime", uptime(row.uptime_seconds)), field("Restarts", row.n_restarts));
       article.append(identity, states, process, field("Expected", display(row.expected_mode)), details([
@@ -429,13 +434,24 @@
   }
   function validV2(model) {
     const states = new Set(["healthy","degraded","unavailable","unknown","stale"]);
+    const sources={fingerprint_sensor:"sensor_native.v2",network_metadata_projection:"source_self_reported_shared_uid",
+      fingerprint_evidence:"source_self_reported_shared_uid",network_metadata:"source_self_reported_shared_uid",network_service_recognition:"source_self_reported_shared_uid"};
+    const owners=["fingerprint_evidence","network_metadata","network_service_recognition"];
+    const ownerReasons={source_ready:"healthy",backfilling_incomplete_coverage:"healthy",source_degraded:"degraded",source_lagging:"degraded",source_stale:"degraded",
+      source_unavailable:"unavailable",capacity_limited:"unavailable",blocked_conflict:"unavailable",source_initializing:"unknown",source_stopping:"unknown",dependencies_unconfirmed:"unknown"};
+    const ownerValid=(row,e)=>!owners.includes(row.id) || (e.source==="none" ?
+      (e.state==="unknown" && e.reason==="report_unavailable" || e.state==="stale" && e.reason==="report_stale") : (e.state==="stale" ? e.reason==="report_stale" :
+      ownerReasons[e.reason]===e.state && (!["backfilling_incomplete_coverage","source_lagging","capacity_limited","blocked_conflict"].includes(e.reason) || row.id==="network_service_recognition") &&
+      (e.reason!=="source_stale" || row.id==="network_metadata")));
     const keys = (value, expected) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === expected;
     return model.services.every((row) => {
       const e = row.application_health_evidence;
       return keys(e, "age,observed_at,reason,received_at,source,state,ttl") && states.has(e.state) && e.state === row.application_health &&
         Object.hasOwn(healthReasons, e.reason) && ["none","sensor_native.v2","source_self_reported_shared_uid"].includes(e.source) &&
         Number.isInteger(e.ttl) && e.ttl > 0 && e.ttl <= 180 && (e.age === null || Number.isFinite(e.age) && e.age >= 0) &&
-        (["fingerprint_sensor","network_metadata_projection"].includes(row.id) || e.state === "unknown" && e.source === "none") &&
+        (e.source==="none" || sources[row.id]===e.source) && ownerValid(row,e) &&
+        (Object.hasOwn(sources,row.id) || e.state === "unknown" && e.source === "none") &&
+        (!["backfilling_incomplete_coverage","source_lagging","source_stale"].includes(e.reason) || owners.includes(row.id) && e.source!=="none") &&
         (!["healthy","degraded","unavailable"].includes(e.state) || e.source !== "none" && Number.isFinite(e.age) && e.age <= e.ttl && typeof e.observed_at === "string" && typeof e.received_at === "string");
     }) && model.databases.every((row) => validVerification(row) &&
       keys(row.metadata_evidence,"age,source,state,ttl") && ["sensor_metadata","sampler_lstat","none"].includes(row.metadata_evidence.source) &&

@@ -184,6 +184,17 @@ class DeviceFingerprintRuntime:
         self._monotonic = monotonic
         self._finalized = False
         self._hard_containment = False
+        from app.operations_app_health import HealthPublisher
+        from app.operations_health import EVIDENCE_UNIT
+        self._app_health = HealthPublisher(EVIDENCE_UNIT, monotonic=monotonic)
+
+    def _publish_app_health(self, *, force=False):
+        from app.operations_health import owner_health, EVIDENCE_UNIT
+        try:
+            with self.condition:
+                native = self.state
+            self._app_health.publish(owner_health(EVIDENCE_UNIT, native), force=force)
+        except Exception:pass  # Informational tmpfs publication never changes runtime health.
 
     def initialize(self) -> None:
         self.repository.initialize()
@@ -200,6 +211,7 @@ class DeviceFingerprintRuntime:
         with self.condition:
             self.state, self.reason, self.accepting_writes = "ready", None, True
             self.condition.notify_all()
+        self._publish_app_health(force=True)
 
     def begin_ingest(self) -> bool:
         with self.condition:
@@ -217,6 +229,7 @@ class DeviceFingerprintRuntime:
         with self.condition:
             self.state, self.reason, self.accepting_writes = "stopping", "stopping", False
             self.condition.notify_all()
+        self._publish_app_health(force=True)
         self.stop_event.set()
 
     def signal_stop(self, _signum=None, _frame=None) -> None:
@@ -230,8 +243,14 @@ class DeviceFingerprintRuntime:
         self.maintenance_thread.start()
 
     def _maintenance_loop(self) -> None:
-        while not self.stop_event.wait(RETENTION_SCAN_INTERVAL_SECONDS):
-            self.run_maintenance_once()
+        # Preserve the original 300s fixed-delay DB maintenance, with no catch-up.
+        # The SAME thread wakes for a memory-only APP report each 60s.
+        due = self._monotonic() + RETENTION_SCAN_INTERVAL_SECONDS
+        while not self.stop_event.wait(min(60.0, max(0.0, due-self._monotonic()))):
+            if self._monotonic() >= due:
+                self.run_maintenance_once()
+                due = self._monotonic() + RETENTION_SCAN_INTERVAL_SECONDS
+            self._publish_app_health()
 
     def run_maintenance_once(self) -> None:
         with self.condition:
@@ -287,6 +306,7 @@ class DeviceFingerprintRuntime:
                 self.state, self.reason, self.accepting_writes = "unavailable", reason, False
                 self.condition.notify_all()
         self.telemetry.emit(event, error_category=reason)
+        self._publish_app_health()
 
     def health_payload(self) -> Mapping[str, Any]:
         with self.condition:
@@ -311,6 +331,7 @@ class DeviceFingerprintRuntime:
             self.state, self.reason, self.accepting_writes = "stopping", "stopping", False
             self.condition.notify_all()
         self.stop_event.set()
+        self._publish_app_health(force=True)
         with self.condition:
             while self.active_ingest_count:
                 remaining = deadline - self._monotonic()

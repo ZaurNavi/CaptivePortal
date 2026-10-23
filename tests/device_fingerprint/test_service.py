@@ -85,20 +85,29 @@ def test_constructor_starts_no_thread_and_maintenance_waits_full_delay(tmp_path,
 
 
 def test_maintenance_runs_one_nonoverlapping_pass_after_every_completed_fixed_delay(tmp_path):
-    value = runtime(tmp_path)
+    clock = [0.0]
+    value = runtime(tmp_path, monotonic=lambda: clock[0])
     waits = []
     passes = []
+    reports = []
 
     class Stop:
         def wait(self, delay):
             waits.append(delay)
-            return len(waits) == 3
+            clock[0] += delay
+            return len(waits) == 16
 
     value.stop_event = Stop()
-    value.run_maintenance_once = lambda: passes.append(len(waits))
+    def maintenance():
+        passes.append(clock[0])
+        clock[0] += 90.0  # Fixed delay restarts AFTER completion, no catch-up.
+    value.run_maintenance_once = maintenance
+    value._publish_app_health = lambda: reports.append(clock[0])
     value._maintenance_loop()
-    assert waits == [module.RETENTION_SCAN_INTERVAL_SECONDS] * 3
-    assert passes == [1, 2]
+    assert waits == [60.0] * 16
+    assert passes == [300.0, 690.0, 1080.0]
+    assert len(reports) == 15
+    assert reports[:5] == [60.0, 120.0, 180.0, 240.0, 390.0]
 
 
 def test_start_maintenance_rejects_a_second_overlapping_thread(tmp_path, monkeypatch):
