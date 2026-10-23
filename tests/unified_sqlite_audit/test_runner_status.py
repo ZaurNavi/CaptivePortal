@@ -319,7 +319,8 @@ def test_candidate_unit_has_activation_readiness_and_explicit_qualification_wiri
     assert unit['Service']['Type']=='oneshot' and unit['Service']['RemainAfterExit']=='yes'
     assert unit['Service']['EnvironmentFile']=='/etc/default/captive-portal'
     invocation=unit['Service']['ExecStart']
-    assert '--wait-ready-seconds=60' in invocation
+    assert '--wait-until-ready-or-cancelled' in invocation
+    assert '--wait-ready-seconds' not in invocation
     assert '--qualifications=${SQLITE_UNIFIED_AUDIT_QUALIFICATIONS}' in invocation
     assert unit['Service']['TimeoutStartSec']=='infinity'  # No deadline on audit/T3.
 
@@ -343,5 +344,71 @@ def test_verified_domain_snapshot_with_live_advance_does_not_promote_legacy_succ
         assert row['deep']['assurance_scope']=='SNAPSHOT_ONLY' and row['freshness']=='STALE'
         assert row['last_verified_success'] is row['last_verified_domain_success'] is row['last_verified_physical_success'] is None
         assert value['summary']['live_integrity_verified'] is False
+    finally:
+        for writer in writers:writer.close()
+
+
+@pytest.mark.parametrize('signum_name',['SIGTERM','SIGINT'])
+def test_auto_cli_explicit_signal_cancels_before_inventory_or_source(monkeypatch,capsys,signum_name):
+    import importlib
+    import signal
+    import sqlite3
+    from app.unified_sqlite_audit import cli,readiness
+    settings=importlib.import_module('app.settings')
+    monkeypatch.setattr(settings,'get_settings',lambda:{'sqlite_unified_audit_enabled':'true','port':8088})
+    journal=MemoryJournal()
+    monkeypatch.setattr(cli,'OutcomeJournal',lambda directory:journal)
+    def forbidden(*a,**k):pytest.fail('cancelled wait performed inventory/source work')
+    monkeypatch.setattr(cli,'load_inventory',forbidden)
+    monkeypatch.setattr(sqlite3,'connect',forbidden)
+    signum=getattr(signal,signum_name);before=signal.getsignal(signum);calls=[]
+    def not_ready(port,**kwargs):
+        calls.append(port)
+        signal.getsignal(signum)(signum,None)  # Invoke installed handler, no host signal.
+        raise readiness.ReadyUnavailable()
+    original=readiness.wait_ready
+    def waiting(port,seconds,**kwargs):
+        assert kwargs['until_cancelled'] is True and seconds==0
+        return original(port,seconds,probe_fn=not_ready,sleep=lambda s:None,**kwargs)
+    monkeypatch.setattr(cli,'wait_ready',waiting)
+    assert cli.main(['run-once','--wait-until-ready-or-cancelled'])==2
+    assert calls==[8088] and journal.writes==[]
+    assert signal.getsignal(signum)==before
+    assert json.loads(capsys.readouterr().out)['error']=='audit_unavailable'
+
+
+@pytest.mark.skipif(os.name!='posix',reason='Automatic qualified CLI metadata admission, mocked OS protection')
+def test_auto_cli_late_ready_invokes_existing_cycle_and_physical_job_exactly_once(tmp_path,monkeypatch,capsys):
+    import importlib
+    from app.unified_sqlite_audit import cli,readiness
+    writers,jobs,inventory,proof=setup(tmp_path)
+    journal=MemoryJournal();worker=FixtureWorker();probes=[];runs=[];elapsed=[0]
+    settings=importlib.import_module('app.settings')
+    monkeypatch.setattr(settings,'get_settings',lambda:{'sqlite_unified_audit_enabled':'true','port':18088})
+    monkeypatch.setattr(cli,'OutcomeJournal',lambda directory:journal)
+    def bound():
+        assert len(probes)==1505  # Nothing admitted before the delayed genuine-ready seam.
+        return inventory
+    monkeypatch.setattr(cli,'load_inventory',bound)
+    monkeypatch.setattr(cli,'load_qualifications',lambda *args:tuple(jobs))
+    def late(port,**kwargs):
+        probes.append(port);elapsed[0]+=5401
+        if len(probes)==1505:return proof
+        assert worker.calls==[] and journal.writes==[]
+        raise readiness.ReadyUnavailable()
+    def waiting(port,seconds,**kwargs):
+        assert kwargs['until_cancelled'] is True and seconds==0
+        return readiness.wait_ready(port,seconds,probe_fn=late,sleep=lambda s:None,clock=lambda:elapsed[0],**kwargs)
+    monkeypatch.setattr(cli,'wait_ready',waiting)
+    class CountedRunner(AuditCycleRunner):
+        def run_once(self,*args):runs.append(args[0]);return super().run_once(*args)
+    monkeypatch.setattr(cli,'AuditCycleRunner',lambda journal,**kwargs:CountedRunner(
+        journal,worker=worker,ready_check=lambda p:p==proof,**kwargs))
+    try:
+        assert cli.main(['run-once','--wait-until-ready-or-cancelled','--qualifications','/explicit-policy'])==0
+        result=json.loads(capsys.readouterr().out)
+        assert runs==[proof.portal_run_id] and worker.calls==[jobs[0].store_id]
+        assert result['stores'][0]['deep']['physical_verdict']=='PASS'
+        assert elapsed[0]>5400 and len(probes)>1501
     finally:
         for writer in writers:writer.close()

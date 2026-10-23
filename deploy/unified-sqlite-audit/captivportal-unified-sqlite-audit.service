@@ -14,7 +14,7 @@ WorkingDirectory=/opt/CaptivePortal
 EnvironmentFile=/etc/default/captive-portal
 # SysAdmin supplies this explicit root-owned current-run policy path through the
 # effective portal environment. Empty/unset => no qualification, zero DB opens.
-ExecStart=/usr/bin/python3 -m app.unified_sqlite_audit.cli run-once --wait-ready-seconds=60 --qualifications=${SQLITE_UNIFIED_AUDIT_QUALIFICATIONS}
+ExecStart=/usr/bin/python3 -m app.unified_sqlite_audit.cli run-once --wait-until-ready-or-cancelled --qualifications=${SQLITE_UNIFIED_AUDIT_QUALIFICATIONS}
 RemainAfterExit=yes
 TimeoutStartSec=infinity
 TimeoutStopSec=10s

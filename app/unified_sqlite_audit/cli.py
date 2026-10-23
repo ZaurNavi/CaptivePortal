@@ -74,7 +74,9 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command',choices=('run-once','status'))
     parser.add_argument('--port',type=int,help='Explicit qualified override; otherwise SAME get_settings port as portal')
-    parser.add_argument('--wait-ready-seconds',type=int,default=0,help='Finite startup probe retry only; not an audit deadline')
+    waiting=parser.add_mutually_exclusive_group()
+    waiting.add_argument('--wait-ready-seconds',type=int,default=0,help='Optional finite MANUAL retry; default is fail-fast')
+    waiting.add_argument('--wait-until-ready-or-cancelled',action='store_true',help='Automatic oneshot: no elapsed/attempt ceiling')
     parser.add_argument('--journal-dir',default='/run/captiveportal-unified-sqlite-audit')
     parser.add_argument('--qualifications',help='Explicit root-owned CURRENT-run owner/SysAdmin attestation; optional')
     args=parser.parse_args(argv)
@@ -98,7 +100,8 @@ def main(argv=None):
             cancelled=True
         old={s:signal.signal(s,stop) for s in (signal.SIGTERM,signal.SIGINT)}
         try:
-            ready=wait_ready(port,args.wait_ready_seconds,cancelled=lambda:cancelled)
+            ready=wait_ready(port,args.wait_ready_seconds,
+                until_cancelled=args.wait_until_ready_or_cancelled,cancelled=lambda:cancelled)
             try:inventory=load_inventory()
             except (OSError,ValueError):inventory=None
             qualifications=()

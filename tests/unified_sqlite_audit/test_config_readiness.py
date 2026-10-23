@@ -153,13 +153,22 @@ def test_oneshot_waits_for_actual_http_serving_not_app_or_type_simple_activation
     value=Flask(__name__);run_id=readiness.install(value,{'sqlite_unified_audit_enabled':'true'})
     server=make_server('127.0.0.1',0,value)
     allow_http=threading.Event();waiting=threading.Event();results=[];errors=[]
+    stopped=threading.Event();elapsed=[0];attempts=[]
+    def delayed_probe(port,**kwargs):
+        attempts.append(elapsed[0])
+        if len(attempts)<=3:
+            elapsed[0]=(61,301,5401)[len(attempts)-1]
+            raise readiness.ReadyUnavailable()
+        return readiness.probe(port,**kwargs)
+    def pause(seconds):elapsed[0]+=seconds
     def serve():
         assert allow_http.wait(5)
         server.serve_forever()
     def launch():
         waiting.set()
         try:
-            proof=readiness.wait_ready(server.server_port,3)
+            proof=readiness.wait_ready(server.server_port,0,until_cancelled=True,
+                cancelled=stopped.is_set,probe_fn=delayed_probe,clock=lambda:elapsed[0],sleep=pause)
             from app.unified_sqlite_audit.runner import AuditCycleRunner, QualifiedManifest
             from app.unified_sqlite_audit.status import OutcomeJournal
             directory=tmp_path/'journal';directory.mkdir(mode=0o700)
@@ -180,5 +189,52 @@ def test_oneshot_waits_for_actual_http_serving_not_app_or_type_simple_activation
         allow_http.set();runner_thread.join(5)
         assert not runner_thread.is_alive() and errors==[]
         assert results[0].portal_run_id==run_id and readiness.confirm(results[0])
+        assert len(attempts)==4 and elapsed[0]>5400
     finally:
-        allow_http.set();server.shutdown();thread.join(5);runner_thread.join(5);server.server_close()
+        stopped.set();allow_http.set();server.shutdown();thread.join(5);runner_thread.join(5);server.server_close()
+
+
+@pytest.mark.parametrize('successful_attempt',[4,1505])
+def test_auto_wait_has_no_elapsed_or_attempt_limit_and_manual_still_fail_fast(successful_attempt):
+    calls=[];elapsed=[0]
+    proof=readiness.ReadyProof('f81892ee-7497-4a89-89a0-bf4d5290ff38',1,'start','boot',8088)
+    def delayed(port,**kwargs):
+        calls.append(port)
+        elapsed[0]=(61,301,5401)[len(calls)-1] if len(calls)<=3 else elapsed[0]+3600
+        if len(calls)==successful_attempt:return proof
+        raise readiness.ReadyUnavailable()
+    result=readiness.wait_ready(8088,0,until_cancelled=True,probe_fn=delayed,
+        clock=lambda:elapsed[0],sleep=lambda seconds:None)
+    assert result is proof and len(calls)==successful_attempt and elapsed[0]>5400
+    calls.clear()
+    with pytest.raises(readiness.ReadyUnavailable):
+        readiness.wait_ready(8088,0,probe_fn=delayed,sleep=lambda s:pytest.fail('manual fail-fast slept'))
+    assert calls==[8088]
+
+
+@pytest.mark.parametrize('bad',['proxy','pid','identity','listener','redirect'])
+def test_auto_wait_rejects_genuine_bad_response_or_proof_without_retry(monkeypatch,bad):
+    import sqlite3
+    monkeypatch.setattr(sqlite3,'connect',lambda *a,**k:pytest.fail('readiness opened source'))
+    headers={'X-Audit-Run':'f81892ee-7497-4a89-89a0-bf4d5290ff38',
+        'X-Audit-Pid':'123','X-Audit-Start':'start','X-Audit-Boot':'boot'}
+    if bad=='proxy':headers['Forwarded']='for=127.0.0.1'
+    if bad=='pid':headers['X-Audit-Pid']='invalid'
+    closed=[];requested=[]
+    class Response:
+        status=302 if bad=='redirect' else 204
+        def read(self,n):return b''
+        def getheaders(self):return list(headers.items())
+        def getheader(self,k,default=None):return headers.get(k,default)
+    class Connection:
+        def __init__(self,*a,**k):pass
+        def request(self,*a,**k):requested.append(1)
+        def getresponse(self):return Response()
+        def close(self):closed.append(1)
+    monkeypatch.setattr(readiness.http.client,'HTTPConnection',Connection)
+    monkeypatch.setattr(readiness,'process_identity',lambda pid:('wrong','boot') if bad=='identity' else ('start','boot'))
+    monkeypatch.setattr(readiness,'_owns_listener',lambda pid,port:bad!='listener')
+    with pytest.raises(readiness.ReadyRejected):
+        readiness.wait_ready(8088,0,until_cancelled=True,probe_fn=readiness.probe,
+            sleep=lambda seconds:pytest.fail('security rejection was retried'))
+    assert requested==closed==[1]

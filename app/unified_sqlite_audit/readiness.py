@@ -18,6 +18,16 @@ class ReadyProof:
     port: int
 
 
+class ReadyUnavailable(AuditError):
+    """No completed local response yet; only this permits automatic retry."""
+    def __init__(self):super().__init__('ready_unproven')
+
+
+class ReadyRejected(AuditError):
+    """A response/proof violates the boundary; do NOT retry it as warming up."""
+    def __init__(self):super().__init__('ready_unproven')
+
+
 def process_identity(pid):
     # stat's comm can contain spaces and parentheses; parse after its LAST ')'.
     fields = Path(f'/proc/{pid}/stat').read_text(encoding='ascii').rsplit(')',1)[1].split()
@@ -97,21 +107,29 @@ def _owns_listener(pid, port):
 def probe(port, *, timeout=2):
     """Single direct local HTTP attempt; never Requests/env proxies or a ready loop."""
     if type(port) is not int or not 1 <= port <= 65535:
-        raise AuditError('ready_unproven')
+        raise ReadyRejected()
     connection = http.client.HTTPConnection('127.0.0.1',port,timeout=timeout)
     try:
         connection.request('GET','/__internal/audit-ready',headers={'Connection':'close'})
         response = connection.getresponse()
-        if response.status != 204 or response.read(1):raise AuditError('ready_unproven')
-        run_id = response.getheader('X-Audit-Run')
-        pid = int(response.getheader('X-Audit-Pid','0'))
-        start,boot = response.getheader('X-Audit-Start'),response.getheader('X-Audit-Boot')
-        if (not identifier(run_id) or pid <= 0 or process_identity(pid) != (start,boot)
-                or not _owns_listener(pid,port)):
-            raise AuditError('ready_unproven')
-        return ReadyProof(run_id,pid,start,boot,port)
-    except (OSError, ValueError, IndexError, http.client.HTTPException):
-        raise AuditError('ready_unproven') from None
+        if (response.status != 204 or response.read(1) or
+                any(name.lower().startswith('x-forwarded-') or name.lower() in
+                    {'forwarded','x-real-ip','via'} for name,_ in response.getheaders())):
+            raise ReadyRejected()
+        try:
+            run_id = response.getheader('X-Audit-Run')
+            pid = int(response.getheader('X-Audit-Pid','0'))
+            start,boot = response.getheader('X-Audit-Start'),response.getheader('X-Audit-Boot')
+            if (not identifier(run_id) or pid <= 0 or process_identity(pid) != (start,boot)
+                    or not _owns_listener(pid,port)):
+                raise ReadyRejected()
+            return ReadyProof(run_id,pid,start,boot,port)
+        except (OSError, ValueError, IndexError):
+            raise ReadyRejected() from None
+    except (OSError, http.client.RemoteDisconnected):
+        raise ReadyUnavailable() from None
+    except http.client.HTTPException:
+        raise ReadyRejected() from None
     finally:
         connection.close()
 
@@ -120,20 +138,38 @@ def confirm(proof):
     return isinstance(proof, ReadyProof) and probe(proof.port) == proof
 
 
-def wait_ready(port, seconds, *, cancelled=lambda:False, probe_fn=probe,
+def wait_ready(port, seconds, *, until_cancelled=False, cancelled=lambda:False, probe_fn=probe,
                clock=time.monotonic, sleep=time.sleep):
-    """Finite startup-only retry inside ONE oneshot, not a resident scheduler.
+    """Explicit automatic liveness wait OR the preserved manual probe mode.
 
-    This budget NEVER applies to backup/integrity/T3. No source or journal work
-    precedes a real 204. Unit activation alone does not establish readiness.
+    Automatic wait has NO elapsed/attempt ceiling. Each network attempt is
+    bounded, and its quiet pause checks cancellation. Only transport-not-ready
+    is retried; rejected proofs/security errors terminate. Neither mode opens a
+    source or writes journal transitions before a real 204.
     """
     if type(seconds) is not int or not 0 <= seconds <= 300:
         raise AuditError('ready_unproven')
+    if type(until_cancelled) is not bool or until_cancelled and seconds!=0:
+        raise ReadyRejected()
+    if until_cancelled:
+        while True:
+            if cancelled():raise AuditError('cancelled')
+            try:
+                proof=probe_fn(port,timeout=2)
+                if cancelled():raise AuditError('cancelled')
+                return proof
+            except ReadyUnavailable:pass
+            # A one-second inexpensive pause, cancellable every 100 ms.
+            # No clock comparison or fixed probe count can abandon a live boot.
+            for _ in range(10):
+                if cancelled():raise AuditError('cancelled')
+                sleep(0.1)
     until=clock()+seconds
     for _ in range(1501):  # Also bounded if a broken clock stops advancing.
         if cancelled():raise AuditError('cancelled')
         remaining=until-clock()
         try:return probe_fn(port,timeout=min(2,max(0.001,remaining)) if seconds else 2)
+        except ReadyRejected:raise
         except AuditError:
             if not seconds or remaining<=0:raise
         remaining=until-clock()

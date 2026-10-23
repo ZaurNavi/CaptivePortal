@@ -39,9 +39,14 @@ portal unit, with `RemainAfterExit=yes` (no resident process). Only a separately
 approved SysAdmin enable would create the protected
 `/etc/systemd/system/captive-portal.service.wants/captivportal-unified-sqlite-audit.service`
 binding. No enable/install/start or portal-unit edit is performed by this task.
-`After=` alone is NOT activation or HTTP readiness. The CLI's finite 60-second
-startup-only retry waits for actual 204/process/listener proof before admission;
-this is not a backup/T3 deadline. Real systemd lifecycle/proxy protection remains
+`After=` alone is NOT activation or HTTP readiness. The automatic command uses
+`--wait-until-ready-or-cancelled`: no elapsed budget or fixed attempt ceiling,
+even if startup lasts hours. Only transient local transport unavailability is
+retried, with a cheap cancellation-aware pause; invalid proof/proxy/security
+responses terminate closed. SIGTERM/SIGINT/service stop cancels the wait. After
+authenticated 204 it invokes exactly one existing run_once. Default manual CLI
+is still a single fail-fast probe; optional finite `--wait-ready-seconds` is
+mutually exclusive with automatic waiting. Real systemd lifecycle/proxy protection remains
 an operational gate. The journal directory must be explicitly provisioned.
 Duplicate same-run triggers return the existing cycle. Unfinished executor/PID
 reuse or unknown release results in ORPHAN_HOLD, including across portal boots.
