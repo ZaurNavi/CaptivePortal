@@ -165,3 +165,60 @@ def test_response_size_cap_is_enforced_without_truncated_json(api_client):
     )
     assert response.status_code == 503
     assert response.get_json()["error"]["code"] == "response_too_large"
+
+
+@pytest.mark.parametrize("visit_version", [6, 7])
+def test_device_list_and_inventory_HTTP_use_real_Visit_V6_and_fail_closed_on_future(
+    admin_app, tmp_path, visit_version,
+):
+    import hashlib
+    import sqlite3
+    from app.admin_web.device_gateway import AdminDeviceReadGateway
+    from app.admin_web.query_service import AdminQueryService
+    from .test_device_gateway import _native_visit_databases, _native_visit, _snapshot
+
+    paths = _native_visit_databases(tmp_path)
+    _snapshot(paths[0], device_id=DEVICE_ID, mac="02:00:00:00:00:01",
+              captured_at="2026-01-01T01:00:00.000Z", site_id=SITE_ID)
+    _native_visit(paths[1], device_id=DEVICE_ID, mac="02:00:00:00:00:01",
+                  started_at="2026-01-01T01:00:00.000Z", site_id=SITE_ID)
+    if visit_version == 7:
+        # Disposable unsupported future metadata, not an admitted V6 fixture.
+        with sqlite3.connect(paths[1]) as connection:
+            connection.execute("PRAGMA user_version=7")
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    runtime = admin_app.extensions["admin_web_runtime"]
+    runtime.query_service = AdminQueryService(
+        config=runtime.config, policy=runtime.access_policy,
+        device_gateway=AdminDeviceReadGateway(*paths), read_gateway=object(),
+        visit_analytics_service=object(), inventory_timezone_name="UTC",
+    )
+    client = admin_app.test_client()
+    prefix = f"/admin/api/v1/sites/{SITE_ID}/devices"
+    for suffix in ("", "/inventory-summary"):
+        denied = client.get(prefix + suffix, base_url="https://localhost")
+        assert denied.status_code == 401
+    login(client)
+    listed = client.get(prefix, base_url="https://localhost")
+    inventory = client.get(prefix + "/inventory-summary", base_url="https://localhost")
+    if visit_version == 6:
+        assert listed.status_code == inventory.status_code == 200
+        payload = listed.get_json()
+        assert payload["site_id"] == SITE_ID and payload["api_version"] == "admin.read.v1"
+        assert len(payload["result"]["items"]) == 1
+        item = payload["result"]["items"][0]
+        assert item["device_id"] == DEVICE_ID and item["canonical_mac"] == "02:00:00:00:00:01"
+        assert item["site_visit_count"] == item["site_snapshot_count"] == 1
+        summary = inventory.get_json()["result"]
+        assert summary["total_devices"] == 1 and summary["new_devices_today"] == 0
+        assert summary["timezone"] == "UTC"
+    else:
+        assert listed.status_code == inventory.status_code == 503
+        assert listed.get_json()["error"]["code"] == "source_unavailable"
+        assert inventory.get_json()["error"]["code"] == "source_unavailable"
+        assert "result" not in listed.get_json() and "result" not in inventory.get_json()
+    for suffix in ("", "/inventory-summary"):
+        denied = client.get(f"/admin/api/v1/sites/{'f' * 24}/devices" + suffix,
+                            base_url="https://localhost")
+        assert denied.status_code == 403
+    assert before == {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
