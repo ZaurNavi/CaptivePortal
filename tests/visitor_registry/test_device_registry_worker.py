@@ -65,6 +65,9 @@ class FakeRepository:
     def run_full_audit(self):
         self.full_audit_calls += 1
 
+    def invalidate_registered_devices_snapshot(self):
+        pass
+
     def initial_backfill_completed(self):
         return self.backfill
 

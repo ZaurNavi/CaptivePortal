@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -58,6 +59,9 @@ class DisabledVisitorRegistry:
     available = False
     running = False
 
+    def get_registered_devices_snapshot(self) -> int | None:
+        return None
+
     def start(self) -> bool:
         return False
 
@@ -96,6 +100,7 @@ class VisitorRegistryWorker:
         self.reader = reader
         self.telemetry = telemetry
         self.config = repository.config
+        self._owner_pid = os.getpid()
         self.available = True
         self._stop_event = threading.Event()
         self._scan_lock = threading.Lock()
@@ -112,6 +117,18 @@ class VisitorRegistryWorker:
     def running(self) -> bool:
         with self._state_lock:
             return self._thread is not None and self._thread.is_alive()
+
+    def get_registered_devices_snapshot(self) -> int | None:
+        """Same-owner memory seam; future Admin composition supplies freshness."""
+        if os.getpid() != self._owner_pid:
+            return None
+        with self._state_lock:
+            if (not self.enabled or not self.config.enabled or not self.available
+                    or self._stop_event.is_set() or self._stop_completed
+                    or not self._full_audit_completed or not self.running
+                    or self.config is not self.repository.config):
+                return None
+            return self.repository.registered_devices_snapshot()
 
     def start(self) -> bool:
         with self._state_lock:
@@ -279,6 +296,7 @@ class VisitorRegistryWorker:
         deadline = time.monotonic() + bounded
         with self._state_lock:
             self._stop_event.set()
+            self.repository.invalidate_registered_devices_snapshot()
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(max(0.0, deadline - time.monotonic()))
@@ -326,12 +344,15 @@ class VisitorRegistryWorker:
         return completed
 
     def _run(self) -> None:
-        while not self._stop_event.is_set() and self.available:
-            self.run_once()
-            if self._stop_event.wait(
-                self.config.scan_interval_seconds
-            ):
-                break
+        try:
+            while not self._stop_event.is_set() and self.available:
+                self.run_once()
+                if self._stop_event.wait(
+                    self.config.scan_interval_seconds
+                ):
+                    break
+        finally:
+            self.repository.invalidate_registered_devices_snapshot()
 
     def _change_state(
         self,
@@ -370,6 +391,7 @@ class VisitorRegistryWorker:
             return None
 
     def _handle_error(self, exc: Exception) -> None:
+        self.repository.invalidate_registered_devices_snapshot()
         category = _sqlite_category(exc)
         if category == "io_error":
             try:
