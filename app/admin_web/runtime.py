@@ -46,7 +46,10 @@ def bind_core_operations_snapshot(app, settings):
         admin = getattr(runtime.config, 'enabled', None)
         # Unknown effective intent stays unknown; never rebuild configuration.
         app.extensions['operations_core_composition'] = (os.getpid(), capport, admin)
-        runtime.operations_service.set_core_snapshot_provider(lambda now: core_operations_snapshot(app, now))
+        app.extensions['operations_core_workload_binding'] = (os.getpid(),
+            app.extensions.get('portal_evidence_runtime'), getattr(runtime, 'operations_visit_runtime', None), runtime)
+        runtime.operations_service.set_core_snapshot_provider(lambda now: dict(
+            core_operations_snapshot(app, now), workload=core_workload_snapshot(app)))
     except Exception:pass
 
 
@@ -100,6 +103,37 @@ def core_operations_snapshot(app, now):
     return dict(health=validate_local(dict(state=state, reason=reason), CORE_UNIT), observed_at=observed)
 
 
+def core_workload_snapshot(app):
+    """One existing sampler pass; only bounded locks on composed live objects."""
+    result = dict(portal_evidence_queue_depth=None, visit_writer_foreground_waiters=None,
+        visit_writer_background_waiters=None)
+    try:
+        binding = app.extensions['operations_core_workload_binding']
+        marker = app.extensions['operations_core_composition']
+        runtime = app.extensions.get('admin_web_runtime')
+        if binding[0] != os.getpid() or marker[0] != os.getpid() or binding[3] is not runtime:return result
+    except (KeyError,TypeError,IndexError):return result
+    try:
+        from app.device_fingerprint_portal.runtime import PortalEvidenceRuntime
+        portal = binding[1]
+        if (isinstance(portal, PortalEvidenceRuntime) and portal is app.extensions.get('portal_evidence_runtime')
+                and portal.config.enabled is True and not portal.stop_event.is_set()
+                and portal.thread is not None and portal.thread.is_alive()):
+            count = portal.queue.qsize()
+            if type(count) is int and 0 <= count <= 2**53-1:result['portal_evidence_queue_depth'] = count
+    except Exception:pass
+    try:
+        from app.visit_lifecycle.runtime import VisitLifecycleRuntime
+        visit = binding[2]
+        if (isinstance(visit, VisitLifecycleRuntime) and visit is runtime.operations_visit_runtime
+                and visit.enabled is True and visit.available is True and visit.state in {'active','degraded'}):
+            foreground, background = visit.repository._write_coordinator._waiting_counts()
+            if all(type(n) is int and 0 <= n <= 2**53-1 for n in (foreground, background)):
+                result.update(visit_writer_foreground_waiters=foreground,visit_writer_background_waiters=background)
+    except Exception:pass
+    return result
+
+
 @dataclass(slots=True)
 class AdminWebRuntime:
     state: str
@@ -143,6 +177,7 @@ class AdminWebRuntime:
     operations_feature_enabled: bool = False
     operations_state: str = "disabled"
     operations_service: Any | None = None
+    operations_visit_runtime: Any | None = None
 
     def clear(self) -> None:
         if self.operations_service is not None:
@@ -605,6 +640,7 @@ def create_admin_web_runtime(
             from .operations_inventory import load_inventory
             from .operations_service import AdminOperationsReadService
             runtime.operations_service = AdminOperationsReadService(load_inventory())
+            runtime.operations_visit_runtime = visit_runtime
             runtime.operations_state = "active"
     except Exception:
         runtime.operations_state = "unavailable"

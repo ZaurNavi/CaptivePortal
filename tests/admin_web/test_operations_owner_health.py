@@ -101,7 +101,7 @@ def test_phase1_backlog_changes_do_not_trigger_owner_transition_writes(tmp_path,
         assert p.publish(health) == (instant % 60 == 0)
         assert p.last_health == health and 'workload' not in p.last_health
     assert writes == [0, 60, 120]
-    assert h.decode((tmp_path/h.REPORT).read_bytes(), NI04_UNIT)['workload'] == dict(feed_backlog_entries=None)
+    assert h.decode((tmp_path/h.REPORT).read_bytes(), NI04_UNIT)['workload'] == dict(feed_backlog_entries=None,visit_outbox_unacked=None)
 
 
 @pytest.mark.skipif(__import__('os').name != 'posix', reason='Linux/POSIX owner native openat report contract')

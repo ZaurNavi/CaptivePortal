@@ -39,15 +39,20 @@ class TrafficProjectionHealthObserver:
         from app.operations_app_health import HealthPublisher
         from app.operations_health import TRAFFIC_UNIT
         self._app_health = HealthPublisher(TRAFFIC_UNIT, monotonic=monotonic,
-            interval=HEARTBEAT_INTERVAL_SECONDS)
+            interval=HEARTBEAT_INTERVAL_SECONDS, workload_provider=self._operations_workload)
         self._app_site_states: dict[tuple[str, str], tuple[str, float]] = {}
         self._app_ownership_confirmed = False
+
+    def _operations_workload(self):
+        if self._stop.is_set():return None
+        return getattr(self.root_service, 'operations_workload', lambda:None)()
 
     def _owned_keys_locked(self, keys):
         changed = not self._app_ownership_confirmed or self.known_owned_keys != keys
         self.known_owned_keys = keys
         self._app_ownership_confirmed = True
         self._app_site_states = {key: value for key, value in self._app_site_states.items() if key in keys}
+        if changed:getattr(self.root_service, 'invalidate_operations_workload', lambda:None)()
         return changed
 
     def _publish_app_health_locked(self):
@@ -183,6 +188,9 @@ class TrafficProjectionHealthObserver:
 
         now = self._monotonic()
         status = str(health["status"])
+        if (service is getattr(self.root_service,'_workload_owner',None)
+                and (not source_available or status not in {'healthy','catching_up'})):
+            self.root_service.invalidate_operations_workload()
         first_observation = key not in self._previous_status
         previous_status = self._previous_status.get(key)
         previous_source = self._previous_source_available.get(key)
@@ -258,6 +266,7 @@ class TrafficProjectionHealthObserver:
         self._observe_reconcile_progress_locked(key, fields, now)
 
     def _observe_failure_locked(self, key: tuple[str, str]) -> None:
+        getattr(self.root_service, 'invalidate_operations_workload', lambda:None)()
         now = self._monotonic()
         previous_storage = self._previous_storage_available.get(key)
         heartbeat_due = (

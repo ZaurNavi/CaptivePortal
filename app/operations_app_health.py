@@ -13,10 +13,11 @@ from datetime import datetime, timezone
 
 from app.device_fingerprint_sensor import operations_metadata as m
 from app.operations_verification_report import configured_channel as startup_channel
-from app.operations_health import CLASSIFICATION_UNIT, NI04_UNIT, OWNER_UNITS, validate_owner
+from app.operations_health import CLASSIFICATION_UNIT, NI04_UNIT, TRAFFIC_UNIT, OWNER_UNITS, validate_owner
 
 SCHEMA = "captivprod.ops.owner-app-health.v1"
 SCHEMA_V2 = "captivprod.ops.owner-app-health.v2"
+SCHEMA_V3 = "captivprod.ops.owner-app-health.v3"
 REPORT = "app-health.json"
 PROVENANCE = "source_self_reported_shared_uid"
 
@@ -27,6 +28,22 @@ def ni04_workload(value=None):
     m.require(type(value) is dict and set(value) == {'feed_backlog_entries'})
     count = value['feed_backlog_entries']
     m.require(count is None or m.integer(count))
+    return dict(value)
+
+
+def phase2_workload(unit, value=None):
+    fields = {NI04_UNIT: ('feed_backlog_entries','visit_outbox_unacked'),
+        CLASSIFICATION_UNIT: ('integration_jobs_pending','integration_jobs_leased'),
+        TRAFFIC_UNIT: ('incremental_backlog_present',)}
+    m.require(unit in fields)
+    empty = dict.fromkeys(fields[unit])
+    if value is None:return empty
+    m.require(type(value) is dict and set(value)==set(empty))
+    for item in value.values():m.require(item is None or m.integer(item))
+    if unit == NI04_UNIT:m.require(value['feed_backlog_entries'] is None)
+    elif unit == CLASSIFICATION_UNIT:
+        m.require((value['integration_jobs_pending'] is None)==(value['integration_jobs_leased'] is None))
+    else:m.require(value['incremental_backlog_present'] in (None,0,1))
     return dict(value)
 
 
@@ -49,14 +66,18 @@ def decode(raw, unit):
         return result
     def invalid(_):raise m.MetadataUnavailable()
     value = json.loads(raw.decode('utf-8'), object_pairs_hook=pairs, parse_constant=invalid)
-    v2 = type(value) is dict and value.get('schema_version') == SCHEMA_V2
+    schema = value.get('schema_version') if type(value) is dict else None
+    extended = schema in {SCHEMA_V2, SCHEMA_V3}
     m.require(type(value) is dict and set(value) == {'schema_version', 'producer_unit', 'producer',
-        'epoch', 'sequence', 'sample_time_utc', 'sample_boottime_ns', 'application_health'} | ({'workload'} if v2 else set()))
-    m.require(value['schema_version'] in {SCHEMA, SCHEMA_V2} and value['producer_unit'] == unit)
-    if v2:
-        m.require(unit == NI04_UNIT)
+        'epoch', 'sequence', 'sample_time_utc', 'sample_boottime_ns', 'application_health'} | ({'workload'} if extended else set()))
+    m.require(schema in {SCHEMA, SCHEMA_V2, SCHEMA_V3} and value['producer_unit'] == unit)
+    if extended:
+        m.require(unit in {NI04_UNIT, TRAFFIC_UNIT})
         m.require(type(value['workload']) is dict)
-        ni04_workload(value['workload'])
+        if schema == SCHEMA_V2 and unit == NI04_UNIT:ni04_workload(value['workload'])
+        else:
+            m.require(schema == (SCHEMA_V3 if unit == NI04_UNIT else SCHEMA_V2))
+            phase2_workload(unit,value['workload'])
     producer = value['producer']
     m.require(type(producer) is dict and set(producer) == {'boot_id', 'pid', 'start_ticks'})
     for item in (producer['boot_id'], value['epoch']):
@@ -76,7 +97,7 @@ def _stamp(info):
 class HealthPublisher:
     def __init__(self, unit, *, enabled=None, channel=configured_channel, monotonic=time.monotonic,
                  now=lambda: datetime.now(timezone.utc), boottime=m.boot_ns, identity=m.process_identity,
-                 interval=m.INTERVAL):
+                 interval=m.INTERVAL, workload_provider=None):
         m.require(unit in OWNER_UNITS)
         m.require(type(interval) in {int, float} and 0 < interval <= m.INTERVAL)
         self.interval = interval
@@ -86,6 +107,7 @@ class HealthPublisher:
         self.epoch, self.sequence, self.pid = str(uuid.uuid4()), 0, os.getpid()
         self.last_attempt = self.last_health = None
         self.lock = threading.Lock()
+        self.workload_provider = workload_provider if unit in {NI04_UNIT, TRAFFIC_UNIT} else None
 
     def publish(self, health, *, force=False):
         if not self.enabled or not self.lock.acquire(blocking=False):return False
@@ -106,10 +128,10 @@ class HealthPublisher:
             value = dict(schema_version=SCHEMA, producer_unit=self.unit, producer=self.identity(pid, source.uid),
                 epoch=self.epoch, sequence=sequence, sample_time_utc=m.stamp(self.now()),
                 sample_boottime_ns=self.boottime(), application_health=health)
-            if self.unit == NI04_UNIT:
-                # Architect #6376326800: feed sequence equality does not bind
-                # NI02 source epoch. Numeric delivery is HOLD_PARTIAL.
-                value.update(schema_version=SCHEMA_V2, workload=ni04_workload())
+            if self.unit in {NI04_UNIT, TRAFFIC_UNIT}:
+                try:workload=phase2_workload(self.unit,self.workload_provider() if self.workload_provider else None)
+                except Exception:workload=phase2_workload(self.unit)
+                value.update(schema_version=SCHEMA_V3 if self.unit==NI04_UNIT else SCHEMA_V2,workload=workload)
             raw = json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode('ascii')
             decode(raw, self.unit)
             try:
@@ -177,7 +199,7 @@ class HealthReader:
             return dict(status='fresh', health=value['application_health'], producer=producer,
                 observed_at=value['sample_time_utc'], age=max(age, boot_age),
                 expires_boottime_ns=sample_boot + int(m.TTL*1e9),
-                **({'workload': value['workload']} if value['schema_version'] == SCHEMA_V2 else {}))
+                **({'workload': value['workload']} if value['schema_version'] in {SCHEMA_V2,SCHEMA_V3} else {}))
         except Exception:return dict(status='unknown', reason='report_unavailable')
         finally:
             if fd is not None:

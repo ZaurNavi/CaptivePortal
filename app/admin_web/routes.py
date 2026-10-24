@@ -99,7 +99,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         if source_ip is None or not _source_allowed(source_ip, config.allowed_networks):
             return _error("source_network_forbidden", 403)
         g.admin_source_ip = source_ip
-        if request.path in ("/admin/db-services", "/admin/api/v1/operations/db-services", "/admin/api/v2/operations/db-services", "/admin/api/v3/operations/db-services", "/admin/api/v4/operations/db-services") and request.method not in ("GET", "HEAD"):
+        if request.path in ("/admin/db-services", "/admin/api/v1/operations/db-services", "/admin/api/v2/operations/db-services", "/admin/api/v3/operations/db-services", "/admin/api/v4/operations/db-services", "/admin/api/v5/operations/db-services") and request.method not in ("GET", "HEAD"):
             # Leave unsupported methods to Flask's standard 405/OPTIONS, not
             # the legacy form-POST validator. Neither path has a mutation.
             return None
@@ -201,7 +201,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 and policy.authorize_global(principal, "admin.read.operations")}
 
     def operations_error(code, status):
-        version = ("admin.operations.db-services.v4" if request.path == "/admin/api/v4/operations/db-services" else
+        version = ("admin.operations.db-services.v5" if request.path == "/admin/api/v5/operations/db-services" else
+            "admin.operations.db-services.v4" if request.path == "/admin/api/v4/operations/db-services" else
             "admin.operations.db-services.v3" if request.path == "/admin/api/v3/operations/db-services" else
             "admin.operations.db-services.v2" if request.path == "/admin/api/v2/operations/db-services" else "admin.operations.db-services.v1")
         return jsonify({"api_version": version, "request_id": g.admin_request_id,
@@ -229,6 +230,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     @blueprint.get("/admin/api/v2/operations/db-services")
     @blueprint.get("/admin/api/v3/operations/db-services")
     @blueprint.get("/admin/api/v4/operations/db-services")
+    @blueprint.get("/admin/api/v5/operations/db-services")
     @authenticated
     def db_services_snapshot():
         rejected = operations_gate()
@@ -238,10 +240,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         try:
             if runtime.operations_state != "active" or runtime.operations_service is None:
                 return operations_error("operations_unavailable", 503)
-            if request.path in ("/admin/api/v2/operations/db-services", "/admin/api/v3/operations/db-services", "/admin/api/v4/operations/db-services"):
-                from .operations_schema import validate_v2, validate_v3, validate_v4
+            if request.path in ("/admin/api/v2/operations/db-services", "/admin/api/v3/operations/db-services", "/admin/api/v4/operations/db-services", "/admin/api/v5/operations/db-services"):
+                from .operations_schema import validate_v2, validate_v3, validate_v4, validate_v5
                 version = int(request.path.split('/')[3][1:])
-                model = {2: validate_v2, 3: validate_v3, 4: validate_v4}[version](runtime.operations_service.read(g.admin_request_id, version=version))
+                model = {2: validate_v2, 3: validate_v3, 4: validate_v4, 5: validate_v5}[version](runtime.operations_service.read(g.admin_request_id, version=version))
             else:
                 model = runtime.operations_service.read(g.admin_request_id)
             payload = json.dumps(model, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
@@ -2523,8 +2525,9 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
 
 
 def _error(code: str, status_code: int) -> Response:
-    if request.path in ("/admin/api/v1/operations/db-services", "/admin/api/v2/operations/db-services", "/admin/api/v3/operations/db-services", "/admin/api/v4/operations/db-services"):
-        version = ("admin.operations.db-services.v4" if request.path == "/admin/api/v4/operations/db-services" else
+    if request.path in ("/admin/api/v1/operations/db-services", "/admin/api/v2/operations/db-services", "/admin/api/v3/operations/db-services", "/admin/api/v4/operations/db-services", "/admin/api/v5/operations/db-services"):
+        version = ("admin.operations.db-services.v5" if request.path == "/admin/api/v5/operations/db-services" else
+            "admin.operations.db-services.v4" if request.path == "/admin/api/v4/operations/db-services" else
             "admin.operations.db-services.v3" if request.path == "/admin/api/v3/operations/db-services" else
             "admin.operations.db-services.v2" if request.path == "/admin/api/v2/operations/db-services" else "admin.operations.db-services.v1")
         return jsonify({"api_version": version,
@@ -2575,7 +2578,7 @@ def _is_admin_path(path: str) -> bool:
 
 def _is_api_path(path: str) -> bool:
     return (_is_protocol_intelligence_path(path) or _is_visit_service_history_path(path)
-        or path in ("/admin/api/v2/operations/db-services", "/admin/api/v3/operations/db-services", "/admin/api/v4/operations/db-services")
+        or path in ("/admin/api/v2/operations/db-services", "/admin/api/v3/operations/db-services", "/admin/api/v4/operations/db-services", "/admin/api/v5/operations/db-services")
         or path == ADMIN_API_PREFIX or path.startswith(ADMIN_API_PREFIX + "/"))
 
 

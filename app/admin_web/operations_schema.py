@@ -116,3 +116,41 @@ def validate_v4(model):
         workload={'network_metadata_projection': workload['network_metadata_projection']})
     validate_v3(v3)
     return model
+
+
+def core_workload(value=None):
+    fields = {'portal_evidence_queue_depth', 'visit_writer_foreground_waiters',
+        'visit_writer_background_waiters'}
+    if value is None:return dict.fromkeys(fields)
+    if type(value) is not dict or set(value) != fields:raise ValueError()
+    if any(item is not None and (type(item) is not int or not 0 <= item <= 2**53-1)
+            for item in value.values()):raise ValueError()
+    if (value['visit_writer_foreground_waiters'] is None) != (value['visit_writer_background_waiters'] is None):
+        raise ValueError()
+    return dict(value)
+
+
+def validate_v5(model):
+    """Closed additions projected through the complete, unchanged V4 contract."""
+    from .operations_service import OperationsError
+    from app.operations_app_health import phase2_workload
+    from app.operations_health import NI04_UNIT, CLASSIFICATION_UNIT, TRAFFIC_UNIT
+    if type(model) is not dict or model.get('api_version') != 'admin.operations.db-services.v5':
+        raise OperationsError()
+    workload = model.get('workload')
+    if type(workload) is not dict or set(workload) != {'network_metadata_projection',
+            'fingerprint_sensor', 'network_service_recognition', 'fingerprint_classification',
+            'portal_core', 'traffic_projection'}:raise OperationsError()
+    try:
+        for key, unit in (('network_service_recognition',NI04_UNIT),
+                ('fingerprint_classification',CLASSIFICATION_UNIT),('traffic_projection',TRAFFIC_UNIT)):
+            if type(workload[key]) is not dict:raise ValueError()
+            phase2_workload(unit,workload[key])
+        if type(workload['portal_core']) is not dict:raise ValueError()
+        core_workload(workload['portal_core'])
+    except (ValueError, TypeError, KeyError):raise OperationsError() from None
+    validate_v4(dict(model,api_version='admin.operations.db-services.v4',workload={
+        'network_metadata_projection':workload['network_metadata_projection'],
+        'fingerprint_sensor':workload['fingerprint_sensor'],
+        'network_service_recognition':{'feed_backlog_entries':None}}))
+    return model

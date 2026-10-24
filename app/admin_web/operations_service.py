@@ -30,6 +30,7 @@ API_VERSION = "admin.operations.db-services.v1"
 API_VERSION_V2 = "admin.operations.db-services.v2"
 API_VERSION_V3 = "admin.operations.db-services.v3"
 API_VERSION_V4 = "admin.operations.db-services.v4"
+API_VERSION_V5 = "admin.operations.db-services.v5"
 RESAMPLE_SECONDS = 30.0
 STALE_SECONDS = 90.0
 FIRST_WAIT_SECONDS = 0.250
@@ -334,8 +335,13 @@ class AdminOperationsReadService:
             health = validate_local(value['health'], CORE_UNIT)
             observed = value['observed_at']; age = (now-observed).total_seconds()
             if not 0 <= age <= TTL:raise ValueError()
-            return self._local_record(health, 'portal_in_process', observed, now,
+            record = self._local_record(health, 'portal_in_process', observed, now,
                 boot_ns()+int((TTL-age)*1e9))
+            from .operations_schema import core_workload
+            try:record['workload'] = core_workload(value.get('workload'))
+            except (ValueError,TypeError,KeyError):pass
+            record['key'] = (service['main_pid'],service['started_at_utc'])
+            return record
         except Exception:return dict(evidence=unknown_evidence(), expires=None)
 
     def close(self):
@@ -344,7 +350,7 @@ class AdminOperationsReadService:
             self._condition.notify_all()
 
     def read(self, request_id, *, version=1):
-        if version not in (1, 2, 3, 4):
+        if version not in (1, 2, 3, 4, 5):
             raise OperationsError()
         with self._condition:
             now = self._monotonic()
@@ -391,7 +397,7 @@ class AdminOperationsReadService:
             sample_status="stale" if stale else "fresh")
         result["summary"] = summarize(result["services"], result["databases"])
         result["topology"] = topology_snapshot()
-        if version in (2, 3, 4):
+        if version in (2, 3, 4, 5):
             result["api_version"] = API_VERSION_V2
             for row in result["services"]:
                 record = health_records.get(row["id"])
@@ -423,7 +429,7 @@ class AdminOperationsReadService:
                 unknown_or_stale=sum(r["operational_state"] in {"unknown", "stale"}
                     or r["application_health"] in {"unknown", "stale"} for r in result["services"])
                     + result["summary"]["databases"]["unknown_or_stale"])
-        if version in (3, 4):
+        if version in (3, 4, 5):
             result["api_version"] = API_VERSION_V3
             record = health_records.get("network_metadata_projection") or {}
             count = record.get("pending_count")
@@ -432,7 +438,7 @@ class AdminOperationsReadService:
                     type(count) is not int or not 0 <= count <= 2**53-1):
                 count = None
             result["workload"] = {"network_metadata_projection": {"pending_attribution_count": count}}
-        if version == 4:
+        if version in (4, 5):
             from app.device_fingerprint_sensor.operations_metadata import sensor_workload
             from app.operations_app_health import ni04_workload
             result['api_version'] = API_VERSION_V4
@@ -449,6 +455,26 @@ class AdminOperationsReadService:
                 try:workload = project(record.get('workload') if current else None)
                 except (ValueError, TypeError, KeyError):workload = project()
                 result['workload'][key] = workload
+        if version == 5:
+            from app.operations_app_health import phase2_workload
+            from app.operations_health import NI04_UNIT, CLASSIFICATION_UNIT, TRAFFIC_UNIT
+            from .operations_schema import core_workload
+            result['api_version'] = API_VERSION_V5
+            # No source-fresh global Classification count across both writers.
+            # Native V1 health is valid independently of these unknown values.
+            result['workload']['fingerprint_classification'] = phase2_workload(CLASSIFICATION_UNIT)
+            for key, validator in (
+                    ('network_service_recognition',lambda value=None:phase2_workload(NI04_UNIT,value)),
+                    ('traffic_projection',lambda value=None:phase2_workload(TRAFFIC_UNIT,value)),
+                    ('portal_core',core_workload)):
+                record = health_records.get(key) or {}
+                row = next(item for item in result['services'] if item['id']==key)
+                expiry = record.get('expires')
+                current = (not stale and type(expiry) is int and boot_ns() <= expiry
+                    and record.get('key')==(row['main_pid'],row['started_at_utc'])
+                    and row['operational_state']=='running')
+                try:result['workload'][key] = validator(record.get('workload') if current else None)
+                except (ValueError,TypeError,KeyError):result['workload'][key] = validator()
         if len(json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_LIMIT:
             raise OperationsError()
         return result

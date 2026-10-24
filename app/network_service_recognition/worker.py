@@ -30,7 +30,11 @@ class ServiceMaterializationWorker:
         self._failures=0
         from app.operations_app_health import HealthPublisher
         from app.operations_health import NI04_UNIT
-        self._app_health=HealthPublisher(NI04_UNIT,monotonic=monotonic)
+        self._app_health=HealthPublisher(NI04_UNIT,monotonic=monotonic,workload_provider=self._operations_workload)
+
+    def _operations_workload(self):
+        return dict(feed_backlog_entries=None,visit_outbox_unacked=(
+            None if self._stop.is_set() else self.repository.visit_outbox_workload()))
 
     def _publish_app_health(self, *, state=None):
         from app.operations_health import NI04_UNIT,owner_health
