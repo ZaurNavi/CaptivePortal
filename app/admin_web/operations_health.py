@@ -40,6 +40,15 @@ class SensorHealthEvidence:
                             current['workload'] = sensor_workload(report.get('workload'))
                         except (ValueError, TypeError, KeyError):
                             pass
+                from app.operations_health import NI04_UNIT, TRAFFIC_UNIT
+                if self.unit in {NI04_UNIT,TRAFFIC_UNIT}:
+                    from app.operations_app_health import phase2_workload
+                    from app.device_fingerprint_sensor.operations_metadata import parse_stamp
+                    if (parse_stamp(report['observed_at']) >= parse_stamp(service['started_at_utc'])
+                            and type(report['age']) in {int,float} and 0 <= report['age'] <= TTL
+                            and type(report['expires_boottime_ns']) is int):
+                        try:current['workload'] = phase2_workload(self.unit,report.get('workload'))
+                        except (ValueError,TypeError,KeyError):pass
                 self.last = copy.deepcopy(current)
             except Exception:
                 current = None

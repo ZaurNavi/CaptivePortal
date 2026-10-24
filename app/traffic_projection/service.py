@@ -94,6 +94,25 @@ class TrafficProjectionService:
         self._last_cleanup = 0.0
         self._target_site_index = 0
         self._health_observer = None
+        self._incremental_workload = None
+        self._workload_sweep = None
+        self._workload_epoch = 0
+        self._workload_owner = None
+
+    def invalidate_operations_workload(self):
+        self._workload_epoch += 1
+        self._workload_sweep = None
+
+    def operations_workload(self):
+        """Whole active-site sweep proof from routine work, never a DB probe."""
+        sample = self._workload_sweep
+        count = None
+        if sample is not None and not self._stop.is_set():
+            service, version, sites, source, pid, tick, value = sample
+            if (pid == os.getpid() and service.projection_version == version
+                    and tuple(service.config.site_ids) == sites and service.source is source
+                    and 0 <= self._monotonic()-tick <= 180):count = value
+        return dict(incremental_backlog_present=count)
 
     def initialize(self) -> None:
         self.repository.initialize()
@@ -177,6 +196,7 @@ class TrafficProjectionService:
         work_deadline_monotonic: float | None = None,
     ) -> ProjectionRunResult:
         """Discover append-only head progress using the non-authoritative checkpoint."""
+        self._incremental_workload = None
         now = self._clock()
         state = self.repository.site_state(site_id) or {}
         if state.get("status") == "diverged":
@@ -231,6 +251,8 @@ class TrafficProjectionService:
             ),
             **checkpoint_fields,
         )
+        if state.get('status') == 'healthy' and not _invalidated:
+            self._incremental_workload = (site_id, int(budget_exhausted or len(rows) == max(1,min(int(limit),100))))
         return ProjectionRunResult(
             site_id, examined, projected, replayed, corrected, 0, 0, False
         )
@@ -757,8 +779,13 @@ class TrafficProjectionService:
     ) -> tuple[ProjectionRunResult, ...]:
         """Run active maintenance or one bounded target Site quantum."""
         version_results: list[ProjectionRunResult] = []
+        if not is_target:
+            self._workload_owner = service
+            self.invalidate_operations_workload()
+        workload_epoch = self._workload_epoch
         service.initialize()
         site_ids = service.config.site_ids
+        observed_workload = {}
         if is_target and site_ids:
             site_ids = (site_ids[self._target_site_index % len(site_ids)],)
             self._target_site_index = (
@@ -791,6 +818,9 @@ class TrafficProjectionService:
                     work_deadline_monotonic=target_deadline,
                 )
                 reconciliation_due = service._reconciliation_due(site_id)
+                if not is_target and not reconciliation_due:
+                    sample = getattr(service,'_incremental_workload',None)
+                    if sample is not None and sample[0] == site_id:observed_workload[site_id] = sample[1]
                 if (
                     reconciliation_due
                     and (
@@ -863,6 +893,11 @@ class TrafficProjectionService:
                         )
                     except Exception:
                         pass
+        if (not is_target and site_ids and not self._stop.is_set() and workload_epoch == self._workload_epoch
+                and tuple(service.config.site_ids) == tuple(site_ids)
+                and set(observed_workload) == set(site_ids)):
+            self._workload_sweep = (service, service.projection_version, tuple(site_ids), service.source,
+                os.getpid(), self._monotonic(), int(any(observed_workload.values())))
         return tuple(version_results)
 
     def _worker_services_by_role(
@@ -881,6 +916,9 @@ class TrafficProjectionService:
             service for service in services
             if service.projection_version != active_version
         )
+        if (len(active) != 1 or self._workload_sweep is not None
+                and self._workload_sweep[0] is not active[0]):
+            self.invalidate_operations_workload()
         return active, targets
 
     def _target_window(
@@ -993,6 +1031,7 @@ class TrafficProjectionService:
             )
 
     def stop(self) -> None:
+        self.invalidate_operations_workload()
         self._stop.set()
         if self._health_observer is not None:
             self._health_observer.request_stop()

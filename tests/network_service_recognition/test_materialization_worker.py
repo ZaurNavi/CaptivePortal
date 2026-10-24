@@ -99,8 +99,8 @@ def test_phase1_no_epoch_proof_always_publishes_null_without_probe(lane, tmp_pat
         boottime=lambda:100_000_000_000, identity=lambda pid, uid:dict(report()['producer'], pid=pid))
     lane.worker._publish_app_health()
     payload = h.decode((tmp_path/h.REPORT).read_bytes(), NI04_UNIT)
-    assert payload['schema_version'] == h.SCHEMA_V2
-    assert payload['workload'] == {'feed_backlog_entries': None}
+    assert payload['schema_version'] == h.SCHEMA_V3
+    assert payload['workload'] == {'feed_backlog_entries': None, 'visit_outbox_unacked':None}
     assert payload['application_health'] == owner_health(NI04_UNIT, state)
     assert statements == []
     lane.projection.recognition_feed_bounds.assert_not_called()

@@ -107,7 +107,14 @@
         `Oldest pending: ${age===null ? "Unknown" : age+"s"}`];
     }
     // Phase 1-B numeric acceptance is HOLD until NI02 source epoch is bound.
-    return id==="network_service_recognition" ? ["Feed backlog: Unknown"] : [];
+    if(id==="network_service_recognition") return ["Feed backlog: Unknown",`Visit outbox unacked: ${show(count(metrics?.visit_outbox_unacked))}`];
+    if(id==="fingerprint_classification") return [`Integration pending: ${show(count(metrics?.integration_jobs_pending))}`,
+      `Integration leased: ${show(count(metrics?.integration_jobs_leased))}`];
+    if(id==="portal_core") return [`Evidence queue: ${show(count(metrics?.portal_evidence_queue_depth))}`,
+      `Visit foreground waiters: ${show(count(metrics?.visit_writer_foreground_waiters))}`,
+      `Visit background waiters: ${show(count(metrics?.visit_writer_background_waiters))}`];
+    if(id==="traffic_projection") return [`Incremental backlog: ${show(count(metrics?.incremental_backlog_present))}`];
+    return [];
   }
   function details(entries) {
     const node = element("details", null, "ops-details");
@@ -323,7 +330,7 @@
   }
   function render(model) {
     root.dataset.outdated = model.sample_status === "stale" ? "true" : "false";
-    const summary = model.summary, v2 = ["admin.operations.db-services.v2","admin.operations.db-services.v3","admin.operations.db-services.v4"].includes(model.api_version);
+    const summary = model.summary, v2 = ["admin.operations.db-services.v2","admin.operations.db-services.v3","admin.operations.db-services.v4","admin.operations.db-services.v5"].includes(model.api_version);
     // V1 already provides each app-health state. Keep these axes separate from
     // backend process/store status counts; never add overlapping unknowns.
     const health = {healthy:0, degraded:0, unavailable:0, unknown:0, stale:0};
@@ -405,7 +412,8 @@
     updated.textContent = Number.isFinite(age) ? `Updated ${age} sec ago` : "Sample time unavailable";
   }
   let timer = null, inFlight = false, controller = null, disposed = false, last = null;
-  let apiVersion = root.dataset.apiV4 === "/admin/api/v4/operations/db-services" ? 4 :
+  let apiVersion = root.dataset.apiV5 === "/admin/api/v5/operations/db-services" ? 5 :
+    root.dataset.apiV4 === "/admin/api/v4/operations/db-services" ? 4 :
     root.dataset.apiV3 === "/admin/api/v3/operations/db-services" ? 3 :
     root.dataset.apiV2 === "/admin/api/v2/operations/db-services" ? 2 : 1;
   const checkScopes = {schema_version:"schema version",schema_signature:"schema structure",quick_check:"SQLite quick_check",
@@ -525,6 +533,24 @@
     timer = null;
     if (!disposed && !document.hidden) timer = setTimeout(load, 15000);
   }
+  function validV5(model) {
+    const keys=(value,expected)=>value && typeof value==="object" && !Array.isArray(value) && Object.keys(value).sort().join(",")===expected;
+    const bounded=value=>value===null || Number.isSafeInteger(value) && value>=0;
+    const w=model.workload;
+    if(!keys(w,"fingerprint_classification,fingerprint_sensor,network_metadata_projection,network_service_recognition,portal_core,traffic_projection") ||
+      !keys(w.network_service_recognition,"feed_backlog_entries,visit_outbox_unacked") || w.network_service_recognition.feed_backlog_entries!==null ||
+      !bounded(w.network_service_recognition.visit_outbox_unacked) ||
+      !keys(w.fingerprint_classification,"integration_jobs_leased,integration_jobs_pending") ||
+      !Object.values(w.fingerprint_classification).every(bounded) ||
+      (w.fingerprint_classification.integration_jobs_pending===null)!==(w.fingerprint_classification.integration_jobs_leased===null) ||
+      !keys(w.portal_core,"portal_evidence_queue_depth,visit_writer_background_waiters,visit_writer_foreground_waiters") ||
+      !Object.values(w.portal_core).every(bounded) ||
+      (w.portal_core.visit_writer_foreground_waiters===null)!==(w.portal_core.visit_writer_background_waiters===null) ||
+      !keys(w.traffic_projection,"incremental_backlog_present") || ![null,0,1].includes(w.traffic_projection.incremental_backlog_present)) return false;
+    return validV4({...model,api_version:"admin.operations.db-services.v4",workload:{
+      network_metadata_projection:w.network_metadata_projection,fingerprint_sensor:w.fingerprint_sensor,
+      network_service_recognition:{feed_backlog_entries:null}}});
+  }
   async function fetchSnapshot(url) {
     return await fetch(url, {credentials: "same-origin", cache: "no-store", signal: controller.signal});
   }
@@ -534,7 +560,7 @@
     refresh.disabled = true;
     controller = new AbortController();
     try {
-      const url=()=>apiVersion===4 ? root.dataset.apiV4 : apiVersion===3 ? root.dataset.apiV3 : apiVersion===2 ? root.dataset.apiV2 : root.dataset.apiBase;
+      const url=()=>apiVersion===5 ? root.dataset.apiV5 : apiVersion===4 ? root.dataset.apiV4 : apiVersion===3 ? root.dataset.apiV3 : apiVersion===2 ? root.dataset.apiV2 : root.dataset.apiBase;
       let response = await fetchSnapshot(url());
       while (apiVersion>1 && response.status === 404) {
         // Sticky negotiation ONLY on unsupported version. Never hide faults.
@@ -552,7 +578,7 @@
       if (model.api_version !== `admin.operations.db-services.v${apiVersion}` || model.scope !== "global" || !model.summary ||
           !Array.isArray(model.services) || model.services.length !== 9 || !Array.isArray(model.databases) || model.databases.length !== 17 ||
           !Array.isArray(model.partial_failures) || model.partial_failures.length > 32 || !validTopology(model) ||
-          (apiVersion===4 ? !validV4(model) : apiVersion===3 ? !validV3(model) : apiVersion===2 && !validV2(model))) throw new Error("invalid_snapshot");
+          (apiVersion===5 ? !validV5(model) : apiVersion===4 ? !validV4(model) : apiVersion===3 ? !validV3(model) : apiVersion===2 && !validV2(model))) throw new Error("invalid_snapshot");
       render(model);
       last = model;
     } catch (_error) {
@@ -564,6 +590,13 @@
       if (last && (title.textContent === "Unavailable" || title.textContent === "Collecting operational snapshot…")) {
         const age = Math.max(0, Math.floor((Date.now() - Date.parse(last.sampling_completed_at_utc)) / 1000));
         const failedTitle=title.textContent;
+        if(last.api_version==="admin.operations.db-services.v5") render({...last,workload:{
+          network_metadata_projection:{pending_attribution_count:null},
+          fingerprint_sensor:{spool_pending_rows:null,spool_bytes:null,oldest_spool_age_seconds:null},
+          network_service_recognition:{feed_backlog_entries:null,visit_outbox_unacked:null},
+          fingerprint_classification:{integration_jobs_pending:null,integration_jobs_leased:null},
+          portal_core:{portal_evidence_queue_depth:null,visit_writer_foreground_waiters:null,visit_writer_background_waiters:null},
+          traffic_projection:{incremental_backlog_present:null}}});
         if(last.api_version==="admin.operations.db-services.v4") render({...last,workload:{
           network_metadata_projection:last.workload.network_metadata_projection,
           fingerprint_sensor:{spool_pending_rows:null,spool_bytes:null,oldest_spool_age_seconds:null},

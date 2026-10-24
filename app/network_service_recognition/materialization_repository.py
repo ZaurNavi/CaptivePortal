@@ -1,5 +1,6 @@
 """Single NI-04 writer: checked immutable facts and atomic consumer progress."""
 import os
+import time
 from app.operations_verification import startup_check, checked
 import sqlite3
 import uuid
@@ -141,6 +142,15 @@ class ServiceMaterializationRepository:
         # No history publication/pruning until both applications are explicitly
         # configured for Visit history. Parent Visit owns lifetime; no age TTL.
         self.visit_delivery_db_path=visit_delivery_db_path
+        self._visit_workload=None
+
+    def visit_outbox_workload(self):
+        """Only the last committed retention proof; no source or SQLite read."""
+        sample=self._visit_workload
+        if (sample is None or self.connection is None or sample[0]!=os.getpid()
+                or sample[1]!=(self.db_path,self.visit_delivery_db_path)
+                or not 0<=time.monotonic()-sample[2]<=180):return None
+        return sample[3][2]
 
     def footprint(self):
         try:
@@ -152,6 +162,7 @@ class ServiceMaterializationRepository:
     @startup_check('network_service_intelligence',lambda self:self.db_path,
         ('schema_version','schema_signature','quick_check','foreign_key_check'))
     def initialize(self):
+        self._visit_workload=None
         try:
             self._writer_fd=os.open(self.db_path+".writer.lock",os.O_CREAT|os.O_RDWR,0o640)
             if os.name=="nt":
@@ -187,6 +198,7 @@ class ServiceMaterializationRepository:
             raise
 
     def close(self):
+        self._visit_workload=None
         if self.connection is not None:
             self.connection.close()
             self.connection=None
@@ -210,6 +222,7 @@ class ServiceMaterializationRepository:
             self.connection.execute("COMMIT")
             self.crash_point("after_commit")
         except BaseException:
+            self._visit_workload=None
             if self.connection.in_transaction:
                 self.connection.execute("ROLLBACK")
             raise
@@ -224,6 +237,7 @@ class ServiceMaterializationRepository:
             raise MaterializationCapacity()
 
     def retain(self):
+        self._visit_workload=None
         at=self.clock()
         cutoff=ni_format_utc(at-timedelta(days=1))
         grace=ni_format_utc(at-timedelta(days=1))
@@ -231,7 +245,7 @@ class ServiceMaterializationRepository:
         acknowledgement=self._visit_acknowledgement()
         # Every pass is bounded; no VACUUM or deletion of current positives.
         with self.transaction(retention=True):
-            self._prune_visit_delivery(acknowledgement)
+            workload=self._prune_visit_delivery(acknowledgement)
             self.connection.execute("DELETE FROM device_service_rollups WHERE rowid IN (SELECT rowid FROM device_service_rollups WHERE last_observed_at<? ORDER BY last_observed_at LIMIT 256)",(cutoff,))
             self.connection.execute("DELETE FROM service_recognition_observations WHERE rowid IN (SELECT o.rowid FROM service_recognition_observations o WHERE observed_at<? AND NOT EXISTS (SELECT 1 FROM device_service_rollups r WHERE r.generation_id=o.generation_id AND r.last_service_observation_id=o.service_observation_id) ORDER BY observed_at LIMIT 256)",(cutoff,))
             latest=self.connection.execute("SELECT generation_id FROM service_materialization_generations WHERE state='superseded' ORDER BY superseded_at_utc DESC,generation_id LIMIT 1").fetchone()
@@ -246,6 +260,9 @@ class ServiceMaterializationRepository:
                 if not any(self.connection.execute(f"SELECT 1 FROM {table} WHERE generation_id=? LIMIT 1",(gen,)).fetchone() for table in ("device_service_rollups","service_recognition_observations","device_materialization_state","service_binding_replay_jobs")):
                     self.connection.execute("DELETE FROM service_materialization_generations WHERE generation_id=?",(gen,))
             self.connection.execute("DELETE FROM service_binding_replay_jobs WHERE rowid IN (SELECT rowid FROM service_binding_replay_jobs WHERE state IN ('complete','terminal') AND to_utc<? LIMIT 128)",(grace,))
+        # A crash hook may raise even after COMMIT. Never publish that attempt.
+        if workload is not None:
+            self._visit_workload=(os.getpid(),(self.db_path,self.visit_delivery_db_path),time.monotonic(),workload)
 
     def append_visit_delivery(self, kind, at, **fields):
         if self.visit_delivery_db_path is None:return False
@@ -291,12 +308,16 @@ class ServiceMaterializationRepository:
             expected=anchor['floor_hash'] if seq==anchor['floor_seq'] else self.connection.execute('SELECT entry_hash FROM ni04_visit_delivery_outbox WHERE outbox_seq=?',(seq,)).fetchone()
             expected=expected if isinstance(expected,str) else expected[0] if expected else None
             if expected!=ack['last_outbox_hash']:return
+            workload=((anchor['stream_id'],ack['consumer_id'],anchor['head_seq']-seq)
+                if type(seq) is int and type(anchor['head_seq']) is int
+                and 0<=seq<=anchor['head_seq']<=2**53-1 else None)
             rows=self.connection.execute('SELECT outbox_seq,entry_hash FROM ni04_visit_delivery_outbox WHERE outbox_seq>0 AND outbox_seq<=? ORDER BY outbox_seq LIMIT 256',(seq,)).fetchall()
-            if not rows:return
+            if not rows:return workload
             end,hashed=rows[-1]
             self.connection.execute('DELETE FROM ni04_visit_delivery_outbox WHERE outbox_seq>0 AND outbox_seq<=?',(end,))
             self.connection.execute('UPDATE ni04_visit_delivery_outbox SET floor_seq=?,floor_hash=?,consumer_id=? WHERE outbox_seq=0',(end,hashed,ack['consumer_id']))
             self.crash_point('visit_delivery_pruned')
+            return workload
         except (ValueError,KeyError,TypeError,NetworkMetadataValidationError):
             return
 
