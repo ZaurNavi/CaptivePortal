@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
-from app.operations_verification import startup_check
+from app.operations_verification import startup_check, snapshot as startup_snapshot, PORTAL, opaque_identity
 import sqlite3
+import stat
+import threading
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,7 +14,6 @@ from typing import Any, Iterable
 from .registry_config import (
     ensure_registry_parent,
     registry_database_exists,
-    validate_registry_database_target,
 )
 from .registry_models import (
     ApplyOutcome,
@@ -20,6 +21,7 @@ from .registry_models import (
     DecisionKind,
     ReaderState,
     RegistryConfig,
+    RegistryConfigError,
     RegistryEventDecision,
     RegistrySchemaError,
     RegistrySnapshot,
@@ -30,6 +32,7 @@ from .registry_models import (
 
 SCHEMA_VERSION = 1
 BUSY_TIMEOUT_MS = 250
+_MAX_REGISTERED_DEVICES = 2**53 - 1
 _REGISTRY_STATES = frozenset({
     "disabled",
     "initializing",
@@ -281,10 +284,100 @@ class VisitorRegistryRepository:
         self.config = config
         self.db_path = Path(config.db_path)
         self.busy_timeout_ms = max(1, int(busy_timeout_ms))
+        # Disposable same-owner projection; SQLite remains the sole authority.
+        self._inventory_lock = threading.Lock()
+        self._inventory_pid = os.getpid()
+        self._inventory_generation = 0
+        self._inventory_count = None
+        self._inventory_binding = None
+        self._inventory_observed_store = None
+
+    def _invalidate_inventory_locked(self) -> None:
+        self._inventory_count = None
+        self._inventory_binding = None
+        self._inventory_generation += 1
+
+    def invalidate_registered_devices_snapshot(self) -> None:
+        if os.getpid() != self._inventory_pid:
+            return  # An inherited lock might belong to a vanished parent thread.
+        with self._inventory_lock:
+            self._invalidate_inventory_locked()
+
+    def _inventory_current_binding(self):
+        # Existing startup evidence is memory-only (never refresh/stat here).
+        proof = startup_snapshot(PORTAL, paths={'visitor_registry': self.db_path})
+        row = proof['checks'].get('visitor_registry')
+        if (not self.config.enabled or str(self.db_path) != self.config.db_path
+                or row is None or row['status'] != 'passed'
+                or row['scope'] != ['schema_version', 'schema_signature', 'quick_check']
+                or row['checked_store_id'] is None
+                or row['checked_store_id'] != row['observed_store_id']
+                or row['checked_store_id'] != self._inventory_observed_store):
+            return None
+        return (self._inventory_pid, str(self.db_path), proof['instance'],
+                row['checked_store_id'], row['checked_at_utc'])
+
+    def registered_devices_snapshot(self) -> int | None:
+        """Bounded in-process value, with no SQL, filesystem read or recount.
+
+        Store evidence is that already observed by native opens/startup. Future
+        Admin composition must additionally apply its existing current store
+        fingerprint/freshness boundary; this does not probe external writers.
+        """
+        if os.getpid() != self._inventory_pid:
+            return None
+        with self._inventory_lock:
+            if self._inventory_count is None:
+                return None
+            try:
+                current = self._inventory_current_binding()
+            except Exception:
+                current = None
+            if (current is None or current != self._inventory_binding
+                    or type(self._inventory_count) is not int
+                    or not 0 <= self._inventory_count <= _MAX_REGISTERED_DEVICES):
+                self._invalidate_inventory_locked()
+                return None
+            return self._inventory_count
+
+    @contextmanager
+    def _source_connection(self):
+        try:
+            with closing(self._connect()) as connection:
+                yield connection
+        except BaseException:
+            # Includes an ambiguous COMMIT (durable rows, lost success response).
+            self.invalidate_registered_devices_snapshot()
+            raise
+
+    def _commit_source_line(self, connection, *, device_created=False) -> None:
+        if os.getpid() != self._inventory_pid:
+            raise RegistrySchemaError('Visitor Registry owner process changed')
+        with self._inventory_lock:
+            try:
+                connection.commit()
+                try:
+                    binding = self._inventory_current_binding()
+                except Exception:
+                    binding = None
+                if (binding is None or binding != self._inventory_binding
+                        or type(self._inventory_count) is not int
+                        or not 0 <= self._inventory_count <= _MAX_REGISTERED_DEVICES):
+                    self._invalidate_inventory_locked()
+                elif device_created is True:
+                    self._inventory_generation += 1
+                    if self._inventory_count == _MAX_REGISTERED_DEVICES:
+                        self._invalidate_inventory_locked()
+                    else:
+                        self._inventory_count += 1
+            except BaseException:
+                self._invalidate_inventory_locked()
+                raise
 
     @startup_check('visitor_registry',lambda self:self.db_path,
         ('schema_version','schema_signature','quick_check'),failures=(RegistrySchemaError,))
     def initialize(self, now_utc: str) -> bool:
+        self.invalidate_registered_devices_snapshot()
         ensure_registry_parent(self.config)
         existed = registry_database_exists(self.db_path)
         migrated = False
@@ -334,6 +427,22 @@ class VisitorRegistryRepository:
 
     def run_full_audit(self) -> None:
         """Run expensive integrity and aggregate checks off the HTTP path."""
+        self.invalidate_registered_devices_snapshot()
+        generation = self._inventory_generation
+        try:
+            count = self._run_full_audit()
+        except BaseException:
+            self.invalidate_registered_devices_snapshot()
+            raise
+        if os.getpid() == self._inventory_pid:
+            with self._inventory_lock:
+                binding = self._inventory_current_binding()
+                if (generation == self._inventory_generation and binding is not None
+                        and type(count) is int and 0 <= count <= _MAX_REGISTERED_DEVICES):
+                    self._inventory_binding = binding
+                    self._inventory_count = count
+
+    def _run_full_audit(self) -> int:
         with closing(self._connect(readonly=True)) as connection:
             integrity = connection.execute(
                 "PRAGMA integrity_check"
@@ -342,13 +451,14 @@ class VisitorRegistryRepository:
                 raise RegistrySchemaError(
                     "Visitor Registry integrity check failed"
                 )
-            self._validate_schema(
+            return self._validate_schema(
                 connection,
                 audit_snapshot_counts=True,
             )
 
     def validate_runtime_health(self) -> None:
         """Reopen and validate the database after an ambiguous I/O error."""
+        self.invalidate_registered_devices_snapshot()
         with closing(self._connect(readonly=True)) as connection:
             version = int(
                 connection.execute("PRAGMA user_version").fetchone()[0]
@@ -656,7 +766,7 @@ class VisitorRegistryRepository:
         connection: sqlite3.Connection,
         *,
         audit_snapshot_counts: bool = False,
-    ) -> None:
+    ) -> int | None:
         tables = self._table_names(connection)
         if not _REGISTRY_TABLES.issubset(tables):
             raise RegistrySchemaError(
@@ -824,27 +934,32 @@ class VisitorRegistryRepository:
                 raise RegistrySchemaError(
                     "Visitor Registry foreign-key validation failed"
                 )
-            self._validate_snapshot_counts(connection)
+            return self._validate_snapshot_counts(connection)
 
     def _validate_snapshot_counts(
         self,
         connection: sqlite3.Connection,
-    ) -> None:
-        mismatch = connection.execute(
+    ) -> int:
+        aggregate = connection.execute(
             """
-            SELECT d.device_id
-            FROM visitor_devices AS d
-            LEFT JOIN device_snapshots AS s
-              ON s.device_id = d.device_id
-            GROUP BY d.device_id
-            HAVING d.snapshot_count != COUNT(s.snapshot_id)
-            LIMIT 1
+            SELECT COUNT(*), COALESCE(MAX(mismatch), 0)
+            FROM (
+                SELECT d.device_id,
+                       d.snapshot_count != COUNT(s.snapshot_id) AS mismatch
+                FROM visitor_devices AS d
+                LEFT JOIN device_snapshots AS s
+                  ON s.device_id = d.device_id
+                GROUP BY d.device_id
+            )
             """
         ).fetchone()
-        if mismatch is not None:
+        if aggregate is None or aggregate[1] != 0:
             raise RegistrySchemaError(
                 "Visitor Registry snapshot_count invariant failed"
             )
+        if type(aggregate[0]) is not int or not 0 <= aggregate[0] <= _MAX_REGISTERED_DEVICES:
+            raise RegistrySchemaError('Visitor Registry device count is invalid')
+        return aggregate[0]
 
     @staticmethod
     def _table_names(connection: sqlite3.Connection) -> set[str]:
@@ -865,7 +980,7 @@ class VisitorRegistryRepository:
         decision: RegistryEventDecision,
     ) -> ApplyResult:
         """Atomically apply one complete source line and its reader offset."""
-        with closing(self._connect()) as connection:
+        with self._source_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if decision.kind is DecisionKind.ADVANCE:
                 self._upsert_reader_state(
@@ -874,7 +989,7 @@ class VisitorRegistryRepository:
                     retired_completed=False,
                     missing_warning_emitted=False,
                 )
-                connection.commit()
+                self._commit_source_line(connection)
                 return ApplyResult(ApplyOutcome.ADVANCED)
 
             if not decision.snapshot_id or not decision.event_sha256:
@@ -902,7 +1017,7 @@ class VisitorRegistryRepository:
                     retired_completed=False,
                     missing_warning_emitted=False,
                 )
-                connection.commit()
+                self._commit_source_line(connection)
                 return ApplyResult(
                     outcome,
                     snapshot_id=decision.snapshot_id,
@@ -926,7 +1041,7 @@ class VisitorRegistryRepository:
                     retired_completed=False,
                     missing_warning_emitted=False,
                 )
-                connection.commit()
+                self._commit_source_line(connection)
                 return ApplyResult(
                     ApplyOutcome.SKIPPED,
                     snapshot_id=decision.snapshot_id,
@@ -965,7 +1080,7 @@ class VisitorRegistryRepository:
                 """,
                 (record.processing_now, record.processing_now),
             )
-            connection.commit()
+            self._commit_source_line(connection, device_created=device_created)
             return ApplyResult(
                 ApplyOutcome.STORED,
                 snapshot_id=snapshot.snapshot_id,
@@ -1391,6 +1506,8 @@ class VisitorRegistryRepository:
         reason: str | None,
         now_utc: str,
     ) -> bool:
+        if state in {'disabled', 'initializing', 'unavailable', 'stopping'}:
+            self.invalidate_registered_devices_snapshot()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             previous = connection.execute(
@@ -1466,6 +1583,7 @@ class VisitorRegistryRepository:
             self.config.db_path.strip()
         ) and registry_database_exists(self.db_path)
         if not database_exists:
+            self.invalidate_registered_devices_snapshot()
             return RegistryStatus(
                 configured_enabled=configured_enabled,
                 database_exists=False,
@@ -1496,7 +1614,10 @@ class VisitorRegistryRepository:
                 """
             ).fetchall()
         if row is None:
+            self.invalidate_registered_devices_snapshot()
             raise RegistrySchemaError("Registry state row is missing")
+        if version != SCHEMA_VERSION or row['state'] in {'disabled', 'unavailable', 'stopping'}:
+            self.invalidate_registered_devices_snapshot()
         return RegistryStatus(
             configured_enabled=configured_enabled,
             database_exists=True,
@@ -1686,7 +1807,26 @@ class VisitorRegistryRepository:
             connection.close()
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
-        validate_registry_database_target(self.db_path)
+        # Consume the SAME lstat formerly done by target validation, retaining
+        # its safety rules/errors while observing identity. No additional stat.
+        try:
+            info = os.lstat(self.db_path)
+        except FileNotFoundError:
+            info = None
+        except OSError as exc:
+            raise RegistryConfigError('VISITOR_REGISTRY_DB_PATH is not safely accessible') from exc
+        if info is not None:
+            if stat.S_ISLNK(info.st_mode):
+                raise RegistryConfigError('VISITOR_REGISTRY_DB_PATH must not be a symlink')
+            if not stat.S_ISREG(info.st_mode):
+                raise RegistryConfigError('Existing Visitor Registry DB must be a regular file')
+        observed = None if info is None else opaque_identity(info)
+        if os.getpid() == self._inventory_pid:
+            with self._inventory_lock:
+                if observed != self._inventory_observed_store:
+                    if self._inventory_observed_store is not None or self._inventory_binding is not None:
+                        self._invalidate_inventory_locked()
+                    self._inventory_observed_store = observed
         if readonly:
             uri = f"{self.db_path.resolve(strict=False).as_uri()}?mode=ro"
             connection = sqlite3.connect(
